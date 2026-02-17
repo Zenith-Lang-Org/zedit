@@ -185,20 +185,12 @@ impl UndoStack {
         self.saved_at = Some(self.undo.len());
     }
 
+    #[cfg(test)]
     pub fn is_at_saved(&self) -> bool {
         if !self.pending.is_empty() {
             return false;
         }
         self.saved_at == Some(self.undo.len())
-    }
-
-    pub fn clear(&mut self) {
-        self.undo.clear();
-        self.redo.clear();
-        self.pending.clear();
-        self.pending_cursor = None;
-        self.last_edit = None;
-        self.saved_at = Some(0);
     }
 }
 

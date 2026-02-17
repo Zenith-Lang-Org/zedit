@@ -132,8 +132,8 @@ impl Buffer {
             return Some(first as char);
         }
         let mut bytes = [first, 0, 0, 0];
-        for i in 1..char_len {
-            bytes[i] = self.byte_at(byte_pos + i)?; // indexing both bytes[] and byte_pos offset
+        for (i, slot) in bytes[1..char_len].iter_mut().enumerate() {
+            *slot = self.byte_at(byte_pos + 1 + i)?;
         }
         std::str::from_utf8(&bytes[..char_len])
             .ok()
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn test_file_roundtrip() {
         let dir = std::env::temp_dir();
-        let path = dir.join("zelux_test_buffer.txt");
+        let path = dir.join("zedit_test_buffer.txt");
         let content = "Hello\nWorld\nTest\n";
 
         // Write test file
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(buf.file_path(), Some(path.as_path()));
 
         // Save to different file
-        let path2 = dir.join("zelux_test_buffer2.txt");
+        let path2 = dir.join("zedit_test_buffer2.txt");
         let mut buf = buf;
         buf.save_to(&path2).unwrap();
         let buf2 = Buffer::from_file(&path2).unwrap();

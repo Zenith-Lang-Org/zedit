@@ -9,6 +9,7 @@ pub enum Key {
     Char(char),
     Enter,
     Tab,
+    BackTab,
     Backspace,
     Delete,
     Escape,
@@ -75,6 +76,7 @@ pub struct MouseEvent {
     pub col: u16,
     pub row: u16,
     pub pressed: bool,
+    pub motion: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,7 +84,6 @@ pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Paste(String),
-    Resize,
     None,
 }
 
@@ -237,6 +238,14 @@ fn decode_csi_final(final_byte: u8, params: &[u16]) -> Event {
         b'H' => key_with_mod(Key::Home, modifier(1)),
         b'F' => key_with_mod(Key::End, modifier(1)),
 
+        // BackTab: \x1b[Z
+        b'Z' => Event::Key(KeyEvent {
+            key: Key::BackTab,
+            ctrl: false,
+            alt: false,
+            shift: true,
+        }),
+
         // Tilde sequences: \x1b[N~ or \x1b[N;mod~
         b'~' if !params.is_empty() => {
             let mod_idx = if params.len() >= 2 { 1 } else { 99 };
@@ -290,7 +299,10 @@ fn key_with_mod(key: Key, (ctrl, alt, shift): (bool, bool, bool)) -> Event {
 // ---------------------------------------------------------------------------
 
 fn parse_sgr_mouse(btn_bits: u16, col: u16, row: u16, pressed: bool) -> Event {
-    let button = match btn_bits & 0x43 {
+    let is_motion = btn_bits & 32 != 0;
+    let base_bits = btn_bits & !32; // strip motion bit
+
+    let button = match base_bits & 0x43 {
         0 => MouseButton::Left,
         1 => MouseButton::Middle,
         2 => MouseButton::Right,
@@ -299,11 +311,15 @@ fn parse_sgr_mouse(btn_bits: u16, col: u16, row: u16, pressed: bool) -> Event {
         _ => return Event::None,
     };
 
+    // For motion events, always report as pressed (dragging)
+    let effective_pressed = if is_motion { true } else { pressed };
+
     Event::Mouse(MouseEvent {
         button,
         col: col.saturating_sub(1), // 1-based to 0-based
         row: row.saturating_sub(1),
-        pressed,
+        pressed: effective_pressed,
+        motion: is_motion,
     })
 }
 
@@ -476,6 +492,7 @@ mod tests {
                 col: 9,
                 row: 4,
                 pressed: true,
+                motion: false,
             })
         );
         assert_eq!(
@@ -485,6 +502,35 @@ mod tests {
                 col: 0,
                 row: 0,
                 pressed: true,
+                motion: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_sgr_mouse_motion() {
+        // Button 32 = motion with left button held
+        assert_eq!(
+            parse_sgr_mouse(32, 5, 3, true),
+            Event::Mouse(MouseEvent {
+                button: MouseButton::Left,
+                col: 4,
+                row: 2,
+                pressed: true,
+                motion: true,
+            })
+        );
+    }
+
+    #[test]
+    fn test_backtab() {
+        assert_eq!(
+            decode_csi_final(b'Z', &[]),
+            Event::Key(KeyEvent {
+                key: Key::BackTab,
+                ctrl: false,
+                alt: false,
+                shift: true,
             })
         );
     }

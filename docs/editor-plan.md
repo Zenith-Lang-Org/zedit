@@ -1,4 +1,4 @@
-# Zelux — Zhell Editor LEXury
+# Zedit — Zhell Editor LEXury
 
 A modern console text editor written in pure Rust.
 
@@ -6,7 +6,7 @@ A modern console text editor written in pure Rust.
 
 A lightweight, modern terminal text editor written in pure Rust with **zero external dependencies**. Uses raw terminal mode via libc FFI (proven in the Minilux REPL). Designed for users who expect modern keybindings (Ctrl+C/V/X) out of the box — no modes, no learning curve.
 
-Part of the **Z ecosystem**: Zenith, Zymbol, and now Zelux. Born from the Minilux REPL.
+Part of the **Z ecosystem**: Zenith, Zymbol, and now Zedit. Born from the Minilux REPL.
 
 ## Design Principles
 
@@ -63,8 +63,8 @@ grammars/              TextMate grammar files (.tmLanguage.json)
   minilux.tmLanguage.json       (custom, we create this)
 
 themes/                VS Code-compatible theme files (.json)
-  zelux-dark.json
-  zelux-light.json
+  zedit-dark.json
+  zedit-light.json
 ```
 
 ## Module Details
@@ -454,7 +454,7 @@ The `LineState` is carried between lines to track open multi-line regions (strin
 
 #### Grammar File Search Paths
 
-1. `~/.config/zelux/grammars/` — user-installed grammars (highest priority)
+1. `~/.config/zedit/grammars/` — user-installed grammars (highest priority)
 2. `./grammars/` — project-local grammars
 3. Built-in defaults embedded at compile time via `include_str!`
 
@@ -487,7 +487,7 @@ Themes map TextMate scope selectors to colors. VS Code-compatible format:
 
 ```json
 {
-  "name": "Zelux Dark",
+  "name": "Zedit Dark",
   "type": "dark",
   "colors": {
     "editor.background": "#1e1e2e",
@@ -599,8 +599,8 @@ Color fallback strategy for limited terminals:
 
 | Key              | Action          |
 | ---------------- | --------------- |
-| `Ctrl+Tab`       | Next buffer     |
-| `Ctrl+Shift+Tab` | Previous buffer |
+| `Ctrl+PgDn`      | Next buffer     |
+| `Ctrl+PgUp`      | Previous buffer |
 
 ## Terminal Compatibility
 
@@ -630,19 +630,19 @@ Feature detection strategy:
 | Open 1MB file                 | < 50ms  |
 | Open 50MB file                | < 500ms |
 | Memory for 1MB file           | < 5MB   |
-| Binary size                   | < 1MB   |
+| Binary size (code only)       | < 1MB   |
 
 ## Build & Distribution
 
 ```sh
 cargo build --release            # Single static binary
-strip target/release/zelux       # ~500KB
+strip target/release/zedit       # ~500KB
 ```
 
-Works standalone with embedded defaults. Optional config at `~/.config/zelux/`:
+Works standalone with embedded defaults. Optional config at `~/.config/zedit/`:
 
 ```text
-~/.config/zelux/
+~/.config/zedit/
   config.json           General settings (tab size, line numbers, etc.)
   theme.json            Active color theme (VS Code-compatible)
   grammars/             User grammars (override built-ins)
@@ -666,6 +666,10 @@ This is a substantial project. Realistic timeline for a working MVP:
 | Phase 7  | Polish, edge cases, terminal compat testing              | ~2 weeks  |
 | **Total MVP** |                                                     | **~15 weeks** |
 
+**Status**: All MVP phases (1–7) are complete. The editor is fully functional with syntax highlighting, multi-buffer support, undo/redo, search & replace, mouse support, and VS Code-compatible themes.
+
+**Note on binary size**: Grammars are currently embedded at compile time via `include_str!`, adding ~1.7MB. A future extension system will allow downloading and updating grammars separately, reducing the base binary size.
+
 Post-MVP phases (each ~2-4 weeks):
 
 | Phase    | Feature                                                  |
@@ -682,9 +686,9 @@ Post-MVP phases (each ~2-4 weeks):
 
 ## Community & Extensibility
 
-Zelux uses only standard, open formats:
+Zedit uses only standard, open formats:
 
-- **Syntax definitions**: TextMate `.tmLanguage.json` — thousands available from VS Code extensions, Sublime Text packages, and the syntect project. All open-source (MIT/Apache 2.0). Any grammar that works in VS Code works in Zelux.
+- **Syntax definitions**: TextMate `.tmLanguage.json` — thousands available from VS Code extensions, Sublime Text packages, and the syntect project. All open-source (MIT/Apache 2.0). Any grammar that works in VS Code works in Zedit.
 - **Themes**: VS Code-compatible `tokenColors` JSON — users can port any VS Code theme directly.
 - **Configuration**: JSON — universally understood, no custom parsers needed.
 
@@ -702,13 +706,14 @@ Contributing a new language = downloading a `.tmLanguage.json` file. No compilat
 
 ## Project Name
 
-**Zelux** — **Z**hell **E**ditor **L**EX**u**ry. Part of the Z ecosystem (Zenith, Zymbol). The "lux" suffix honors Minilux, where the idea was born.
+**ZEdit** — **Z**hell **S**tudio **C**code. Part of the Z ecosystem (Zenith, Zymbol).
 
 ```text
-          _
- ______  | | _   ___  __
-|_  /__ \| || | | \ \/ /
- / / __) | || |_| |>  <
-/___\___/|_| \__,_/_/\_\
+ ███████╗███████╗██████╗ ██╗████████╗
+ ╚══███╔╝██╔════╝██╔══██╗██║╚══██╔══╝
+   ███╔╝ █████╗  ██║  ██║██║   ██║
+  ███╔╝  ██╔══╝  ██║  ██║██║   ██║
+ ███████╗███████╗██████╔╝██║   ██║
+ ╚══════
   console editor
 ```

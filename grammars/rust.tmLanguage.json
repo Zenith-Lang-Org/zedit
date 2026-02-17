@@ -1,0 +1,351 @@
+{
+  "name": "Rust",
+  "scopeName": "source.rust",
+  "fileTypes": ["rs"],
+  "patterns": [
+    { "include": "#doc_comments" },
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#raw_strings" },
+    { "include": "#chars" },
+    { "include": "#byte_strings" },
+    { "include": "#attributes" },
+    { "include": "#lifetimes" },
+    { "include": "#numbers" },
+    { "include": "#keywords_control" },
+    { "include": "#keywords_declaration" },
+    { "include": "#keywords_storage" },
+    { "include": "#keywords_self" },
+    { "include": "#constants" },
+    { "include": "#primitive_types" },
+    { "include": "#std_types" },
+    { "include": "#std_traits" },
+    { "include": "#macros" },
+    { "include": "#function_def" },
+    { "include": "#function_call" },
+    { "include": "#type_name" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "doc_comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.rust",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.documentation.rust",
+          "match": "//!.*$"
+        },
+        {
+          "name": "comment.block.documentation.rust",
+          "begin": "/\\*\\*(?!/)",
+          "end": "\\*/",
+          "patterns": []
+        },
+        {
+          "name": "comment.block.documentation.rust",
+          "begin": "/\\*!",
+          "end": "\\*/",
+          "patterns": []
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.rust",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.rust",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": []
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.rust",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rust",
+              "match": "\\\\(x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\}|n|r|t|0|\\\\|\"|')"
+            },
+            {
+              "name": "constant.character.escape.rust",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "raw_strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.raw.rust",
+          "begin": "r(#*)\"",
+          "end": "\"\\1"
+        }
+      ]
+    },
+    "byte_strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.byte.rust",
+          "begin": "b\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.rust",
+              "match": "\\\\(x[0-9a-fA-F]{2}|n|r|t|0|\\\\|\")"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.byte.raw.rust",
+          "begin": "br(#*)\"",
+          "end": "\"\\1"
+        },
+        {
+          "name": "string.quoted.byte.char.rust",
+          "match": "b'(\\\\(x[0-9a-fA-F]{2}|n|r|t|0|\\\\|')|[^'\\\\])'"
+        }
+      ]
+    },
+    "chars": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.rust",
+          "match": "'(\\\\(x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\}|n|r|t|0|\\\\|')|[^'\\\\])'"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.rust",
+          "begin": "#!?\\[",
+          "end": "\\]",
+          "patterns": [
+            {
+              "name": "entity.name.function.attribute.rust",
+              "match": "\\b(derive|cfg|test|allow|warn|deny|forbid|inline|must_use|repr|doc|feature|macro_export|macro_use|no_mangle|link|path|ignore|should_panic|bench|proc_macro|proc_macro_derive|proc_macro_attribute)\\b"
+            },
+            {
+              "name": "entity.name.type.rust",
+              "match": "\\b(Debug|Clone|Copy|PartialEq|Eq|PartialOrd|Ord|Hash|Default|Display|Serialize|Deserialize|Send|Sync)\\b"
+            },
+            { "include": "#strings" }
+          ]
+        }
+      ]
+    },
+    "lifetimes": {
+      "patterns": [
+        {
+          "name": "storage.modifier.lifetime.rust",
+          "match": "'(static|[a-zA-Z_][a-zA-Z0-9_]*)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.rust",
+          "match": "\\b0x[0-9a-fA-F_]+(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?\\b"
+        },
+        {
+          "name": "constant.numeric.oct.rust",
+          "match": "\\b0o[0-7_]+(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?\\b"
+        },
+        {
+          "name": "constant.numeric.bin.rust",
+          "match": "\\b0b[01_]+(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.rust",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)(e[+-]?[0-9_]+)?(f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.rust",
+          "match": "\\b[0-9][0-9_]*e[+-]?[0-9_]+(f32|f64)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.rust",
+          "match": "\\b[0-9][0-9_]*(f32|f64)\\b"
+        },
+        {
+          "name": "constant.numeric.integer.rust",
+          "match": "\\b[0-9][0-9_]*(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?\\b"
+        }
+      ]
+    },
+    "keywords_control": {
+      "patterns": [
+        {
+          "name": "keyword.control.rust",
+          "match": "\\b(if|else|while|for|loop|match|return|break|continue|in|where|yield)\\b"
+        }
+      ]
+    },
+    "keywords_declaration": {
+      "patterns": [
+        {
+          "name": "keyword.other.rust",
+          "match": "\\b(fn|let|mut|const|static|pub|mod|use|crate|extern|impl|trait|type|as|ref|move|unsafe|async|await|dyn|macro_rules)\\b"
+        }
+      ]
+    },
+    "keywords_storage": {
+      "patterns": [
+        {
+          "name": "storage.type.rust",
+          "match": "\\b(struct|enum|union)\\b"
+        }
+      ]
+    },
+    "keywords_self": {
+      "patterns": [
+        {
+          "name": "variable.language.rust",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "keyword.other.rust",
+          "match": "\\b(super|Self|crate)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.rust",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.rust",
+          "match": "\\b(None|Some|Ok|Err)\\b"
+        },
+        {
+          "name": "constant.other.caps.rust",
+          "match": "\\b[A-Z][A-Z0-9_]{2,}\\b"
+        }
+      ]
+    },
+    "primitive_types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.rust",
+          "match": "\\b(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|char|str)\\b"
+        }
+      ]
+    },
+    "std_types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.rust",
+          "match": "\\b(String|Vec|Option|Result|Box|Rc|Arc|Cell|RefCell|Mutex|RwLock|HashMap|HashSet|BTreeMap|BTreeSet|VecDeque|LinkedList|BinaryHeap|Cow|Pin|PhantomData|ManuallyDrop|MaybeUninit|NonNull|Waker|Context|Future|Stream|Iterator|IntoIterator|Path|PathBuf|OsStr|OsString|File|BufReader|BufWriter|Stdin|Stdout|Stderr)\\b"
+        }
+      ]
+    },
+    "std_traits": {
+      "patterns": [
+        {
+          "name": "entity.name.type.trait.rust",
+          "match": "\\b(Copy|Clone|Debug|Default|Display|Drop|Eq|PartialEq|Ord|PartialOrd|Hash|Send|Sync|Sized|Unpin|From|Into|TryFrom|TryInto|AsRef|AsMut|Borrow|BorrowMut|Deref|DerefMut|Fn|FnMut|FnOnce|Add|Sub|Mul|Div|Rem|Neg|Not|BitAnd|BitOr|BitXor|Shl|Shr|Index|IndexMut|Read|Write|Seek|BufRead|ToString|ToOwned|Extend|ExactSizeIterator|DoubleEndedIterator)\\b"
+        }
+      ]
+    },
+    "macros": {
+      "patterns": [
+        {
+          "name": "support.function.macro.rust",
+          "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*!"
+        }
+      ]
+    },
+    "function_def": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.rust" },
+            "2": { "name": "entity.name.function.rust" }
+          }
+        }
+      ]
+    },
+    "function_call": {
+      "patterns": [
+        {
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.rust" }
+          }
+        },
+        {
+          "match": "\\.([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.rust" }
+          }
+        },
+        {
+          "match": "::([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.rust" }
+          }
+        }
+      ]
+    },
+    "type_name": {
+      "patterns": [
+        {
+          "name": "entity.name.type.rust",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.rust",
+          "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.comparison.rust",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.assignment.rust",
+          "match": "\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>="
+        },
+        {
+          "name": "keyword.operator.logical.rust",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.range.rust",
+          "match": "\\.\\.\\.|\\.\\.|\\.\\.="
+        },
+        {
+          "name": "keyword.operator.rust",
+          "match": "\\?|::"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.rust",
+          "match": "[;,]"
+        }
+      ]
+    }
+  }
+}

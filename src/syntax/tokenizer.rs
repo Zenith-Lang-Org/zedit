@@ -1,0 +1,945 @@
+/// Stateful line-by-line tokenizer for TextMate grammars.
+/// Produces `ScopeToken` spans by matching grammar patterns against each line,
+/// carrying `LineState` across lines for multi-line constructs (strings, comments).
+use super::grammar::{Grammar, IncludeTarget, Pattern};
+use super::regex::{Captures, Regex};
+
+// ── Public types ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeToken {
+    pub start: usize,
+    pub end: usize,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineState {
+    pub stack: Vec<ActiveRegion>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveRegion {
+    pub scope_name: Option<String>,
+    pub content_name: Option<String>,
+    pub end_pattern: String,
+    pub region_id: Option<usize>,
+}
+
+impl PartialEq for ActiveRegion {
+    fn eq(&self, other: &Self) -> bool {
+        self.scope_name == other.scope_name
+            && self.end_pattern == other.end_pattern
+            && self.region_id == other.region_id
+    }
+}
+
+impl LineState {
+    pub fn initial() -> Self {
+        LineState { stack: Vec::new() }
+    }
+}
+
+// ── Tokenizer ─────────────────────────────────────────────────
+
+pub struct Tokenizer<'a> {
+    grammar: &'a Grammar,
+}
+
+struct MatchCandidate {
+    pos: usize,
+    len: usize,
+    kind: MatchKind,
+}
+
+enum MatchKind {
+    Match {
+        name: Option<String>,
+        captures: Option<Captures>,
+        capture_scopes: Vec<(usize, String)>,
+    },
+    RegionBegin {
+        name: Option<String>,
+        content_name: Option<String>,
+        end_pattern_raw: String,
+        region_id: usize,
+        captures: Option<Captures>,
+        capture_scopes: Vec<(usize, String)>,
+    },
+}
+
+impl<'a> Tokenizer<'a> {
+    pub fn new(grammar: &'a Grammar) -> Self {
+        Tokenizer { grammar }
+    }
+
+    pub fn tokenize_line(&self, line: &str, state: &LineState) -> (Vec<ScopeToken>, LineState) {
+        let mut tokens: Vec<ScopeToken> = Vec::new();
+        let mut stack = state.stack.clone();
+        let mut pos = 0;
+
+        while pos < line.len() {
+            // If inside a region, try end pattern first
+            if let Some(region) = stack.last() {
+                let end_result = try_compile_and_match(&region.end_pattern, line, pos);
+
+                // Also find earliest child/pattern match
+                let child_patterns = self.active_patterns(&stack);
+                let child_match: Option<MatchCandidate> = if !child_patterns.is_empty() {
+                    self.find_earliest_match(&child_patterns, line, pos, 0)
+                } else {
+                    None
+                };
+
+                // Check if any child match comes before end
+                let child_before_end = match (&child_match, &end_result) {
+                    (Some(c), Some((end_m, _))) => c.pos < end_m.start,
+                    _ => false,
+                };
+
+                if child_before_end {
+                    // Child pattern wins — fall through to process it below
+                } else if let Some((end_m, _end_caps)) = &end_result {
+                    let end_start = end_m.start;
+                    let end_end = end_m.end;
+
+                    // Emit gap before end marker
+                    if pos < end_start {
+                        let scopes = build_scopes_from_stack(&stack, None);
+                        tokens.push(ScopeToken {
+                            start: pos,
+                            end: end_start,
+                            scopes,
+                        });
+                    }
+
+                    // Emit end marker token
+                    let region = stack.pop().unwrap();
+                    let scopes = build_scopes_from_stack_with_popped(&stack, &region);
+                    tokens.push(ScopeToken {
+                        start: end_start,
+                        end: end_end,
+                        scopes,
+                    });
+
+                    pos = end_end;
+                    continue;
+                } else if child_match.is_none() {
+                    // No end match and no child match — rest of line is region content
+                    let scopes = build_scopes_from_stack(&stack, None);
+                    tokens.push(ScopeToken {
+                        start: pos,
+                        end: line.len(),
+                        scopes,
+                    });
+                    pos = line.len();
+                    continue;
+                }
+                // If we get here, child_match is Some and either won or there's no end match
+            }
+
+            // Find earliest matching pattern (top-level or child from region)
+            let patterns = self.active_patterns(&stack);
+            let candidate = self.find_earliest_match(&patterns, line, pos, 0);
+
+            match candidate {
+                Some(cand) => {
+                    // Emit gap before match
+                    if pos < cand.pos {
+                        let scopes = build_scopes_from_stack(&stack, None);
+                        tokens.push(ScopeToken {
+                            start: pos,
+                            end: cand.pos,
+                            scopes,
+                        });
+                    }
+
+                    match cand.kind {
+                        MatchKind::Match {
+                            name,
+                            captures,
+                            capture_scopes,
+                        } => {
+                            if !capture_scopes.is_empty() {
+                                if let Some(caps) = &captures {
+                                    emit_capture_tokens(
+                                        &mut tokens,
+                                        caps,
+                                        &capture_scopes,
+                                        &stack,
+                                        name.as_deref(),
+                                        cand.pos,
+                                        cand.pos + cand.len,
+                                    );
+                                } else {
+                                    let scopes = build_scopes_from_stack(&stack, name.as_deref());
+                                    tokens.push(ScopeToken {
+                                        start: cand.pos,
+                                        end: cand.pos + cand.len,
+                                        scopes,
+                                    });
+                                }
+                            } else {
+                                let scopes = build_scopes_from_stack(&stack, name.as_deref());
+                                tokens.push(ScopeToken {
+                                    start: cand.pos,
+                                    end: cand.pos + cand.len,
+                                    scopes,
+                                });
+                            }
+                            pos = cand.pos + cand.len;
+                            // Zero-width match guard
+                            if cand.len == 0 {
+                                if pos < line.len() {
+                                    let ch_len =
+                                        line[pos..].chars().next().map_or(1, |c| c.len_utf8());
+                                    let scopes = build_scopes_from_stack(&stack, None);
+                                    tokens.push(ScopeToken {
+                                        start: pos,
+                                        end: pos + ch_len,
+                                        scopes,
+                                    });
+                                    pos += ch_len;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        MatchKind::RegionBegin {
+                            name,
+                            content_name,
+                            end_pattern_raw,
+                            region_id,
+                            captures,
+                            capture_scopes,
+                        } => {
+                            // Resolve end pattern with backref substitution
+                            let resolved_end = match &captures {
+                                Some(caps) => resolve_end_pattern(&end_pattern_raw, caps, line),
+                                None => end_pattern_raw.clone(),
+                            };
+
+                            // Emit begin token
+                            if !capture_scopes.is_empty() {
+                                if let Some(caps) = &captures {
+                                    emit_capture_tokens(
+                                        &mut tokens,
+                                        caps,
+                                        &capture_scopes,
+                                        &stack,
+                                        name.as_deref(),
+                                        cand.pos,
+                                        cand.pos + cand.len,
+                                    );
+                                } else {
+                                    let scopes = build_scopes_from_stack(&stack, name.as_deref());
+                                    tokens.push(ScopeToken {
+                                        start: cand.pos,
+                                        end: cand.pos + cand.len,
+                                        scopes,
+                                    });
+                                }
+                            } else {
+                                let scopes = build_scopes_from_stack(&stack, name.as_deref());
+                                tokens.push(ScopeToken {
+                                    start: cand.pos,
+                                    end: cand.pos + cand.len,
+                                    scopes,
+                                });
+                            }
+
+                            stack.push(ActiveRegion {
+                                scope_name: name,
+                                content_name,
+                                end_pattern: resolved_end,
+                                region_id: Some(region_id),
+                            });
+                            pos = cand.pos + cand.len;
+                            // Zero-width guard
+                            if cand.len == 0 {
+                                if pos < line.len() {
+                                    let ch_len =
+                                        line[pos..].chars().next().map_or(1, |c| c.len_utf8());
+                                    let scopes = build_scopes_from_stack(&stack, None);
+                                    tokens.push(ScopeToken {
+                                        start: pos,
+                                        end: pos + ch_len,
+                                        scopes,
+                                    });
+                                    pos += ch_len;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // Rest of line is default scope
+                    let scopes = build_scopes_from_stack(&stack, None);
+                    tokens.push(ScopeToken {
+                        start: pos,
+                        end: line.len(),
+                        scopes,
+                    });
+                    pos = line.len();
+                }
+            }
+        }
+
+        (tokens, LineState { stack })
+    }
+
+    /// Get the active patterns to scan — either from innermost region's children or top-level.
+    fn active_patterns(&self, stack: &[ActiveRegion]) -> Vec<&Pattern> {
+        if let Some(region) = stack.last() {
+            if let Some(region_id) = region.region_id
+                && let Some(children) = self.grammar.find_region_children(region_id)
+            {
+                return children.iter().collect();
+            }
+            // Region without id or children not found — nothing matches inside
+            return Vec::new();
+        }
+        self.grammar.patterns.iter().collect()
+    }
+
+    fn find_earliest_match(
+        &self,
+        patterns: &[&Pattern],
+        line: &str,
+        pos: usize,
+        depth: usize,
+    ) -> Option<MatchCandidate> {
+        if depth > 8 {
+            return None; // Include cycle guard
+        }
+
+        let mut best: Option<MatchCandidate> = None;
+
+        for pat in patterns {
+            let candidate = match pat {
+                Pattern::Match {
+                    name,
+                    regex,
+                    captures,
+                } => regex.find(line, pos).map(|m| MatchCandidate {
+                    pos: m.start,
+                    len: m.end - m.start,
+                    kind: MatchKind::Match {
+                        name: name.clone(),
+                        captures: if captures.is_empty() {
+                            None
+                        } else {
+                            regex.captures(line, pos)
+                        },
+                        capture_scopes: captures.clone(),
+                    },
+                }),
+                Pattern::Region {
+                    id,
+                    name,
+                    content_name,
+                    begin,
+                    end_pattern,
+                    begin_captures,
+                    end_captures: _,
+                    patterns: _child_patterns,
+                } => {
+                    if let Some(m) = begin.find(line, pos) {
+                        let caps = if begin_captures.is_empty() {
+                            None
+                        } else {
+                            begin.captures(line, pos)
+                        };
+                        Some(MatchCandidate {
+                            pos: m.start,
+                            len: m.end - m.start,
+                            kind: MatchKind::RegionBegin {
+                                name: name.clone(),
+                                content_name: content_name.clone(),
+                                end_pattern_raw: end_pattern.clone(),
+                                region_id: *id,
+                                captures: caps,
+                                capture_scopes: begin_captures.clone(),
+                            },
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Pattern::Include(target) => {
+                    let resolved = match target {
+                        IncludeTarget::Repository(key) => self.grammar.find_repository(key),
+                        IncludeTarget::SelfRef => Some(self.grammar.patterns.as_slice()),
+                    };
+                    if let Some(pats) = resolved {
+                        let refs: Vec<&Pattern> = pats.iter().collect();
+                        self.find_earliest_match(&refs, line, pos, depth + 1)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(c) = candidate {
+                let dominated = match &best {
+                    Some(b) => c.pos < b.pos || (c.pos == b.pos && c.len > b.len),
+                    None => true,
+                };
+                if dominated {
+                    best = Some(c);
+                }
+            }
+        }
+
+        best
+    }
+}
+
+// ── Helper functions ──────────────────────────────────────────
+
+fn build_scopes_from_stack(stack: &[ActiveRegion], leaf: Option<&str>) -> Vec<String> {
+    let mut scopes = Vec::new();
+    for region in stack {
+        if let Some(s) = &region.scope_name {
+            scopes.push(s.clone());
+        }
+        if let Some(s) = &region.content_name {
+            scopes.push(s.clone());
+        }
+    }
+    if let Some(leaf) = leaf {
+        scopes.push(leaf.to_string());
+    }
+    scopes
+}
+
+fn build_scopes_from_stack_with_popped(
+    stack: &[ActiveRegion],
+    popped: &ActiveRegion,
+) -> Vec<String> {
+    let mut scopes = Vec::new();
+    for region in stack {
+        if let Some(s) = &region.scope_name {
+            scopes.push(s.clone());
+        }
+        if let Some(s) = &region.content_name {
+            scopes.push(s.clone());
+        }
+    }
+    if let Some(s) = &popped.scope_name {
+        scopes.push(s.clone());
+    }
+    scopes
+}
+
+fn try_compile_and_match(
+    pattern: &str,
+    line: &str,
+    pos: usize,
+) -> Option<(super::regex::Match, Option<Captures>)> {
+    let re = Regex::new(pattern).ok()?;
+    let m = re.find(line, pos)?;
+    if m.start < pos {
+        return None; // only accept matches at or after pos
+    }
+    let caps = re.captures(line, pos);
+    Some((m, caps))
+}
+
+/// Substitute `\1`, `\2`, etc. in end_pattern with captured text from begin match.
+fn resolve_end_pattern(raw: &str, captures: &Captures, text: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let digit = (bytes[i + 1] - b'0') as usize;
+            if let Some(Some(m)) = captures.groups.get(digit) {
+                result.push_str(&regex_escape(&text[m.start..m.end]));
+            }
+            i += 2;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if "\\.*+?()[]{}|^$".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn emit_capture_tokens(
+    tokens: &mut Vec<ScopeToken>,
+    captures: &Captures,
+    capture_scopes: &[(usize, String)],
+    stack: &[ActiveRegion],
+    overall_name: Option<&str>,
+    match_start: usize,
+    match_end: usize,
+) {
+    // Collect capture regions that have scopes
+    let mut regions: Vec<(usize, usize, &str)> = Vec::new();
+    for (idx, scope) in capture_scopes {
+        if *idx == 0 {
+            // Group 0 scope is the overall name, handle via overall_name
+            continue;
+        }
+        if let Some(Some(m)) = captures.groups.get(*idx)
+            && m.start >= match_start
+            && m.end <= match_end
+        {
+            regions.push((m.start, m.end, scope));
+        }
+    }
+    regions.sort_by_key(|(start, _, _)| *start);
+
+    // Check if there's a scope for group 0 in captures
+    let cap0_scope = capture_scopes
+        .iter()
+        .find(|(idx, _)| *idx == 0)
+        .map(|(_, s)| s.as_str())
+        .or(overall_name);
+
+    if regions.is_empty() {
+        // No sub-captures, just emit the whole match
+        let scopes = build_scopes_from_stack(stack, cap0_scope);
+        tokens.push(ScopeToken {
+            start: match_start,
+            end: match_end,
+            scopes,
+        });
+        return;
+    }
+
+    // Emit tokens with capture-level scopes
+    let mut pos = match_start;
+    for (cstart, cend, cscope) in &regions {
+        if pos < *cstart {
+            let scopes = build_scopes_from_stack(stack, cap0_scope);
+            tokens.push(ScopeToken {
+                start: pos,
+                end: *cstart,
+                scopes,
+            });
+        }
+        let mut scopes = build_scopes_from_stack(stack, cap0_scope);
+        scopes.push(cscope.to_string());
+        tokens.push(ScopeToken {
+            start: *cstart,
+            end: *cend,
+            scopes,
+        });
+        pos = *cend;
+    }
+    if pos < match_end {
+        let scopes = build_scopes_from_stack(stack, cap0_scope);
+        tokens.push(ScopeToken {
+            start: pos,
+            end: match_end,
+            scopes,
+        });
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::json_parser::JsonValue;
+
+    fn make_grammar(json_str: &str) -> Grammar {
+        let json = JsonValue::parse(json_str).unwrap();
+        Grammar::from_json(&json).unwrap()
+    }
+
+    #[test]
+    fn test_single_keyword() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "\\b(if|else|while)\\b", "name": "keyword.control"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, state) = t.tokenize_line("if true", &LineState::initial());
+        assert!(state.stack.is_empty());
+        // First token should be the keyword "if"
+        assert_eq!(tokens[0].start, 0);
+        assert_eq!(tokens[0].end, 2);
+        assert!(tokens[0].scopes.contains(&"keyword.control".to_string()));
+    }
+
+    #[test]
+    fn test_line_comment() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "//.*$", "name": "comment.line"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, _) = t.tokenize_line("x = 1; // note", &LineState::initial());
+        // Should have gap + comment token
+        let comment_tok = tokens
+            .iter()
+            .find(|t| t.scopes.contains(&"comment.line".to_string()));
+        assert!(comment_tok.is_some());
+        let ct = comment_tok.unwrap();
+        assert_eq!(ct.start, 7);
+        assert_eq!(ct.end, 14);
+    }
+
+    #[test]
+    fn test_string_region() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"begin": "\"", "end": "\"", "name": "string.quoted"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, state) = t.tokenize_line("x = \"hello\"", &LineState::initial());
+        assert!(state.stack.is_empty());
+        // Should have: gap("x = "), begin("), content(hello), end(")
+        let string_tokens: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.scopes.contains(&"string.quoted".to_string()))
+            .collect();
+        assert!(!string_tokens.is_empty());
+    }
+
+    #[test]
+    fn test_multiline_block_comment() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"begin": "/\\*", "end": "\\*/", "name": "comment.block"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+
+        // Line 1: open comment
+        let (tokens1, state1) = t.tokenize_line("x = 1; /* start", &LineState::initial());
+        assert_eq!(state1.stack.len(), 1);
+        assert_eq!(state1.stack[0].scope_name.as_deref(), Some("comment.block"));
+
+        // Line 2: middle (all comment)
+        let (tokens2, state2) = t.tokenize_line("  middle  ", &state1);
+        assert_eq!(state2.stack.len(), 1); // still inside
+        assert!(!tokens2.is_empty());
+
+        // Line 3: close comment
+        let (tokens3, state3) = t.tokenize_line("end */ y", &state2);
+        assert!(state3.stack.is_empty()); // region closed
+        let _ = tokens1;
+        let _ = tokens3;
+    }
+
+    #[test]
+    fn test_nested_pattern_in_region() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted",
+                        "patterns": [
+                            {"match": "\\\\.", "name": "constant.character.escape"}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+
+        // Test escape sequences inside strings get proper scope
+        let (tokens, state) = t.tokenize_line(r#""hello\nworld""#, &LineState::initial());
+        assert!(state.stack.is_empty());
+        let escape_tok = tokens
+            .iter()
+            .find(|t| t.scopes.contains(&"constant.character.escape".to_string()));
+        assert!(
+            escape_tok.is_some(),
+            "escape sequence should be highlighted"
+        );
+        let et = escape_tok.unwrap();
+        assert_eq!(et.start, 6); // \n starts at byte 6
+        assert_eq!(et.end, 8); // \n ends at byte 8
+        // Should also have the parent string scope
+        assert!(et.scopes.contains(&"string.quoted".to_string()));
+    }
+
+    #[test]
+    fn test_keywords_not_matched_inside_string() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "\\b(if|else|while)\\b", "name": "keyword.control"},
+                    {
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted",
+                        "patterns": [
+                            {"match": "\\\\.", "name": "constant.character.escape"}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, state) = t.tokenize_line(r#""if else while""#, &LineState::initial());
+        assert!(state.stack.is_empty());
+        // No token inside the string should have keyword.control scope
+        let keyword_tok = tokens
+            .iter()
+            .find(|t| t.scopes.contains(&"keyword.control".to_string()));
+        assert!(
+            keyword_tok.is_none(),
+            "keywords inside strings should NOT be highlighted"
+        );
+    }
+
+    #[test]
+    fn test_multiline_region_with_child_patterns() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted",
+                        "patterns": [
+                            {"match": "\\\\.", "name": "constant.character.escape"}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+
+        // Line 1: open string with escape
+        let (tokens1, state1) = t.tokenize_line(r#""hello\n"#, &LineState::initial());
+        assert_eq!(state1.stack.len(), 1); // still inside string
+        let escape1 = tokens1
+            .iter()
+            .find(|t| t.scopes.contains(&"constant.character.escape".to_string()));
+        assert!(escape1.is_some(), "escape on line 1 should be highlighted");
+
+        // Line 2: continuation with escape and close
+        let (tokens2, state2) = t.tokenize_line(r#"world\t""#, &state1);
+        assert!(state2.stack.is_empty()); // string closed
+        let escape2 = tokens2
+            .iter()
+            .find(|t| t.scopes.contains(&"constant.character.escape".to_string()));
+        assert!(escape2.is_some(), "escape on line 2 should be highlighted");
+    }
+
+    #[test]
+    fn test_region_with_no_child_patterns() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "\\b(if|else)\\b", "name": "keyword.control"},
+                    {
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted"
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, state) = t.tokenize_line(r#""if else""#, &LineState::initial());
+        assert!(state.stack.is_empty());
+        // Nothing inside the string should match (no child patterns defined)
+        let keyword_tok = tokens
+            .iter()
+            .find(|t| t.scopes.contains(&"keyword.control".to_string()));
+        assert!(
+            keyword_tok.is_none(),
+            "keywords should NOT match inside region with no child patterns"
+        );
+        // String content should still have string.quoted scope
+        let string_content = tokens
+            .iter()
+            .find(|t| t.start > 0 && t.end < 9 && t.scopes.contains(&"string.quoted".to_string()));
+        assert!(string_content.is_some());
+    }
+
+    #[test]
+    fn test_include_from_repository() {
+        let g = make_grammar(
+            r##"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"include": "#keywords"}
+                ],
+                "repository": {
+                    "keywords": {
+                        "patterns": [
+                            {"match": "\\b(let|const)\\b", "name": "keyword.declaration"}
+                        ]
+                    }
+                }
+            }"##,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, _) = t.tokenize_line("let x = 1", &LineState::initial());
+        assert!(
+            tokens[0]
+                .scopes
+                .contains(&"keyword.declaration".to_string())
+        );
+        assert_eq!(tokens[0].start, 0);
+        assert_eq!(tokens[0].end, 3);
+    }
+
+    #[test]
+    fn test_empty_line() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "\\w+", "name": "text"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, state) = t.tokenize_line("", &LineState::initial());
+        assert!(tokens.is_empty());
+        assert!(state.stack.is_empty());
+    }
+
+    #[test]
+    fn test_line_state_equality() {
+        let s1 = LineState {
+            stack: vec![ActiveRegion {
+                scope_name: Some("comment.block".to_string()),
+                content_name: None,
+                end_pattern: "\\*/".to_string(),
+                region_id: None,
+            }],
+        };
+        let s2 = LineState {
+            stack: vec![ActiveRegion {
+                scope_name: Some("comment.block".to_string()),
+                content_name: None,
+                end_pattern: "\\*/".to_string(),
+                region_id: None,
+            }],
+        };
+        let s3 = LineState {
+            stack: vec![ActiveRegion {
+                scope_name: Some("string.quoted".to_string()),
+                content_name: None,
+                end_pattern: "\"".to_string(),
+                region_id: None,
+            }],
+        };
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn test_first_match_wins() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "//.*$", "name": "comment.line"},
+                    {"match": "\\w+", "name": "identifier"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, _) = t.tokenize_line("// hi", &LineState::initial());
+        // The comment should win over the identifier
+        assert!(tokens[0].scopes.contains(&"comment.line".to_string()));
+    }
+
+    #[test]
+    fn test_zero_width_match_no_infinite_loop() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "^", "name": "meta.start"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, _) = t.tokenize_line("abc", &LineState::initial());
+        // Should not hang. We get some tokens and finish.
+        assert!(!tokens.is_empty());
+    }
+
+    #[test]
+    fn test_end_pattern_backref_resolution() {
+        // Heredoc-style: begin captures delimiter, end uses \1
+        let resolved = resolve_end_pattern(
+            "\\1",
+            &Captures {
+                groups: vec![
+                    Some(super::super::regex::Match { start: 0, end: 5 }),
+                    Some(super::super::regex::Match { start: 2, end: 5 }),
+                ],
+            },
+            "<<EOF",
+        );
+        assert_eq!(resolved, "EOF");
+    }
+
+    #[test]
+    fn test_captures_with_numbered_groups() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {
+                        "match": "(\\w+)\\.(\\w+)",
+                        "captures": {
+                            "1": {"name": "entity.name"},
+                            "2": {"name": "support.function"}
+                        }
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+        let (tokens, _) = t.tokenize_line("foo.bar", &LineState::initial());
+        // Should have capture-level tokens
+        let has_entity = tokens
+            .iter()
+            .any(|t| t.scopes.contains(&"entity.name".to_string()));
+        let has_function = tokens
+            .iter()
+            .any(|t| t.scopes.contains(&"support.function".to_string()));
+        assert!(has_entity);
+        assert!(has_function);
+    }
+}

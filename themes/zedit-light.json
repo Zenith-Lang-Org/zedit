@@ -1,0 +1,27 @@
+{
+  "name": "Zedit Light",
+  "type": "light",
+  "colors": {
+    "editor.background": "#eff1f5",
+    "editor.foreground": "#4c4f69",
+    "editorLineNumber.foreground": "#8c8fa1",
+    "editor.selectionBackground": "#ccd0da",
+    "editorCursor.foreground": "#dc8a78",
+    "statusBar.background": "#e6e9ef",
+    "statusBar.foreground": "#4c4f69"
+  },
+  "tokenColors": [
+    { "scope": "comment", "settings": { "foreground": "#9ca0b0", "fontStyle": "italic" } },
+    { "scope": "string", "settings": { "foreground": "#40a02b" } },
+    { "scope": "keyword", "settings": { "foreground": "#8839ef", "fontStyle": "bold" } },
+    { "scope": "constant.numeric", "settings": { "foreground": "#fe640b" } },
+    { "scope": "constant.language", "settings": { "foreground": "#fe640b" } },
+    { "scope": "storage.type", "settings": { "foreground": "#1e66f5" } },
+    { "scope": "entity.name.function", "settings": { "foreground": "#1e66f5" } },
+    { "scope": "entity.name.type", "settings": { "foreground": "#df8e1d" } },
+    { "scope": "variable", "settings": { "foreground": "#4c4f69" } },
+    { "scope": "support.function", "settings": { "foreground": "#ea76cb" } },
+    { "scope": "punctuation", "settings": { "foreground": "#6c6f85" } },
+    { "scope": "invalid", "settings": { "foreground": "#d20f39", "fontStyle": "bold" } }
+  ]
+}

@@ -1,0 +1,241 @@
+.TH ZEDIT 1 "2026-02-17" "zedit 0.1.0" "User Commands"
+.SH NAME
+zedit \- modern console text editor
+.SH SYNOPSIS
+.B zedit
+.RI [ file ]
+.br
+.B zedit
+.B \-\-help
+.br
+.B zedit
+.B \-\-version
+.SH DESCRIPTION
+.B Zedit
+is a modern console text editor written in pure Rust
+with zero external dependencies. It features UTF\-8 native text handling,
+modern desktop\-style keybindings (Ctrl+C/V/X/S/Z), syntax highlighting
+via TextMate grammars, and diff\-based rendering for smooth performance.
+Part of the Z ecosystem (Zenith, Zymbol).
+.PP
+If
+.I file
+is given, it is opened for editing. Otherwise a new empty buffer is created.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version number and exit.
+.SH KEYBINDINGS
+.SS File
+.TP
+.B Ctrl+S
+Save file. If the buffer has no file name, prompts for one.
+.TP
+.B Ctrl+Shift+S
+Save As \(em prompts for a new file name.
+.TP
+.B Ctrl+O
+Open file \(em prompts for a file path.
+.TP
+.B Ctrl+Q
+Quit. If there are unsaved changes, press again to confirm.
+.SS Edit
+.TP
+.B Ctrl+Z
+Undo.
+.TP
+.B Ctrl+Y
+Redo.
+.TP
+.B Ctrl+C
+Copy selection (or current line if no selection).
+.TP
+.B Ctrl+X
+Cut selection (or current line if no selection).
+.TP
+.B Ctrl+V
+Paste from clipboard.
+.TP
+.B Ctrl+D
+Duplicate current line.
+.TP
+.B Ctrl+Shift+K
+Delete current line.
+.TP
+.B Tab
+Insert indentation (spaces or tab character, depending on
+.IR use_spaces
+config option).
+.TP
+.B Shift+Tab
+Unindent current line or selected lines.
+.TP
+.B Ctrl+/
+Toggle line comment (language\-aware).
+.TP
+.B Enter
+Insert newline with auto\-indent.
+.SS Navigation
+.TP
+.B Arrow keys
+Move cursor up/down/left/right.
+.TP
+.B Home / End
+Move to start/end of line.
+.TP
+.B Ctrl+Home / Ctrl+End
+Move to start/end of file.
+.TP
+.B Page Up / Page Down
+Scroll one page up/down.
+.TP
+.B Ctrl+G
+Go to line number.
+.TP
+.B Ctrl+F
+Find (incremental search, case\-insensitive). Press Ctrl+R to toggle regex mode.
+.TP
+.B Ctrl+H
+Find and replace.
+.TP
+.B F3 / Shift+F3
+Jump to next/previous search match.
+.SS Selection
+.TP
+.B Shift+Arrow keys
+Extend selection character by character or line by line.
+.TP
+.B Ctrl+Shift+Left/Right
+Extend selection word by word.
+.TP
+.B Ctrl+A
+Select all.
+.TP
+.B Ctrl+L
+Select current line.
+.SS Multi\-buffer
+.TP
+.B Ctrl+N
+Open a new empty buffer.
+.TP
+.B Ctrl+W
+Close current buffer (confirms if unsaved).
+.TP
+.B Ctrl+Page Down
+Switch to next buffer.
+.TP
+.B Ctrl+Page Up
+Switch to previous buffer.
+.SS Mouse
+.TP
+.B Click
+Position cursor.
+.TP
+.B Drag
+Select text.
+.TP
+.B Scroll wheel
+Scroll viewport up/down.
+.SS Help
+.TP
+.B F1
+Toggle the in\-editor help overlay.
+.SH CONFIGURATION
+.B Zedit
+reads its configuration from
+.IR ~/.config/zedit/config.json .
+Example:
+.PP
+.RS
+.nf
+{
+    "tab_size": 4,
+    "use_spaces": true,
+    "theme": "zedit\-dark",
+    "line_numbers": true,
+    "auto_indent": true,
+    "word_wrap": false,
+    "languages": [
+        {
+            "name": "ruby",
+            "extensions": ["rb", "rake"],
+            "grammar": "ruby.tmLanguage.json",
+            "comment": "#"
+        }
+    ]
+}
+.fi
+.RE
+.TP
+.B tab_size
+Number of spaces per indentation level (1\(en16, default 4).
+.TP
+.B use_spaces
+If true (default), Tab inserts spaces. If false, inserts a literal tab character.
+.TP
+.B theme
+Color theme name. Built\-in themes:
+.BR zedit\-dark ", " zedit\-light .
+Custom themes go in
+.IR ~/.config/zedit/themes/ .
+.TP
+.B line_numbers
+Show line number gutter (default true).
+.TP
+.B auto_indent
+Preserve indentation on Enter (default true).
+.TP
+.B word_wrap
+Wrap long lines visually (default false).
+.TP
+.B languages
+Array of language definitions. Each entry has:
+.BR name " (language identifier),"
+.BR extensions " (file extension list),"
+.BR grammar " (TextMate grammar filename),"
+.BR comment " (line comment prefix, optional)."
+User entries override built\-in languages by name; new names are appended.
+.SH SYNTAX HIGHLIGHTING
+.B Zedit
+uses TextMate grammar files
+.RB ( .tmLanguage.json )
+for syntax highlighting. Built\-in grammars are provided for:
+Rust, C, C++, Python, JavaScript, TypeScript, PHP, Shell, HTML, CSS,
+JSON, TOML, Markdown, Zenith, and Zymbol.
+.PP
+User\-provided grammars can be placed in
+.IR ~/.config/zedit/grammars/ .
+The grammar filename must match the
+.B grammar
+field in the language definition.
+.PP
+Themes follow the VS Code color theme format. Color output adapts automatically
+to the terminal's capabilities (24\-bit, 256\-color, or 16\-color).
+.SH FILES
+.TP
+.I ~/.config/zedit/config.json
+Editor configuration file.
+.TP
+.I ~/.config/zedit/grammars/
+User\-provided TextMate grammar files.
+.TP
+.I ~/.config/zedit/themes/
+User\-provided color theme files.
+.SH ENVIRONMENT
+.TP
+.B COLORTERM
+If set to
+.BR truecolor " or " 24bit ,
+enables 24\-bit color output.
+.TP
+.B TERM
+Used to detect 256\-color support (e.g.,
+.BR xterm\-256color ).
+Falls back to 16\-color mode otherwise.
+.SH AUTHORS
+Written as part of the Z ecosystem (Zenith, Zymbol).
+.SH BUGS
+Report bugs at the project repository.

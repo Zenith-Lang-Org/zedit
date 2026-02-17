@@ -275,10 +275,6 @@ pub fn move_cursor(row: u16, col: u16) {
     write_all(seq.as_bytes());
 }
 
-pub fn clear_screen() {
-    write_all(b"\x1b[2J");
-}
-
 // ---------------------------------------------------------------------------
 // OSC 52 clipboard (system clipboard via terminal escape)
 // ---------------------------------------------------------------------------

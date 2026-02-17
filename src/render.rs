@@ -22,6 +22,8 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
+    /// True for the second column of a double-width character.
+    pub wide_cont: bool,
 }
 
 impl Default for Cell {
@@ -31,6 +33,7 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            wide_cont: false,
         }
     }
 }
@@ -83,7 +86,58 @@ impl Screen {
     }
 
     pub fn put_char(&mut self, row: usize, col: usize, ch: char, fg: Color, bg: Color, bold: bool) {
-        self.put_cell(row, col, Cell { ch, fg, bg, bold });
+        let w = crate::unicode::char_width(ch);
+        if w == 2 {
+            if col + 1 < self.width {
+                self.put_cell(
+                    row,
+                    col,
+                    Cell {
+                        ch,
+                        fg,
+                        bg,
+                        bold,
+                        wide_cont: false,
+                    },
+                );
+                self.put_cell(
+                    row,
+                    col + 1,
+                    Cell {
+                        ch: ' ',
+                        fg,
+                        bg,
+                        bold,
+                        wide_cont: true,
+                    },
+                );
+            } else {
+                // Wide char doesn't fit at right edge — put a space instead
+                self.put_cell(
+                    row,
+                    col,
+                    Cell {
+                        ch: ' ',
+                        fg,
+                        bg,
+                        bold,
+                        wide_cont: false,
+                    },
+                );
+            }
+        } else {
+            self.put_cell(
+                row,
+                col,
+                Cell {
+                    ch,
+                    fg,
+                    bg,
+                    bold,
+                    wide_cont: false,
+                },
+            );
+        }
     }
 
     pub fn put_str(
@@ -103,8 +157,8 @@ impl Screen {
             if c >= self.width {
                 break;
             }
-            self.cells[row][c] = Cell { ch, fg, bg, bold };
-            c += 1;
+            self.put_char(row, c, ch, fg, bg, bold);
+            c += crate::unicode::char_width(ch).max(1);
         }
     }
 
@@ -146,6 +200,12 @@ impl Screen {
         for row in 0..self.height {
             for col in 0..self.width {
                 let cell = &self.cells[row][col];
+
+                // Skip continuation cells — the terminal advances 2 cols for wide chars
+                if cell.wide_cont {
+                    continue;
+                }
+
                 let changed = if full_redraw {
                     true
                 } else {
@@ -557,6 +617,7 @@ mod tests {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            wide_cont: false,
         };
         assert_eq!(a, b);
     }
