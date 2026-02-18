@@ -1,6 +1,594 @@
 # Zedit Phase 2 — Shell Studio Code
 
-From text editor to terminal IDE. Phases 8–20.
+From text editor to terminal IDE. Phases 7δ–20.
+
+---
+
+## Phase 7δ (Delta MVP): External Grammar System + VS Code Extension Import
+
+**Goal**: Remove all grammar files from the compiled binary. Language support becomes fully runtime-configurable. Users can import syntax highlighting, LSP configuration, and terminal tasks directly from VS Code extensions — the largest ecosystem of language tooling in existence.
+
+### Problem
+
+Currently, `build.rs` uses `include_str!` to embed every `.tmLanguage.json` file into the binary at compile time. This causes:
+
+1. **Binary bloat** — 22 grammars = 1.9MB of JSON baked into a 2.5MB binary (~76% of total size)
+2. **Recompilation required** — adding a language forces `cargo build`
+3. **False promise** — the system claims to be "configurable" but the core grammars are hardcoded into the binary
+4. **Manual process** — adding a language means hunting for grammar files on GitHub, guessing extensions, and hand-editing JSON
+
+### Vision
+
+```sh
+# One command to add full Ruby support:
+zedit --import ruby
+
+# What happens behind the scenes:
+# 1. Queries VS Code Marketplace for "ruby" language extensions
+# 2. Downloads the .vsix (it's a ZIP file)
+# 3. Extracts from package.json:
+#    - contributes.grammars  → .tmLanguage.json → ~/.config/zedit/grammars/
+#    - contributes.languages → extensions, aliases → languages.json
+#    - comment token          → languages.json comment field
+# 4. Optionally extracts LSP config for Phase 17
+# 5. Done. Open a .rb file.
+zedit myapp.rb
+```
+
+---
+
+### Part A: Runtime Grammar Loading (Infrastructure)
+
+#### Current Architecture
+
+```text
+build.rs
+  └── reads grammars/*.tmLanguage.json
+  └── generates embedded_grammars.rs with include_str!() for each file
+  └── embeds grammars/languages.json as EMBEDDED_LANGUAGES_JSON
+
+config.rs
+  └── builtin_languages() → parses EMBEDDED_LANGUAGES_JSON (compiled-in)
+  └── Config::load() → merges user overrides on top of builtins
+
+highlight.rs
+  └── load_grammar() → tries ~/.config/zedit/grammars/ first
+  └── falls back to builtin_grammar_str() (compiled-in)
+```
+
+#### Target Architecture
+
+```text
+Runtime:
+  config.rs
+    └── load_languages() → reads languages.json from search path
+    └── fallback: minimal hardcoded set (plain text only)
+
+  highlight.rs
+    └── load_grammar() → reads .tmLanguage.json from search path:
+        1. ~/.config/zedit/grammars/          (user, highest priority)
+        2. /usr/share/zedit/grammars/         (system-wide, package manager)
+        3. /usr/local/share/zedit/grammars/   (manual system install)
+        4. ./grammars/                        (dev mode, project-local)
+```
+
+#### Step A1: Grammar search path
+
+```rust
+pub fn grammar_search_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(format!("{}/.config/zedit", home));
+    }
+    paths.push("/usr/share/zedit".to_string());
+    paths.push("/usr/local/share/zedit".to_string());
+    paths.push("grammars".to_string());
+    paths
+}
+```
+
+#### Step A2: Runtime language loading (replaces compile-time)
+
+```rust
+pub fn load_languages() -> Vec<LanguageDef> {
+    for dir in grammar_search_paths() {
+        let lang_file = format!("{}/languages.json", dir);
+        if let Ok(content) = std::fs::read_to_string(&lang_file) {
+            if let Some(langs) = parse_languages_array(&content) {
+                if !langs.is_empty() { return langs; }
+            }
+        }
+    }
+    // Fallback: plain text only
+    vec![LanguageDef { name: "text".into(), extensions: vec!["txt".into()],
+                       grammar_file: String::new(), comment: None }]
+}
+```
+
+#### Step A3: Runtime grammar loading (replaces `builtin_grammar_str()`)
+
+```rust
+pub fn load_grammar(lang: &str, languages: &[LanguageDef]) -> Option<Grammar> {
+    let lang_def = languages.iter().find(|l| l.name == lang)?;
+    for dir in grammar_search_paths() {
+        let path = format!("{}/grammars/{}", dir, lang_def.grammar_file);
+        if let Ok(json_str) = std::fs::read_to_string(&path) {
+            if let Ok(val) = json_parser::JsonValue::parse(&json_str) {
+                if let Ok(g) = Grammar::from_json(&val) { return Some(g); }
+            }
+        }
+    }
+    None
+}
+```
+
+#### Step A4: `zedit --install` — bootstrap built-in grammars
+
+Copies the bundled `grammars/` directory to `~/.config/zedit/`:
+
+```text
+~/.config/zedit/
+  languages.json
+  grammars/
+    rust.tmLanguage.json
+    python.tmLanguage.json
+    ...
+```
+
+#### Step A5: Remove `build.rs` grammar embedding
+
+- Delete `build.rs` (or reduce to version stamp only)
+- Remove all `include_str!`, `EMBEDDED_LANGUAGES_JSON`, `builtin_grammar_str()`
+- Binary drops from 2.5MB → ~500KB
+
+#### Step A6: Dev mode transparency
+
+`cargo run` works without `--install` because `./grammars/` is in the search path. Contributors just drop files and edit `languages.json`. Zero Rust code changes.
+
+---
+
+### Part B: VS Code Extension Import System
+
+The killer feature. Import language support directly from the VS Code Marketplace — the world's largest collection of language tooling (40,000+ extensions).
+
+#### VS Code Extension Anatomy
+
+A `.vsix` file is a **ZIP archive** containing:
+
+```text
+extension/
+  package.json                 ← manifest with all contributions
+  syntaxes/
+    lang.tmLanguage.json       ← TextMate grammars
+  language-configuration.json  ← comment tokens, brackets, etc.
+  ...
+```
+
+The `package.json` → `contributes` section declares everything:
+
+```json
+{
+  "contributes": {
+    "languages": [{
+      "id": "ruby",
+      "aliases": ["Ruby", "rb"],
+      "extensions": [".rb", ".rake", ".gemspec", ".ru"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "ruby",
+      "scopeName": "source.ruby",
+      "path": "./syntaxes/ruby.tmLanguage.json"
+    }]
+  }
+}
+```
+
+The `language-configuration.json` contains comment tokens:
+
+```json
+{
+  "comments": {
+    "lineComment": "#",
+    "blockComment": ["=begin", "=end"]
+  },
+  "brackets": [["(", ")"], ["[", "]"], ["{", "}"]],
+  "autoClosingPairs": [{"open": "\"", "close": "\""}]
+}
+```
+
+#### VS Code Marketplace REST API
+
+**Search for extensions:**
+
+```text
+POST https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery
+Headers:
+  Content-Type: application/json
+  Accept: application/json; charset=utf-8; api-version=7.2-preview.1
+
+Body:
+{
+  "filters": [{
+    "criteria": [{ "filterType": 7, "value": "ruby" }],
+    "pageNumber": 1, "pageSize": 5,
+    "sortBy": 0, "sortOrder": 0
+  }],
+  "flags": 16863
+}
+```
+
+Filter types: 4 = extension ID, 7 = name search, 10 = full-text search.
+
+**Download VSIX:**
+
+```text
+GET https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{publisher}/vsextensions/{extension}/{version}/vspackage
+```
+
+Example:
+```text
+GET https://marketplace.visualstudio.com/_apis/public/gallery/publishers/rebornix/vsextensions/ruby/0.28.1/vspackage
+```
+
+#### New File: `src/import.rs` (~600 lines)
+
+```rust
+/// VS Code extension importer — downloads .vsix from the Marketplace,
+/// extracts grammars, language definitions, and configuration.
+
+pub struct VsixImporter {
+    config_dir: PathBuf,  // ~/.config/zedit
+}
+
+/// Extracted language data from a VS Code extension.
+pub struct ImportedLanguage {
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub extensions: Vec<String>,
+    pub grammar_file: String,         // filename written to grammars/
+    pub grammar_content: String,      // the .tmLanguage.json content
+    pub comment: Option<String>,      // line comment token
+    pub block_comment: Option<(String, String)>, // open/close
+    pub scope_name: String,
+    // Future (Phase 17): LSP configuration
+    pub lsp_command: Option<String>,
+    pub lsp_args: Option<Vec<String>>,
+}
+
+/// Marketplace search result.
+pub struct ExtensionInfo {
+    pub publisher: String,
+    pub name: String,
+    pub display_name: String,
+    pub version: String,
+    pub description: String,
+    pub download_url: String,
+}
+
+impl VsixImporter {
+    /// Search the VS Code Marketplace for extensions matching a query.
+    pub fn search(&self, query: &str) -> Result<Vec<ExtensionInfo>, String> {
+        // 1. HTTP POST to marketplace API (using custom minimal HTTP client)
+        // 2. Parse JSON response
+        // 3. Extract publisher, name, version, download URL
+        // 4. Return list of matches
+    }
+
+    /// Download and extract a VS Code extension.
+    pub fn import(&self, ext: &ExtensionInfo) -> Result<Vec<ImportedLanguage>, String> {
+        // 1. Download .vsix to temp file
+        // 2. Unzip (custom ZIP reader — zero deps)
+        // 3. Parse extension/package.json
+        // 4. For each contributes.grammars entry:
+        //    a. Read the .tmLanguage.json from the ZIP
+        //    b. Extract language config (comments, brackets)
+        //    c. Build ImportedLanguage
+        // 5. Return all extracted languages
+    }
+
+    /// Install extracted languages into ~/.config/zedit/.
+    pub fn install(&self, langs: &[ImportedLanguage]) -> Result<(), String> {
+        // 1. Write each grammar to ~/.config/zedit/grammars/
+        // 2. Read existing languages.json
+        // 3. Merge new entries (replace existing by name)
+        // 4. Write updated languages.json
+        // 5. Print summary
+    }
+}
+```
+
+#### New File: `src/http.rs` (~250 lines)
+
+Minimal HTTP/1.1 client over raw TCP sockets. Zero external deps.
+
+```rust
+/// Minimal HTTP client — only supports GET and POST over TLS.
+/// Uses the system's TLS library via a simple approach:
+/// spawn `curl` as a subprocess (available on virtually all systems).
+///
+/// Why subprocess instead of raw TLS:
+/// - Implementing TLS from scratch = ~5,000+ lines (crypto, certificates)
+/// - curl is pre-installed on Linux, macOS, WSL, Git Bash
+/// - We only need 2 operations: GET (download) and POST (search)
+/// - Zero-dep constraint applies to COMPILE-time deps, not runtime tools
+
+pub struct HttpResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+pub fn http_get(url: &str, output_path: &Path) -> Result<(), String> {
+    // spawn: curl -fsSL -o {output_path} {url}
+}
+
+pub fn http_post(url: &str, headers: &[(&str, &str)], body: &str) -> Result<HttpResponse, String> {
+    // spawn: curl -s -X POST -H {headers} -d {body} {url}
+    // capture stdout
+}
+```
+
+#### New File: `src/zip.rs` (~350 lines)
+
+Minimal ZIP reader for `.vsix` extraction. Zero external deps.
+
+```rust
+/// Minimal ZIP file reader.
+/// Only supports: Store (no compression) and Deflate.
+/// VSIX files use standard ZIP format.
+
+pub struct ZipArchive {
+    entries: Vec<ZipEntry>,
+    data: Vec<u8>,
+}
+
+pub struct ZipEntry {
+    pub name: String,
+    pub compressed_size: u32,
+    pub uncompressed_size: u32,
+    pub compression: Compression,
+    pub offset: usize,  // offset to local file header
+}
+
+pub enum Compression {
+    Store,    // no compression (method 0)
+    Deflate,  // standard deflate (method 8)
+}
+
+impl ZipArchive {
+    /// Parse a ZIP archive from raw bytes.
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self, String> {
+        // 1. Find End of Central Directory record (scan backwards for signature)
+        // 2. Read Central Directory entries
+        // 3. Build entry list
+    }
+
+    /// Read a file entry by name.
+    pub fn read_entry(&self, name: &str) -> Result<Vec<u8>, String> {
+        // 1. Find entry
+        // 2. Seek to local file header
+        // 3. If Store: return raw bytes
+        // 4. If Deflate: decompress (custom inflate implementation)
+    }
+}
+```
+
+#### Custom DEFLATE Decompressor (~200 lines within `zip.rs`)
+
+DEFLATE is a well-specified algorithm (RFC 1951). We need a decompressor only (not compressor). Core implementation:
+
+```rust
+/// Inflate (decompress) DEFLATE data.
+/// Implements RFC 1951: fixed Huffman + dynamic Huffman + stored blocks.
+fn inflate(compressed: &[u8]) -> Result<Vec<u8>, String> {
+    // Bit reader
+    // For each block:
+    //   - Block type 0 (stored): copy literal bytes
+    //   - Block type 1 (fixed Huffman): use predefined code tables
+    //   - Block type 2 (dynamic Huffman): read code tables, then decode
+    // Length/distance pairs reference previous output (sliding window)
+}
+```
+
+This is ~200 lines of straightforward bit manipulation. The algorithm is fully specified and well-documented. Many clean-room implementations exist for reference.
+
+#### CLI Interface
+
+```text
+zedit --import <query>           Search marketplace and import
+zedit --import-vsix <path>       Import from local .vsix file
+zedit --import-list              List installed imported languages
+zedit --import-remove <name>     Remove an imported language
+```
+
+**Interactive flow for `zedit --import ruby`:**
+
+```text
+$ zedit --import ruby
+
+Searching VS Code Marketplace for "ruby"...
+
+  1. rebornix.ruby (Ruby) v0.28.1
+     Ruby language support and debugging for VS Code
+  2. wingrunr21.vscode-ruby (VSCode Ruby) v0.28.0
+     Syntax highlighting, snippet, and language configuration
+  3. shopify.ruby-lsp (Ruby LSP) v0.7.4
+     VS Code extension for Ruby LSP
+
+Select extension [1-3]: 1
+
+Downloading rebornix.ruby v0.28.1... OK (2.3MB)
+Extracting...
+  ✓ Grammar: ruby.tmLanguage.json (source.ruby)
+  ✓ Extensions: .rb, .rake, .gemspec, .ru, .erb
+  ✓ Comment: #
+  ✓ LSP: saved to config (solargraph)
+
+Installed "ruby" to ~/.config/zedit/grammars/
+```
+
+#### Config File Structure After Import
+
+```text
+~/.config/zedit/
+  languages.json                    ← auto-updated by importer
+  grammars/
+    ruby.tmLanguage.json            ← extracted from .vsix
+    kotlin.tmLanguage.json
+    ...
+  config.json                       ← LSP config merged here
+```
+
+The `languages.json` gains entries automatically:
+
+```json
+{ "name": "ruby", "extensions": ["rb", "rake", "gemspec", "ru"],
+  "grammar": "ruby.tmLanguage.json", "comment": "#",
+  "source": "vscode:rebornix.ruby@0.28.1" }
+```
+
+The `source` field tracks where the grammar came from (for updates).
+
+The `config.json` gains LSP entries (used by Phase 17):
+
+```json
+{
+  "lsp": {
+    "ruby": { "command": "solargraph", "args": ["stdio"] },
+    "kotlin": { "command": "kotlin-language-server" }
+  }
+}
+```
+
+---
+
+### Part C: Preparing for Phase 17 (LSP) and Phase 9 (Terminal)
+
+The import system extracts more than just grammars. VS Code extensions often declare:
+
+#### LSP Configuration (Phase 17 preparation)
+
+From `package.json` → `contributes.configuration` and activation events:
+
+```json
+{
+  "activationEvents": ["onLanguage:ruby"],
+  "contributes": {
+    "configuration": {
+      "properties": {
+        "ruby.lsp.command": { "type": "string", "default": "solargraph" }
+      }
+    }
+  }
+}
+```
+
+The importer extracts this and writes it to `config.json → lsp` section. When Phase 17 lands, the LSP client reads this config and knows which server to spawn for each language. **Zero additional user configuration needed.**
+
+#### Task/Terminal Configuration (Phase 9 preparation)
+
+From `package.json` → `contributes.taskDefinitions` and terminal profiles:
+
+```json
+{
+  "contributes": {
+    "taskDefinitions": [{
+      "type": "ruby",
+      "properties": {
+        "task": { "type": "string" }
+      }
+    }]
+  }
+}
+```
+
+The importer stores task templates in `config.json → tasks` for Phase 9's integrated terminal:
+
+```json
+{
+  "tasks": {
+    "ruby": {
+      "run": "ruby ${file}",
+      "test": "ruby -e 'require \"minitest/autorun\"' ${file}",
+      "repl": "irb"
+    }
+  }
+}
+```
+
+This means when Phase 9 (terminal) is implemented, `Ctrl+F5` can run the current file using the correct interpreter — because the import already configured it.
+
+---
+
+### File Changes Summary
+
+| File | Action |
+|------|--------|
+| `build.rs` | **Delete** |
+| `src/config.rs` | Remove embedded refs. Add `load_languages()`, `grammar_search_paths()` |
+| `src/syntax/highlight.rs` | Update `load_grammar()` to use search path |
+| `src/import.rs` | **New** — VS Code extension importer |
+| `src/http.rs` | **New** — Minimal HTTP client (curl subprocess) |
+| `src/zip.rs` | **New** — ZIP reader + DEFLATE decompressor |
+| `src/main.rs` | Add `--install`, `--import`, `--import-vsix` subcommands |
+
+### Complexity
+
+| Component | Lines |
+|-----------|-------|
+| **Part A: Runtime loading** | |
+| `grammar_search_paths()` + `load_languages()` | ~50 |
+| `load_grammar()` refactor | ~30 |
+| `--install` subcommand | ~60 |
+| Remove `build.rs` + embedded refs | -65 (deletion) |
+| Test updates | ~60 |
+| **Part B: VS Code import** | |
+| `import.rs` — Marketplace API + VSIX parser | ~600 |
+| `http.rs` — HTTP via curl subprocess | ~250 |
+| `zip.rs` — ZIP reader + DEFLATE inflate | ~350 |
+| CLI interface + interactive selection | ~120 |
+| **Part C: Config extraction** | |
+| LSP config extraction + merge | ~80 |
+| Task/terminal config extraction | ~60 |
+| **Total** | **~1,595 lines** |
+
+### Result
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Binary size (stripped) | 2.5MB | ~500KB |
+| Add new language | Manual: find grammar, download, configure | `zedit --import <name>` |
+| Available languages | 22 built-in | **40,000+ from VS Code Marketplace** |
+| Recompilation needed | Yes | **Never** |
+| LSP auto-configured | No | **Yes** (extracted from extension) |
+| Terminal tasks auto-configured | No | **Yes** (extracted from extension) |
+
+### User Workflows
+
+**Import from Marketplace (primary):**
+```sh
+zedit --import kotlin        # search, select, download, install — done
+zedit main.kt                # syntax highlighting works immediately
+```
+
+**Import from local .vsix file:**
+```sh
+zedit --import-vsix ~/Downloads/custom-lang-0.1.0.vsix
+```
+
+**Manual drop-in (still works):**
+```sh
+cp my-grammar.tmLanguage.json ~/.config/zedit/grammars/
+# edit ~/.config/zedit/languages.json
+```
+
+**Dev mode (contributors):**
+```sh
+# Just edit grammars/languages.json + drop .tmLanguage.json
+cargo run -- myfile.xyz       # works via ./grammars/ search path
+```
+
+---
 
 ## Current State (Post-MVP)
 

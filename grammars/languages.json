@@ -14,5 +14,11 @@
   { "name": "css", "extensions": ["css"], "grammar": "css.tmLanguage.json", "comment": "//" },
   { "name": "zenith", "extensions": ["zl"], "grammar": "zenith.tmLanguage.json", "comment": "//" },
   { "name": "zymbol", "extensions": ["zy"], "grammar": "zymbol.tmLanguage.json", "comment": "//" },
-  { "name": "minilux", "extensions": ["mi"], "grammar": "minilux.tmLanguage.json", "comment": "#" }
+  { "name": "minilux", "extensions": ["mi"], "grammar": "minilux.tmLanguage.json", "comment": "#" },
+  { "name": "go", "extensions": ["go"], "grammar": "go.tmLanguage.json", "comment": "//" },
+  { "name": "java", "extensions": ["java"], "grammar": "java.tmLanguage.json", "comment": "//" },
+  { "name": "yaml", "extensions": ["yml", "yaml"], "grammar": "yaml.tmLanguage.json", "comment": "#" },
+  { "name": "julia", "extensions": ["jl"], "grammar": "julia.tmLanguage.json", "comment": "#" },
+  { "name": "r", "extensions": ["r", "R", "rprofile"], "grammar": "r.tmLanguage.json", "comment": "#" },
+  { "name": "xml", "extensions": ["xml", "xsd", "xsl", "xslt", "svg", "plist"], "grammar": "xml.tmLanguage.json", "comment": "<!--" }
 ]

@@ -119,14 +119,14 @@ zedit --version        # print version
 
 Zedit uses TextMate `.tmLanguage.json` grammars and VS Code-compatible themes. Currently supported languages:
 
-- Rust, C, C++
+- Rust, C, C++, Go, Java
 - JavaScript, TypeScript
-- Python, PHP
-- JSON, TOML
+- Python, PHP, Julia, R
+- JSON, TOML, YAML
 - Markdown
 - Shell (Bash)
-- HTML, CSS
-- Zenith, Zymbol
+- HTML, CSS, XML
+- Zenith, Zymbol, Minilux
 
 Grammars are embedded at compile time. User-provided grammars go in `~/.config/zedit/grammars/`.
 

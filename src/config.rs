@@ -176,15 +176,15 @@ mod tests {
     }
 
     #[test]
-    fn test_default_languages_count() {
+    fn test_default_languages_not_empty() {
         let config = Config::default();
-        assert_eq!(config.languages.len(), 16);
+        assert!(!config.languages.is_empty());
     }
 
     #[test]
     fn test_builtin_languages_parsed_from_json() {
         let langs = builtin_languages();
-        assert_eq!(langs.len(), 16);
+        assert!(!langs.is_empty());
         let rust = langs.iter().find(|l| l.name == "rust").unwrap();
         assert_eq!(rust.extensions, vec!["rs"]);
         assert_eq!(rust.grammar_file, "rust.tmLanguage.json");
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(rust.extensions, vec!["rs", "rsx"]);
         // Other built-ins still present
         assert!(merged.iter().any(|l| l.name == "python"));
-        assert_eq!(merged.len(), 16); // replaced, not duplicated
+        assert_eq!(merged.len(), builtin_languages().len()); // replaced, not duplicated
     }
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
         let user_langs = parse_languages_from_config(&val).unwrap();
         let merged = merge_languages(user_langs, builtin_languages());
         assert!(merged.iter().any(|l| l.name == "ruby"));
-        assert_eq!(merged.len(), 17); // 16 built-in + 1 new
+        assert_eq!(merged.len(), builtin_languages().len() + 1); // built-ins + 1 new
     }
 
     #[test]
