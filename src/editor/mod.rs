@@ -329,83 +329,106 @@ impl Editor {
         match (&ke.key, ke.ctrl, ke.alt) {
             // -- Navigation (works with and without shift) --
             (Key::Up, false, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_up(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_up(buf));
             }
             (Key::Down, false, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_down(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_down(buf));
             }
             (Key::Left, false, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_left(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_left(buf));
             }
             (Key::Right, false, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_right(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_right(buf));
             }
 
             (Key::Left, true, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_word_left(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_word_left(buf));
             }
             (Key::Right, true, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_word_right(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_word_right(buf));
             }
 
             (Key::Home, false, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_home(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_home(buf));
             }
             (Key::End, false, false) => {
-                let b = self.buf_mut();
-                b.cursor.move_end(&b.buffer);
+                self.move_all_cursors(|c, buf| c.move_end(buf));
             }
 
-            (Key::Home, true, false) => self.buf_mut().cursor.move_to_start(),
+            (Key::Home, true, false) => {
+                // Ctrl+Home: collapse to single cursor at start
+                if self.buf().is_multi() {
+                    self.buf_mut().collapse_to_primary();
+                }
+                self.buf_mut().cursor_mut().move_to_start();
+            }
             (Key::End, true, false) => {
+                if self.buf().is_multi() {
+                    self.buf_mut().collapse_to_primary();
+                }
                 let b = self.buf_mut();
-                b.cursor.move_to_end(&b.buffer);
+                b.cursors[b.primary].cursor.move_to_end(&b.buffer);
             }
 
             (Key::PageUp, false, false) => {
+                if self.buf().is_multi() {
+                    self.buf_mut().collapse_to_primary();
+                }
                 let h = self.text_area_height();
                 let b = self.buf_mut();
                 b.scroll_row = b.scroll_row.saturating_sub(h);
-                b.cursor.move_page_up(&b.buffer, h);
+                b.cursors[b.primary].cursor.move_page_up(&b.buffer, h);
             }
             (Key::PageDown, false, false) => {
+                if self.buf().is_multi() {
+                    self.buf_mut().collapse_to_primary();
+                }
                 let h = self.text_area_height();
                 let b = self.buf_mut();
                 let max_line = b.buffer.line_count().saturating_sub(1);
                 b.scroll_row = (b.scroll_row + h).min(max_line);
-                b.cursor.move_page_down(&b.buffer, h);
+                b.cursors[b.primary].cursor.move_page_down(&b.buffer, h);
             }
 
             // -- Editing (delete selection first if active) --
             (Key::Char(ch), false, false) => {
-                self.delete_selection();
-                self.insert_char(*ch);
+                if self.buf().is_multi() {
+                    self.insert_char_multi(*ch);
+                } else {
+                    self.delete_selection();
+                    self.insert_char(*ch);
+                }
             }
             (Key::Enter, false, false) => {
-                self.delete_selection();
-                self.insert_newline();
+                if self.buf().is_multi() {
+                    self.insert_newline_multi();
+                } else {
+                    self.delete_selection();
+                    self.insert_newline();
+                }
             }
             (Key::Tab, false, false) => {
-                self.delete_selection();
-                self.insert_tab();
+                if self.buf().is_multi() {
+                    self.insert_tab_multi();
+                } else {
+                    self.delete_selection();
+                    self.insert_tab();
+                }
             }
             (Key::BackTab, false, _) => {
                 self.unindent();
             }
             (Key::Backspace, false, false) => {
-                if self.delete_selection().is_none() {
+                if self.buf().is_multi() {
+                    self.backspace_multi();
+                } else if self.delete_selection().is_none() {
                     self.backspace();
                 }
             }
             (Key::Delete, false, false) => {
-                if self.delete_selection().is_none() {
+                if self.buf().is_multi() {
+                    self.delete_at_multi();
+                } else if self.delete_selection().is_none() {
                     self.delete_at_cursor();
                 }
             }
@@ -424,8 +447,13 @@ impl Editor {
             }
             (Key::Char('q'), true, false) => self.quit(),
 
-            // -- Duplicate line (Ctrl+D) --
-            (Key::Char('d'), true, false) => self.duplicate_line(),
+            // -- Select next occurrence (Ctrl+D) --
+            (Key::Char('d'), true, false) if !ke.shift => self.select_next_occurrence(),
+            // -- Duplicate line (Ctrl+Shift+D) --
+            (Key::Char('D'), true, false) => self.duplicate_line(),
+
+            // -- Select all occurrences (Ctrl+Shift+L) --
+            (Key::Char('L'), true, false) => self.select_all_occurrences(),
 
             // -- Delete line (Ctrl+Shift+K) --
             (Key::Char('K'), true, false) => self.delete_line(),
@@ -449,14 +477,18 @@ impl Editor {
 
             // -- Undo/Redo --
             (Key::Char('z'), true, false) => {
-                self.buf_mut().selection = None;
+                // Collapse multi-cursor on undo
+                if self.buf().is_multi() {
+                    self.buf_mut().collapse_to_primary();
+                }
+                self.buf_mut().set_selection(None);
                 let cs = self.cursor_state();
                 let b = self.buf_mut();
                 if let Some(restored) = b.undo_stack.undo(&mut b.buffer, cs) {
-                    b.cursor.line = restored.line;
-                    b.cursor.col = restored.col;
-                    b.cursor.desired_col = restored.desired_col;
-                    b.cursor.clamp(&b.buffer);
+                    b.cursors[b.primary].cursor.line = restored.line;
+                    b.cursors[b.primary].cursor.col = restored.col;
+                    b.cursors[b.primary].cursor.desired_col = restored.desired_col;
+                    b.cursors[b.primary].cursor.clamp(&b.buffer);
                     self.invalidate_highlight();
                     self.set_message("Undo", MessageType::Info);
                 } else {
@@ -464,13 +496,16 @@ impl Editor {
                 }
             }
             (Key::Char('y'), true, false) => {
-                self.buf_mut().selection = None;
+                if self.buf().is_multi() {
+                    self.buf_mut().collapse_to_primary();
+                }
+                self.buf_mut().set_selection(None);
                 let b = self.buf_mut();
                 if let Some(restored) = b.undo_stack.redo(&mut b.buffer) {
-                    b.cursor.line = restored.line;
-                    b.cursor.col = restored.col;
-                    b.cursor.desired_col = restored.desired_col;
-                    b.cursor.clamp(&b.buffer);
+                    b.cursors[b.primary].cursor.line = restored.line;
+                    b.cursors[b.primary].cursor.col = restored.col;
+                    b.cursors[b.primary].cursor.desired_col = restored.desired_col;
+                    b.cursors[b.primary].cursor.clamp(&b.buffer);
                     self.invalidate_highlight();
                     self.set_message("Redo", MessageType::Info);
                 } else {
@@ -495,6 +530,14 @@ impl Editor {
             // -- File --
             (Key::Char('o'), true, false) => {
                 self.start_prompt("Open: ", PromptAction::OpenFile);
+            }
+
+            // -- Escape: collapse multi-cursor or cancel --
+            (Key::Escape, false, false) => {
+                if self.buf().is_multi() {
+                    self.buf_mut().collapse_to_primary();
+                    self.set_message("Single cursor", MessageType::Info);
+                }
             }
 
             // -- Pane operations --
@@ -551,9 +594,31 @@ impl Editor {
         if is_nav {
             if ke.shift {
                 self.extend_selection();
+            } else if !self.buf().is_multi() {
+                // Clear selection on nav without shift (single cursor only)
+                self.buf_mut().set_selection(None);
             } else {
-                self.buf_mut().selection = None;
+                // Multi-cursor: clear all selections on nav without shift
+                for cs in &mut self.buf_mut().cursors {
+                    cs.selection = None;
+                }
+                self.buf_mut().sort_and_merge();
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-cursor helpers
+    // -----------------------------------------------------------------------
+
+    /// Apply a movement function to all cursors.
+    fn move_all_cursors<F>(&mut self, f: F)
+    where
+        F: Fn(&mut crate::cursor::Cursor, &crate::buffer::Buffer),
+    {
+        let b = self.buf_mut();
+        for cs in &mut b.cursors {
+            f(&mut cs.cursor, &b.buffer);
         }
     }
 

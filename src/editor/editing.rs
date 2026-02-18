@@ -12,7 +12,7 @@ impl Editor {
     pub(super) fn insert_char(&mut self, ch: char) {
         let before = self.cursor_state();
         let b = self.buf();
-        let pos = b.cursor.byte_offset(&b.buffer);
+        let pos = b.cursor().byte_offset(&b.buffer);
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf);
         let s_owned = s.to_string();
@@ -23,20 +23,20 @@ impl Editor {
             before,
             GroupContext::Typing,
         );
-        b.cursor.move_right(&b.buffer);
+        b.cursors[b.primary].cursor.move_right(&b.buffer);
         self.invalidate_highlight();
     }
 
     pub(super) fn insert_newline(&mut self) {
         let before = self.cursor_state();
         let b = self.buf();
-        let pos = b.cursor.byte_offset(&b.buffer);
+        let pos = b.cursor().byte_offset(&b.buffer);
 
         let insert_text = if self.config().auto_indent {
             // Auto-indent: capture leading whitespace from current line
             let indent = b
                 .buffer
-                .get_line(b.cursor.line)
+                .get_line(b.cursor().line)
                 .unwrap_or_default()
                 .chars()
                 .take_while(|c| *c == ' ' || *c == '\t')
@@ -58,7 +58,7 @@ impl Editor {
         );
         // Move past \n + indent chars
         for _ in insert_text.chars() {
-            b.cursor.move_right(&b.buffer);
+            b.cursors[b.primary].cursor.move_right(&b.buffer);
         }
         self.invalidate_highlight();
     }
@@ -73,7 +73,7 @@ impl Editor {
         };
         let before = self.cursor_state();
         let b = self.buf();
-        let pos = b.cursor.byte_offset(&b.buffer);
+        let pos = b.cursor().byte_offset(&b.buffer);
         let b = self.buf_mut();
         b.buffer.insert(pos, &insert_text);
         b.undo_stack.record(
@@ -85,22 +85,22 @@ impl Editor {
             GroupContext::Other,
         );
         for _ in insert_text.chars() {
-            b.cursor.move_right(&b.buffer);
+            b.cursors[b.primary].cursor.move_right(&b.buffer);
         }
         self.invalidate_highlight();
     }
 
     pub(super) fn backspace(&mut self) {
         let b = self.buf();
-        let pos = b.cursor.byte_offset(&b.buffer);
+        let pos = b.cursor().byte_offset(&b.buffer);
         if pos == 0 {
             return;
         }
         let before = self.cursor_state();
         let b = self.buf_mut();
         // Move cursor left first (handles UTF-8 boundaries)
-        b.cursor.move_left(&b.buffer);
-        let new_pos = b.cursor.byte_offset(&b.buffer);
+        b.cursors[b.primary].cursor.move_left(&b.buffer);
+        let new_pos = b.cursor().byte_offset(&b.buffer);
         let delete_len = pos - new_pos;
         let deleted = b.buffer.slice(new_pos, pos);
         b.buffer.delete(new_pos, delete_len);
@@ -117,7 +117,7 @@ impl Editor {
 
     pub(super) fn delete_at_cursor(&mut self) {
         let b = self.buf();
-        let pos = b.cursor.byte_offset(&b.buffer);
+        let pos = b.cursor().byte_offset(&b.buffer);
         if pos >= b.buffer.len() {
             return;
         }
@@ -133,7 +133,7 @@ impl Editor {
                 before,
                 GroupContext::Deleting,
             );
-            b.cursor.clamp(&b.buffer);
+            b.cursors[b.primary].cursor.clamp(&b.buffer);
             self.invalidate_highlight();
         }
     }
@@ -144,7 +144,7 @@ impl Editor {
 
     pub(super) fn duplicate_line(&mut self) {
         let b = self.buf();
-        let line = b.cursor.line;
+        let line = b.cursor().line;
         let line_text = b.buffer.get_line(line).unwrap_or_default();
         let line_end = b.buffer.line_end(line).unwrap_or(0);
         let insert_text = format!("\n{}", line_text);
@@ -160,7 +160,7 @@ impl Editor {
             GroupContext::Other,
         );
         // Move cursor to duplicated line
-        b.cursor.move_down(&b.buffer);
+        b.cursors[b.primary].cursor.move_down(&b.buffer);
         self.invalidate_highlight();
         self.set_message("Line duplicated", MessageType::Info);
     }
@@ -168,7 +168,7 @@ impl Editor {
     pub(super) fn delete_line(&mut self) {
         let before = self.cursor_state();
         let b = self.buf();
-        let line = b.cursor.line;
+        let line = b.cursor().line;
         let line_start = b.buffer.line_start(line).unwrap_or(0);
         let line_end = b.buffer.line_end(line).unwrap_or(0);
         let line_count = b.buffer.line_count();
@@ -192,9 +192,9 @@ impl Editor {
             before,
             GroupContext::Other,
         );
-        b.cursor.clamp(&b.buffer);
-        b.cursor.col = 0;
-        b.cursor.desired_col = 0;
+        b.cursors[b.primary].cursor.clamp(&b.buffer);
+        b.cursors[b.primary].cursor.col = 0;
+        b.cursors[b.primary].cursor.desired_col = 0;
         self.invalidate_highlight();
         self.set_message("Line deleted", MessageType::Info);
     }
@@ -208,7 +208,7 @@ impl Editor {
                 self.unindent_line(line);
             }
         } else {
-            let line = self.buf().cursor.line;
+            let line = self.buf().cursor().line;
             self.unindent_line(line);
         }
     }
@@ -241,26 +241,27 @@ impl Editor {
             GroupContext::Other,
         );
         // Adjust cursor if on this line
-        if b.cursor.line == line {
-            b.cursor.col = b.cursor.col.saturating_sub(remove_len);
-            b.cursor.desired_col = b.cursor.col;
+        if b.cursor().line == line {
+            let new_col = b.cursor().col.saturating_sub(remove_len);
+            b.cursors[b.primary].cursor.col = new_col;
+            b.cursors[b.primary].cursor.desired_col = new_col;
         }
         self.invalidate_highlight();
     }
 
     pub(super) fn select_line(&mut self) {
         let b = self.buf();
-        let line = b.cursor.line;
+        let line = b.cursor().line;
         let line_start = b.buffer.line_start(line).unwrap_or(0);
         let line_end = if line + 1 < b.buffer.line_count() {
             b.buffer.line_start(line + 1).unwrap_or(b.buffer.len())
         } else {
             b.buffer.len()
         };
-        self.buf_mut().selection = Some(Selection {
+        self.buf_mut().set_selection(Some(Selection {
             anchor: line_start,
             head: line_end,
-        });
+        }));
         // Move cursor to end of selection
         self.jump_to_byte(line_end);
     }
@@ -286,7 +287,7 @@ impl Editor {
             let el = b.buffer.byte_to_line(if end > 0 { end - 1 } else { 0 });
             (sl, el)
         } else {
-            let line = self.buf().cursor.line;
+            let line = self.buf().cursor().line;
             (line, line)
         };
 
@@ -346,7 +347,7 @@ impl Editor {
         }
 
         let b = self.buf_mut();
-        b.cursor.clamp(&b.buffer);
+        b.cursors[b.primary].cursor.clamp(&b.buffer);
         self.invalidate_highlight();
     }
 
@@ -477,9 +478,9 @@ impl Editor {
                         && let Some((line, col)) = self.screen_to_buffer(me.col, me.row)
                     {
                         let b = self.buf_mut();
-                        b.cursor.set_position(line, col, &b.buffer);
-                        let head = b.cursor.byte_offset(&b.buffer);
-                        if let Some(ref mut sel) = b.selection {
+                        b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+                        let head = b.cursor().byte_offset(&b.buffer);
+                        if let Some(ref mut sel) = b.cursors[b.primary].selection {
                             sel.head = head;
                         }
                     }
@@ -493,23 +494,36 @@ impl Editor {
                             self.active_pane = pane_id;
                             self.active_buffer = self.active_buffer_index();
                         }
+
+                        // Alt+Click adds a cursor instead of replacing
+                        if me.alt && !self.buf().cursors.is_empty() {
+                            self.add_cursor_at(line, col);
+                            self.mouse_dragging = false;
+                            return;
+                        }
+
+                        // Normal click: collapse to single cursor
+                        if self.buf().is_multi() {
+                            self.buf_mut().collapse_to_primary();
+                        }
+
                         let b = self.buf_mut();
-                        b.cursor.set_position(line, col, &b.buffer);
-                        let offset = b.cursor.byte_offset(&b.buffer);
-                        b.selection = Some(Selection {
+                        b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+                        let offset = b.cursor().byte_offset(&b.buffer);
+                        b.set_selection(Some(Selection {
                             anchor: offset,
                             head: offset,
-                        });
+                        }));
                         self.mouse_dragging = true;
                     }
                 } else {
                     // Release
                     self.mouse_dragging = false;
                     // Clear selection if anchor == head (just a click, no drag)
-                    if let Some(sel) = self.buf().selection
+                    if let Some(sel) = self.buf().selection()
                         && sel.anchor == sel.head
                     {
-                        self.buf_mut().selection = None;
+                        self.buf_mut().set_selection(None);
                     }
                 }
             }
@@ -527,10 +541,10 @@ impl Editor {
                 if target_pane == Some(self.active_pane) || target_pane.is_none() {
                     let h = self.text_area_height();
                     let b = self.buf_mut();
-                    if b.cursor.line >= b.scroll_row + h {
+                    if b.cursor().line >= b.scroll_row + h {
                         let target = b.scroll_row + h - 1;
-                        let col = b.cursor.col;
-                        b.cursor.set_position(target, col, &b.buffer);
+                        let col = b.cursor().col;
+                        b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
                     }
                 }
             }
@@ -546,10 +560,10 @@ impl Editor {
                 }
                 if target_pane == Some(self.active_pane) || target_pane.is_none() {
                     let b = self.buf_mut();
-                    if b.cursor.line < b.scroll_row {
+                    if b.cursor().line < b.scroll_row {
                         let target = b.scroll_row;
-                        let col = b.cursor.col;
-                        b.cursor.set_position(target, col, &b.buffer);
+                        let col = b.cursor().col;
+                        b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
                     }
                 }
             }
@@ -574,7 +588,7 @@ impl Editor {
     pub(super) fn handle_paste(&mut self, text: &str) {
         let before = self.cursor_state();
         let b = self.buf();
-        let pos = b.cursor.byte_offset(&b.buffer);
+        let pos = b.cursor().byte_offset(&b.buffer);
         let b = self.buf_mut();
         b.buffer.insert(pos, text);
         b.undo_stack.record(
@@ -587,7 +601,7 @@ impl Editor {
         );
         // Advance cursor past inserted text
         for _ in text.chars() {
-            b.cursor.move_right(&b.buffer);
+            b.cursors[b.primary].cursor.move_right(&b.buffer);
         }
         self.invalidate_highlight();
     }
@@ -599,16 +613,350 @@ impl Editor {
     pub(super) fn cursor_state(&self) -> CursorState {
         let b = self.buf();
         CursorState {
-            line: b.cursor.line,
-            col: b.cursor.col,
-            desired_col: b.cursor.desired_col,
+            line: b.cursor().line,
+            col: b.cursor().col,
+            desired_col: b.cursor().desired_col,
         }
     }
 
     pub(super) fn invalidate_highlight(&mut self) {
-        let cursor_line = self.buf().cursor.line;
+        let cursor_line = self.buf().cursor().line;
         if let Some(h) = &mut self.buf_mut().highlighter {
             h.invalidate_from(cursor_line);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-cursor editing operations
+    // -----------------------------------------------------------------------
+
+    /// Insert a character at all cursor positions (last-to-first).
+    pub(super) fn insert_char_multi(&mut self, ch: char) {
+        let before = self.cursor_state();
+        let mut buf_str = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf_str);
+        let text = s.to_string();
+        let char_len = text.len();
+
+        // Delete selections first (last-to-first)
+        self.delete_all_selections();
+
+        let b = self.buf_mut();
+        // Collect positions (sorted last-to-first by byte offset)
+        let mut positions: Vec<(usize, usize)> = b
+            .cursors
+            .iter()
+            .enumerate()
+            .map(|(i, cs)| (i, cs.cursor.byte_offset(&b.buffer)))
+            .collect();
+        positions.sort_by(|a, b_pos| b_pos.1.cmp(&a.1)); // reverse sort by offset
+
+        // Insert last-to-first
+        for &(_, pos) in &positions {
+            b.buffer.insert(pos, &text);
+        }
+
+        // Record as single undo operation (using primary cursor state)
+        // We record one compound insert for simplicity
+        let primary_pos = b.cursors[b.primary].cursor.byte_offset(&b.buffer);
+        b.undo_stack.record(
+            Operation::Insert {
+                pos: primary_pos.saturating_sub(char_len),
+                text: text.clone(),
+            },
+            before,
+            GroupContext::Typing,
+        );
+
+        // Update all cursor positions: move each right by one char
+        for cs in &mut b.cursors {
+            cs.cursor.move_right(&b.buffer);
+        }
+
+        // Invalidate from the earliest affected line
+        let min_line = b
+            .cursors
+            .iter()
+            .map(|cs| cs.cursor.line)
+            .min()
+            .unwrap_or(0);
+        if let Some(h) = &mut b.highlighter {
+            h.invalidate_from(min_line.saturating_sub(1));
+        }
+    }
+
+    /// Insert a newline at all cursor positions (last-to-first).
+    pub(super) fn insert_newline_multi(&mut self) {
+        let before = self.cursor_state();
+        self.delete_all_selections();
+
+        let auto_indent = self.config().auto_indent;
+        let b = self.buf_mut();
+
+        // Collect cursor info sorted last-to-first
+        let mut cursor_info: Vec<(usize, usize, String)> = Vec::with_capacity(b.cursors.len());
+        for (i, cs) in b.cursors.iter().enumerate() {
+            let pos = cs.cursor.byte_offset(&b.buffer);
+            let insert_text = if auto_indent {
+                let indent = b
+                    .buffer
+                    .get_line(cs.cursor.line)
+                    .unwrap_or_default()
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .collect::<String>();
+                format!("\n{}", indent)
+            } else {
+                "\n".to_string()
+            };
+            cursor_info.push((i, pos, insert_text));
+        }
+        cursor_info.sort_by(|a, b_info| b_info.1.cmp(&a.1)); // reverse sort
+
+        for (_, pos, insert_text) in &cursor_info {
+            b.buffer.insert(*pos, insert_text);
+        }
+
+        // Record undo for primary
+        let primary_pos = b.cursors[b.primary].cursor.byte_offset(&b.buffer);
+        b.undo_stack.record(
+            Operation::Insert {
+                pos: primary_pos,
+                text: "\n".to_string(),
+            },
+            before,
+            GroupContext::Other,
+        );
+
+        // Move cursors past inserted text
+        for cs in &mut b.cursors {
+            // Each cursor needs to move right by the length of its insert
+            // For simplicity, just recalculate based on current buffer state
+            cs.cursor.move_right(&b.buffer); // past \n at minimum
+        }
+
+        // Re-position: since we inserted in reverse, byte offsets shifted
+        // It's safest to sort and merge
+        b.sort_and_merge();
+
+        let min_line = b
+            .cursors
+            .iter()
+            .map(|cs| cs.cursor.line)
+            .min()
+            .unwrap_or(0);
+        if let Some(h) = &mut b.highlighter {
+            h.invalidate_from(min_line.saturating_sub(1));
+        }
+    }
+
+    /// Insert a tab at all cursor positions (last-to-first).
+    pub(super) fn insert_tab_multi(&mut self) {
+        let before = self.cursor_state();
+        let use_spaces = self.config().use_spaces;
+        let tab_size = self.config().tab_size;
+        let insert_text = if use_spaces {
+            " ".repeat(tab_size)
+        } else {
+            "\t".to_string()
+        };
+        let text_len = insert_text.len();
+
+        self.delete_all_selections();
+
+        let b = self.buf_mut();
+        let mut positions: Vec<usize> = b
+            .cursors
+            .iter()
+            .map(|cs| cs.cursor.byte_offset(&b.buffer))
+            .collect();
+        positions.sort_unstable();
+        positions.reverse();
+
+        for &pos in &positions {
+            b.buffer.insert(pos, &insert_text);
+        }
+
+        let primary_pos = b.cursors[b.primary].cursor.byte_offset(&b.buffer);
+        b.undo_stack.record(
+            Operation::Insert {
+                pos: primary_pos,
+                text: insert_text.clone(),
+            },
+            before,
+            GroupContext::Other,
+        );
+
+        for cs in &mut b.cursors {
+            for _ in 0..text_len {
+                cs.cursor.move_right(&b.buffer);
+            }
+        }
+
+        let min_line = b
+            .cursors
+            .iter()
+            .map(|cs| cs.cursor.line)
+            .min()
+            .unwrap_or(0);
+        if let Some(h) = &mut b.highlighter {
+            h.invalidate_from(min_line.saturating_sub(1));
+        }
+    }
+
+    /// Backspace at all cursor positions (last-to-first).
+    pub(super) fn backspace_multi(&mut self) {
+        // If any cursor has a selection, delete selections instead
+        if self.buf().cursors.iter().any(|cs| cs.selection.is_some()) {
+            self.delete_all_selections();
+            return;
+        }
+
+        let before = self.cursor_state();
+        let b = self.buf_mut();
+
+        // Collect (cursor_index, byte_offset) sorted last-to-first
+        let mut positions: Vec<(usize, usize)> = b
+            .cursors
+            .iter()
+            .enumerate()
+            .map(|(i, cs)| (i, cs.cursor.byte_offset(&b.buffer)))
+            .collect();
+        positions.sort_by(|a, b_pos| b_pos.1.cmp(&a.1));
+
+        for &(idx, pos) in &positions {
+            if pos == 0 {
+                continue;
+            }
+            // Move cursor left first
+            b.cursors[idx].cursor.move_left(&b.buffer);
+            let new_pos = b.cursors[idx].cursor.byte_offset(&b.buffer);
+            let delete_len = pos - new_pos;
+            b.buffer.delete(new_pos, delete_len);
+        }
+
+        let primary_pos = b.cursors[b.primary].cursor.byte_offset(&b.buffer);
+        b.undo_stack.record(
+            Operation::Delete {
+                pos: primary_pos,
+                text: String::new(), // simplified for multi-cursor undo
+            },
+            before,
+            GroupContext::Deleting,
+        );
+
+        b.sort_and_merge();
+
+        let min_line = b
+            .cursors
+            .iter()
+            .map(|cs| cs.cursor.line)
+            .min()
+            .unwrap_or(0);
+        if let Some(h) = &mut b.highlighter {
+            h.invalidate_from(min_line.saturating_sub(1));
+        }
+    }
+
+    /// Delete at all cursor positions (last-to-first).
+    pub(super) fn delete_at_multi(&mut self) {
+        if self.buf().cursors.iter().any(|cs| cs.selection.is_some()) {
+            self.delete_all_selections();
+            return;
+        }
+
+        let before = self.cursor_state();
+        let b = self.buf_mut();
+
+        let mut positions: Vec<usize> = b
+            .cursors
+            .iter()
+            .map(|cs| cs.cursor.byte_offset(&b.buffer))
+            .collect();
+        positions.sort_unstable();
+        positions.reverse();
+
+        for &pos in &positions {
+            if pos >= b.buffer.len() {
+                continue;
+            }
+            if let Some(ch) = b.buffer.char_at(pos) {
+                let char_len = ch.len_utf8();
+                b.buffer.delete(pos, char_len);
+            }
+        }
+
+        let primary_pos = b.cursors[b.primary].cursor.byte_offset(&b.buffer);
+        b.undo_stack.record(
+            Operation::Delete {
+                pos: primary_pos,
+                text: String::new(),
+            },
+            before,
+            GroupContext::Deleting,
+        );
+
+        // Clamp all cursors
+        for cs in &mut b.cursors {
+            cs.cursor.clamp(&b.buffer);
+        }
+        b.sort_and_merge();
+
+        let min_line = b
+            .cursors
+            .iter()
+            .map(|cs| cs.cursor.line)
+            .min()
+            .unwrap_or(0);
+        if let Some(h) = &mut b.highlighter {
+            h.invalidate_from(min_line.saturating_sub(1));
+        }
+    }
+
+    /// Delete selections at all cursors that have them (last-to-first by offset).
+    fn delete_all_selections(&mut self) {
+        let before = self.cursor_state();
+        let b = self.buf_mut();
+
+        // Collect selection ranges, sorted last-to-first
+        let mut sel_info: Vec<(usize, usize, usize)> = Vec::new(); // (cursor_idx, start, end)
+        for (i, cs) in b.cursors.iter().enumerate() {
+            if let Some(sel) = cs.selection {
+                let start = sel.anchor.min(sel.head);
+                let end = sel.anchor.max(sel.head);
+                if start != end {
+                    sel_info.push((i, start, end));
+                }
+            }
+        }
+        sel_info.sort_by(|a, b_info| b_info.1.cmp(&a.1)); // reverse by start
+
+        for &(idx, start, end) in &sel_info {
+            b.buffer.delete(start, end - start);
+            // Reposition cursor to selection start
+            let line = b.buffer.byte_to_line(start);
+            let line_start = b.buffer.line_start(line).unwrap_or(0);
+            let col = start - line_start;
+            b.cursors[idx].cursor.set_position(line, col, &b.buffer);
+            b.cursors[idx].selection = None;
+        }
+
+        if !sel_info.is_empty() {
+            let primary_pos = b.cursors[b.primary].cursor.byte_offset(&b.buffer);
+            b.undo_stack.record(
+                Operation::Delete {
+                    pos: primary_pos,
+                    text: String::new(),
+                },
+                before,
+                GroupContext::Other,
+            );
+            b.sort_and_merge();
+        }
+
+        // Clear all remaining selections
+        for cs in &mut b.cursors {
+            cs.selection = None;
         }
     }
 }

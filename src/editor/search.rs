@@ -148,7 +148,7 @@ impl Editor {
         let text = self.buf().buffer.text();
         let matches = find_all_matches(&text, pattern, &mode);
         let b = self.buf();
-        let cursor_byte = b.cursor.byte_offset(&b.buffer);
+        let cursor_byte = b.cursor().byte_offset(&b.buffer);
 
         // Find nearest match at or after cursor
         let current = if matches.is_empty() {
@@ -231,7 +231,7 @@ impl Editor {
         let line_start = b.buffer.line_start(line).unwrap_or(0);
         let col = byte_pos - line_start;
         let b = self.buf_mut();
-        b.cursor.set_position(line, col, &b.buffer);
+        b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
     }
 
     pub(super) fn execute_replace_all(&mut self, find_pattern: &str, replacement: &str) {
@@ -278,7 +278,7 @@ impl Editor {
         // Clear search state after replace
         let b = self.buf_mut();
         b.search = None;
-        b.cursor.clamp(&b.buffer);
+        b.cursors[b.primary].cursor.clamp(&b.buffer);
         self.set_message(
             &format!("Replaced {} occurrences", count),
             MessageType::Info,

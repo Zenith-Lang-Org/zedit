@@ -30,7 +30,7 @@ impl Editor {
         let w = self.text_area_width();
 
         let b = self.buf();
-        let cursor_line = b.cursor.line;
+        let cursor_line = b.cursor().line;
         let scroll_row = b.scroll_row;
 
         // Vertical scrolling
@@ -56,8 +56,8 @@ impl Editor {
 
     pub(super) fn cursor_display_col(&self) -> usize {
         let b = self.buf();
-        let line_text = b.buffer.get_line(b.cursor.line).unwrap_or_default();
-        byte_col_to_display_col(&line_text, b.cursor.col)
+        let line_text = b.buffer.get_line(b.cursor().line).unwrap_or_default();
+        byte_col_to_display_col(&line_text, b.cursor().col)
     }
 
     pub(super) fn render(&mut self) {
@@ -113,7 +113,7 @@ impl Editor {
             };
             let position = format!(
                 "Ln {}, Col {}",
-                b.cursor.line + 1,
+                b.cursor().line + 1,
                 self.cursor_display_col() + 1,
             );
 
@@ -146,9 +146,17 @@ impl Editor {
                 ""
             };
 
+            // Multi-cursor indicator
+            let multi_cursor_indicator = if self.buf().is_multi() {
+                format!(" [{} cursors]", self.buf().cursors.len())
+            } else {
+                String::new()
+            };
+
             let left = format!(
-                " {}{}{}{}{}",
-                pane_indicator, buf_indicator, filename, modified_marker, regex_indicator
+                " {}{}{}{}{}{}",
+                pane_indicator, buf_indicator, filename, modified_marker, regex_indicator,
+                multi_cursor_indicator
             );
             let right = format!("{} | {} ", position, color_str);
 
@@ -232,7 +240,8 @@ impl Editor {
             terminal::move_cursor(msg_row_1based, (prompt_cursor_col + 1) as u16);
         } else if let Some(rect) = self.layout.pane_rect(self.active_pane) {
             let b = self.buf();
-            let cursor_screen_row = b.cursor.line.saturating_sub(b.scroll_row) + rect.y as usize;
+            let cursor_screen_row =
+                b.cursor().line.saturating_sub(b.scroll_row) + rect.y as usize;
             let cursor_display = self.cursor_display_col();
             let cursor_screen_col = cursor_display
                 .saturating_sub(b.scroll_col)
@@ -263,10 +272,34 @@ impl Editor {
         let scroll_col = bs.scroll_col;
         let gutter_width = bs.gutter_width;
         let line_count = bs.buffer.line_count();
-        let sel_range = if pane_id == self.active_pane {
-            self.selection_range()
+
+        // Collect all selection ranges for this pane
+        let sel_ranges: Vec<(usize, usize)> = if pane_id == self.active_pane {
+            bs.cursors
+                .iter()
+                .filter_map(|cs| {
+                    cs.selection.map(|sel| {
+                        let s = sel.anchor.min(sel.head);
+                        let e = sel.anchor.max(sel.head);
+                        (s, e)
+                    })
+                })
+                .collect()
         } else {
-            None
+            Vec::new()
+        };
+
+        // Collect secondary cursor byte offsets for rendering
+        let secondary_cursor_offsets: Vec<usize> = if pane_id == self.active_pane && bs.is_multi()
+        {
+            bs.cursors
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != bs.primary)
+                .map(|(_, cs)| cs.cursor.byte_offset(&bs.buffer))
+                .collect()
+        } else {
+            Vec::new()
         };
 
         for local_row in 0..pane_h {
@@ -341,10 +374,15 @@ impl Editor {
                             break;
                         }
                         let char_byte = line_start_byte + byte_offset_in_line;
-                        let is_selected =
-                            sel_range.is_some_and(|(s, e)| char_byte >= s && char_byte < e);
+                        let is_selected = sel_ranges
+                            .iter()
+                            .any(|(s, e)| char_byte >= *s && char_byte < *e);
+                        let is_secondary_cursor = secondary_cursor_offsets.contains(&char_byte);
                         let (fg, bg, bold) = if is_selected {
                             (Color::Ansi(0), Color::Ansi(7), true)
+                        } else if is_secondary_cursor {
+                            // Secondary cursor: inverted dimmed block
+                            (Color::Ansi(0), Color::Color256(246), true)
                         } else if pane_id == self.active_pane {
                             if let Some(is_current) = self.match_at_byte(char_byte) {
                                 if is_current {
@@ -378,11 +416,16 @@ impl Editor {
                         .saturating_add(gutter_width);
                 let line_end_byte = line_start_byte + line_text.len();
                 for col in start_fill..(pane_x + pane_w) {
-                    let is_trailing_selected = sel_range
-                        .is_some_and(|(s, e)| line_end_byte >= s && line_end_byte < e)
+                    let is_trailing_selected = sel_ranges
+                        .iter()
+                        .any(|(s, e)| line_end_byte >= *s && line_end_byte < *e)
                         && col == start_fill;
+                    let is_secondary_cursor_trail =
+                        secondary_cursor_offsets.contains(&line_end_byte) && col == start_fill;
                     let (fg, bg, bold) = if is_trailing_selected {
                         (Color::Ansi(0), Color::Ansi(7), true)
+                    } else if is_secondary_cursor_trail {
+                        (Color::Ansi(0), Color::Color256(246), true)
                     } else {
                         (Color::Default, Color::Default, false)
                     };
@@ -476,11 +519,13 @@ impl Editor {
             "  Ctrl+C  Copy      Alt+\u{2190}\u{2192}\u{2191}\u{2193}  Focus pane      ",
             "  Ctrl+X  Cut       Alt+\u{21e7}\u{2190}\u{2192}  Resize pane     ",
             "  Ctrl+V  Paste                               ",
-            "  Ctrl+D  Dup line SELECTION                   ",
-            "  Ctrl+\u{21e7}K Del line  Shift+\u{2190}\u{2192}\u{2191}\u{2193} Extend sel     ",
-            "  Tab     Indent    Ctrl+\u{21e7}\u{2190}\u{2192}  Select word    ",
-            "  \u{21e7}Tab    Unindent  Ctrl+A    Select all      ",
-            "  Ctrl+/  Comment   Ctrl+L    Select line     ",
+            "  Ctrl+D  Sel next MULTI-CURSOR                ",
+            "  Ctrl+\u{21e7}D Dup line  Ctrl+\u{21e7}L  All occurrences ",
+            "  Ctrl+\u{21e7}K Del line  Alt+Click Add cursor      ",
+            "  Tab     Indent    Escape    Single cursor   ",
+            "  \u{21e7}Tab    Unindent SELECTION                   ",
+            "  Ctrl+/  Comment   Shift+\u{2190}\u{2192}\u{2191}\u{2193} Extend sel     ",
+            "  Ctrl+L  Sel line  Ctrl+A    Select all      ",
             "                                              ",
             "        Press Esc or F1 to close              ",
         ];

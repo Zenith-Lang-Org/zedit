@@ -77,6 +77,7 @@ pub struct MouseEvent {
     pub row: u16,
     pub pressed: bool,
     pub motion: bool,
+    pub alt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +301,7 @@ fn key_with_mod(key: Key, (ctrl, alt, shift): (bool, bool, bool)) -> Event {
 
 fn parse_sgr_mouse(btn_bits: u16, col: u16, row: u16, pressed: bool) -> Event {
     let is_motion = btn_bits & 32 != 0;
+    let is_alt = btn_bits & 8 != 0; // Meta/Alt modifier bit
     let base_bits = btn_bits & !32; // strip motion bit
 
     let button = match base_bits & 0x43 {
@@ -320,6 +322,7 @@ fn parse_sgr_mouse(btn_bits: u16, col: u16, row: u16, pressed: bool) -> Event {
         row: row.saturating_sub(1),
         pressed: effective_pressed,
         motion: is_motion,
+        alt: is_alt,
     })
 }
 
@@ -495,6 +498,7 @@ mod tests {
                 row: 4,
                 pressed: true,
                 motion: false,
+                alt: false,
             })
         );
         assert_eq!(
@@ -505,6 +509,7 @@ mod tests {
                 row: 0,
                 pressed: true,
                 motion: false,
+                alt: false,
             })
         );
     }
@@ -520,6 +525,7 @@ mod tests {
                 row: 2,
                 pressed: true,
                 motion: true,
+                alt: false,
             })
         );
     }

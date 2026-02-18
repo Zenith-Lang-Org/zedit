@@ -293,9 +293,9 @@ fn test_find_all_matches_utf8() {
 fn test_buffer_state_new_empty() {
     let bs = BufferState::new_empty(true);
     assert_eq!(bs.buffer.len(), 0);
-    assert_eq!(bs.cursor.line, 0);
+    assert_eq!(bs.cursor().line, 0);
     assert_eq!(bs.scroll_row, 0);
-    assert!(bs.selection.is_none());
+    assert!(bs.selection().is_none());
     assert!(bs.highlighter.is_none());
 }
 

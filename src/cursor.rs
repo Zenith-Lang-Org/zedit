@@ -1,5 +1,6 @@
 use crate::buffer::Buffer;
 
+#[derive(Clone)]
 pub struct Cursor {
     pub line: usize,
     pub col: usize,
