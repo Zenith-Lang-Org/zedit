@@ -70,8 +70,8 @@ impl Editor {
             }
             let text = self.buf().buffer.slice(start, end);
             let len = text.chars().count();
-            self.clipboard = text.clone();
             terminal::set_clipboard_osc52(&text);
+            self.clipboard.set_text(text);
             self.set_message(&format!("Copied {} chars", len), MessageType::Info);
         } else {
             // No selection: copy current line
@@ -84,8 +84,8 @@ impl Editor {
         let line_text = b.buffer.get_line(b.cursor.line).unwrap_or_default();
         let text = format!("{}\n", line_text);
         let len = line_text.chars().count();
-        self.clipboard = text.clone();
-        terminal::set_clipboard_osc52(&self.clipboard);
+        terminal::set_clipboard_osc52(&text);
+        self.clipboard.set_line(text);
         self.set_message(&format!("Copied line ({} chars)", len), MessageType::Info);
     }
 
@@ -97,8 +97,8 @@ impl Editor {
             }
             let text = self.delete_selection().unwrap_or_default();
             let len = text.chars().count();
-            self.clipboard = text.clone();
             terminal::set_clipboard_osc52(&text);
+            self.clipboard.set_text(text);
             self.set_message(&format!("Cut {} chars", len), MessageType::Info);
         } else {
             self.cut_current_line();
@@ -132,8 +132,8 @@ impl Editor {
         b.cursor.clamp(&b.buffer);
         b.cursor.col = 0;
         b.cursor.desired_col = 0;
-        self.clipboard = text.clone();
         terminal::set_clipboard_osc52(&text);
+        self.clipboard.set_line(text);
         self.set_message(&format!("Cut line ({} chars)", len), MessageType::Info);
     }
 
@@ -144,8 +144,31 @@ impl Editor {
         }
         // Delete selection if active
         self.delete_selection();
-        let text = self.clipboard.clone();
-        self.handle_paste(&text);
+
+        if self.clipboard.line_mode {
+            // Line-mode paste: insert as a new line above current cursor position
+            let text = self.clipboard.text();
+            let before = self.cursor_state();
+            let b = self.buf();
+            let line_start = b.buffer.line_start(b.cursor.line).unwrap_or(0);
+            let b = self.buf_mut();
+            b.buffer.insert(line_start, &text);
+            b.undo_stack.record(
+                Operation::Insert {
+                    pos: line_start,
+                    text: text.clone(),
+                },
+                before,
+                GroupContext::Paste,
+            );
+            // Position cursor at beginning of pasted content
+            b.cursor.col = 0;
+            b.cursor.desired_col = 0;
+            self.invalidate_highlight();
+        } else {
+            let text = self.clipboard.text();
+            self.handle_paste(&text);
+        }
     }
 
     pub(super) fn select_all(&mut self) {

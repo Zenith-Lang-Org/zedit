@@ -16,7 +16,7 @@ pub enum Color {
 // Cell
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub ch: char,
     pub fg: Color,
@@ -39,25 +39,26 @@ impl Default for Cell {
 }
 
 // ---------------------------------------------------------------------------
-// Screen
+// Screen — flat Vec<Cell> with double-buffer swap
 // ---------------------------------------------------------------------------
 
 pub struct Screen {
     width: usize,
     height: usize,
-    cells: Vec<Vec<Cell>>,
-    prev_cells: Vec<Vec<Cell>>,
+    cells: Vec<Cell>,
+    prev_cells: Vec<Cell>,
+    first_frame: bool,
 }
 
 impl Screen {
     pub fn new(width: usize, height: usize) -> Self {
-        let cells = make_grid(width, height);
-        let prev_cells = Vec::new(); // empty → forces full draw on first flush
+        let size = width * height;
         Self {
             width,
             height,
-            cells,
-            prev_cells,
+            cells: vec![Cell::default(); size],
+            prev_cells: vec![Cell::default(); size],
+            first_frame: true,
         }
     }
 
@@ -69,19 +70,23 @@ impl Screen {
         self.height
     }
 
+    #[inline]
+    fn idx(&self, row: usize, col: usize) -> usize {
+        row * self.width + col
+    }
+
     // -- Building frames ---------------------------------------------------
 
     pub fn clear(&mut self) {
-        for row in &mut self.cells {
-            for cell in row.iter_mut() {
-                *cell = Cell::default();
-            }
+        for cell in &mut self.cells {
+            *cell = Cell::default();
         }
     }
 
     pub fn put_cell(&mut self, row: usize, col: usize, cell: Cell) {
         if row < self.height && col < self.width {
-            self.cells[row][col] = cell;
+            let i = self.idx(row, col);
+            self.cells[i] = cell;
         }
     }
 
@@ -172,8 +177,9 @@ impl Screen {
             terminal::show_cursor();
             terminal::flush();
         }
-        // Swap: prev = current, then clear current for next frame
-        self.prev_cells = self.cells.clone();
+        self.first_frame = false;
+        // Zero-alloc swap: prev gets current, then clear current for next frame
+        std::mem::swap(&mut self.cells, &mut self.prev_cells);
         self.clear();
     }
 
@@ -182,8 +188,10 @@ impl Screen {
     pub fn resize(&mut self, width: usize, height: usize) {
         self.width = width;
         self.height = height;
-        self.cells = make_grid(width, height);
-        self.prev_cells = Vec::new(); // force full redraw
+        let size = width * height;
+        self.cells = vec![Cell::default(); size];
+        self.prev_cells = vec![Cell::default(); size];
+        self.first_frame = true; // force full redraw
     }
 
     // -- Internal ----------------------------------------------------------
@@ -193,13 +201,12 @@ impl Screen {
         let mut cur_fg = Color::Default;
         let mut cur_bg = Color::Default;
         let mut cur_bold = false;
-        let full_redraw = self.prev_cells.is_empty()
-            || self.prev_cells.len() != self.height
-            || (self.height > 0 && self.prev_cells[0].len() != self.width);
+        let full_redraw = self.first_frame;
 
         for row in 0..self.height {
             for col in 0..self.width {
-                let cell = &self.cells[row][col];
+                let i = self.idx(row, col);
+                let cell = &self.cells[i];
 
                 // Skip continuation cells — the terminal advances 2 cols for wide chars
                 if cell.wide_cont {
@@ -209,7 +216,7 @@ impl Screen {
                 let changed = if full_redraw {
                     true
                 } else {
-                    &self.prev_cells[row][col] != cell
+                    self.prev_cells[i] != *cell
                 };
                 if !changed {
                     continue;
@@ -248,16 +255,13 @@ impl Screen {
 
         buf
     }
-}
 
-// ---------------------------------------------------------------------------
-// Grid helper
-// ---------------------------------------------------------------------------
+    // -- Test helpers (cfg(test) only) -------------------------------------
 
-fn make_grid(width: usize, height: usize) -> Vec<Vec<Cell>> {
-    (0..height)
-        .map(|_| (0..width).map(|_| Cell::default()).collect())
-        .collect()
+    #[cfg(test)]
+    fn cell_at(&self, row: usize, col: usize) -> &Cell {
+        &self.cells[self.idx(row, col)]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,17 +485,14 @@ mod tests {
         let s = Screen::new(80, 24);
         assert_eq!(s.width(), 80);
         assert_eq!(s.height(), 24);
-        assert_eq!(s.cells.len(), 24);
-        assert_eq!(s.cells[0].len(), 80);
+        assert_eq!(s.cells.len(), 80 * 24);
     }
 
     #[test]
     fn new_screen_default_cells() {
         let s = Screen::new(3, 2);
-        for row in &s.cells {
-            for cell in row {
-                assert_eq!(*cell, Cell::default());
-            }
+        for cell in &s.cells {
+            assert_eq!(*cell, Cell::default());
         }
     }
 
@@ -499,9 +500,9 @@ mod tests {
     fn put_char_populates_cell() {
         let mut s = Screen::new(10, 5);
         s.put_char(2, 3, 'A', Color::Rgb(255, 0, 0), Color::Default, true);
-        assert_eq!(s.cells[2][3].ch, 'A');
-        assert_eq!(s.cells[2][3].fg, Color::Rgb(255, 0, 0));
-        assert_eq!(s.cells[2][3].bold, true);
+        assert_eq!(s.cell_at(2, 3).ch, 'A');
+        assert_eq!(s.cell_at(2, 3).fg, Color::Rgb(255, 0, 0));
+        assert_eq!(s.cell_at(2, 3).bold, true);
     }
 
     #[test]
@@ -515,18 +516,18 @@ mod tests {
     fn put_str_populates_cells() {
         let mut s = Screen::new(10, 5);
         s.put_str(0, 0, "Hi!", Color::Default, Color::Default, false);
-        assert_eq!(s.cells[0][0].ch, 'H');
-        assert_eq!(s.cells[0][1].ch, 'i');
-        assert_eq!(s.cells[0][2].ch, '!');
-        assert_eq!(s.cells[0][3].ch, ' '); // untouched
+        assert_eq!(s.cell_at(0, 0).ch, 'H');
+        assert_eq!(s.cell_at(0, 1).ch, 'i');
+        assert_eq!(s.cell_at(0, 2).ch, '!');
+        assert_eq!(s.cell_at(0, 3).ch, ' '); // untouched
     }
 
     #[test]
     fn put_str_truncates_at_edge() {
         let mut s = Screen::new(5, 1);
         s.put_str(0, 3, "Hello", Color::Default, Color::Default, false);
-        assert_eq!(s.cells[0][3].ch, 'H');
-        assert_eq!(s.cells[0][4].ch, 'e');
+        assert_eq!(s.cell_at(0, 3).ch, 'H');
+        assert_eq!(s.cell_at(0, 4).ch, 'e');
         // "llo" should be truncated
     }
 
@@ -542,7 +543,7 @@ mod tests {
         let mut s = Screen::new(5, 3);
         s.put_char(1, 2, 'Z', Color::Ansi(1), Color::Ansi(2), true);
         s.clear();
-        assert_eq!(s.cells[1][2], Cell::default());
+        assert_eq!(*s.cell_at(1, 2), Cell::default());
     }
 
     #[test]
@@ -551,19 +552,19 @@ mod tests {
         s.resize(20, 10);
         assert_eq!(s.width(), 20);
         assert_eq!(s.height(), 10);
-        assert_eq!(s.cells.len(), 10);
-        assert_eq!(s.cells[0].len(), 20);
+        assert_eq!(s.cells.len(), 20 * 10);
     }
 
     #[test]
     fn unchanged_screen_empty_diff() {
         let mut s = Screen::new(5, 3);
-        // First flush: full draw (prev_cells empty)
+        // First flush: full draw (first_frame = true)
         let first = s.build_diff_output(&ColorMode::TrueColor);
         assert!(!first.is_empty());
 
-        // Copy current into prev (simulate flush without actual terminal I/O)
-        s.prev_cells = s.cells.clone();
+        // Simulate flush: swap buffers
+        s.first_frame = false;
+        std::mem::swap(&mut s.cells, &mut s.prev_cells);
         s.clear();
 
         // Second flush with identical content: no diff
@@ -656,5 +657,29 @@ mod tests {
         let mut buf = Vec::new();
         write_usize(&mut buf, 123);
         assert_eq!(buf, b"123");
+    }
+
+    #[test]
+    fn double_buffer_swap_no_alloc() {
+        let mut s = Screen::new(10, 5);
+        s.put_char(0, 0, 'X', Color::Default, Color::Default, false);
+
+        // Simulate flush
+        s.first_frame = false;
+        let ptr_before = s.prev_cells.as_ptr();
+        std::mem::swap(&mut s.cells, &mut s.prev_cells);
+        let ptr_after = s.cells.as_ptr();
+
+        // The old prev_cells buffer is now cells (same pointer, no realloc)
+        assert_eq!(ptr_before, ptr_after);
+    }
+
+    #[test]
+    fn flat_grid_indexing() {
+        let mut s = Screen::new(10, 5);
+        s.put_char(3, 7, 'Q', Color::Ansi(1), Color::Default, false);
+        // Verify flat indexing: row 3, col 7 = index 3*10+7 = 37
+        assert_eq!(s.cells[37].ch, 'Q');
+        assert_eq!(s.cell_at(3, 7).ch, 'Q');
     }
 }

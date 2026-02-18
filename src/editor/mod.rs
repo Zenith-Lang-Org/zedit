@@ -34,6 +34,50 @@ pub(super) enum MessageType {
 }
 
 // ---------------------------------------------------------------------------
+// Clipboard — multi-line aware clipboard with line-mode support
+// ---------------------------------------------------------------------------
+
+pub(super) struct Clipboard {
+    /// Each entry is one piece of copied text.
+    /// Single copy → vec!["the text"].
+    /// Multi-cursor copy → vec!["sel1", "sel2", ...].
+    pub entries: Vec<String>,
+    /// Whether this was a line-mode copy (e.g. Ctrl+C with no selection copies the whole line).
+    /// When true, paste inserts above/below as a full line rather than inline.
+    pub line_mode: bool,
+}
+
+impl Clipboard {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            line_mode: false,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty() || self.entries.iter().all(|e| e.is_empty())
+    }
+
+    /// Set clipboard to a single text entry (inline mode).
+    fn set_text(&mut self, text: String) {
+        self.entries = vec![text];
+        self.line_mode = false;
+    }
+
+    /// Set clipboard to a single text entry in line mode.
+    fn set_line(&mut self, text: String) {
+        self.entries = vec![text];
+        self.line_mode = true;
+    }
+
+    /// Get the combined text for pasting (joins all entries with newlines for multi-cursor).
+    fn text(&self) -> String {
+        self.entries.join("")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Editor
 // ---------------------------------------------------------------------------
 
@@ -59,7 +103,7 @@ pub struct Editor {
     quit_confirm: bool,
 
     // Clipboard (shared across buffers)
-    clipboard: String,
+    clipboard: Clipboard,
 
     // Active prompt (mini-prompt for Open, Save As, etc.)
     prompt: Option<Prompt>,
@@ -92,7 +136,7 @@ impl Editor {
             message: None,
             message_type: MessageType::Info,
             quit_confirm: false,
-            clipboard: String::new(),
+            clipboard: Clipboard::new(),
             prompt: None,
             mouse_dragging: false,
             help_visible: false,
@@ -120,7 +164,7 @@ impl Editor {
             message: None,
             message_type: MessageType::Info,
             quit_confirm: false,
-            clipboard: String::new(),
+            clipboard: Clipboard::new(),
             prompt: None,
             mouse_dragging: false,
             help_visible: false,
