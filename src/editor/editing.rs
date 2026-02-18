@@ -394,12 +394,15 @@ impl Editor {
     pub(super) fn new_buffer(&mut self) {
         self.buffers
             .push(BufferState::new_empty(self.config.line_numbers));
-        self.active_buffer = self.buffers.len() - 1;
+        let new_idx = self.buffers.len() - 1;
+        self.layout.set_pane_buffer(self.active_pane, new_idx);
+        self.active_buffer = new_idx;
         self.set_message("New buffer", MessageType::Info);
     }
 
     pub(super) fn close_buffer(&mut self) {
-        if self.buf().buffer.is_modified() && !self.quit_confirm {
+        let buf_idx = self.active_buffer_index();
+        if self.buffers[buf_idx].buffer.is_modified() && !self.quit_confirm {
             self.quit_confirm = true;
             self.set_message(
                 "Unsaved changes! Press Ctrl+W again to close without saving.",
@@ -413,20 +416,24 @@ impl Editor {
             // Last buffer — just reset to empty
             self.buffers[0] = BufferState::new_empty(self.config.line_numbers);
             self.active_buffer = 0;
+            self.layout.set_pane_buffer(self.active_pane, 0);
             self.set_message("Buffer closed", MessageType::Info);
             return;
         }
 
-        self.buffers.remove(self.active_buffer);
-        if self.active_buffer >= self.buffers.len() {
-            self.active_buffer = self.buffers.len() - 1;
-        }
+        let removed = buf_idx;
+        self.buffers.remove(removed);
+        self.layout.adjust_buffer_indices_after_remove(removed);
+        self.active_buffer = self.active_buffer_index();
         self.set_message("Buffer closed", MessageType::Info);
     }
 
     pub(super) fn next_buffer(&mut self) {
         if self.buffers.len() > 1 {
-            self.active_buffer = (self.active_buffer + 1) % self.buffers.len();
+            let current = self.active_buffer_index();
+            let next = (current + 1) % self.buffers.len();
+            self.layout.set_pane_buffer(self.active_pane, next);
+            self.active_buffer = next;
             let name = self
                 .buf()
                 .buffer
@@ -439,11 +446,14 @@ impl Editor {
 
     pub(super) fn prev_buffer(&mut self) {
         if self.buffers.len() > 1 {
-            if self.active_buffer == 0 {
-                self.active_buffer = self.buffers.len() - 1;
+            let current = self.active_buffer_index();
+            let prev = if current == 0 {
+                self.buffers.len() - 1
             } else {
-                self.active_buffer -= 1;
-            }
+                current - 1
+            };
+            self.layout.set_pane_buffer(self.active_pane, prev);
+            self.active_buffer = prev;
             let name = self
                 .buf()
                 .buffer
@@ -474,8 +484,15 @@ impl Editor {
                         }
                     }
                 } else if me.pressed {
-                    // Click: set cursor, start selection anchor
-                    if let Some((line, col)) = self.screen_to_buffer(me.col, me.row) {
+                    // Click: determine which pane and set cursor
+                    if let Some((line, col, pane_id)) =
+                        self.screen_to_buffer_with_pane(me.col, me.row)
+                    {
+                        // Switch active pane if clicking in a different one
+                        if pane_id != self.active_pane {
+                            self.active_pane = pane_id;
+                            self.active_buffer = self.active_buffer_index();
+                        }
                         let b = self.buf_mut();
                         b.cursor.set_position(line, col, &b.buffer);
                         let offset = b.cursor.byte_offset(&b.buffer);
@@ -497,29 +514,57 @@ impl Editor {
                 }
             }
             MouseButton::ScrollUp => {
-                self.buf_mut().scroll_row = self.buf().scroll_row.saturating_sub(3);
-                // Clamp cursor to visible area
-                let h = self.text_area_height();
-                let b = self.buf_mut();
-                if b.cursor.line >= b.scroll_row + h {
-                    let target = b.scroll_row + h - 1;
-                    let col = b.cursor.col;
-                    b.cursor.set_position(target, col, &b.buffer);
+                // Scroll the pane under the mouse pointer
+                let target_pane = self.pane_at_mouse(me.col, me.row);
+                let buf_idx = target_pane
+                    .and_then(|p| self.layout.pane_buffer(p))
+                    .unwrap_or(self.active_buffer_index());
+                if buf_idx < self.buffers.len() {
+                    self.buffers[buf_idx].scroll_row =
+                        self.buffers[buf_idx].scroll_row.saturating_sub(3);
+                }
+                // Clamp cursor if scrolling the active pane
+                if target_pane == Some(self.active_pane) || target_pane.is_none() {
+                    let h = self.text_area_height();
+                    let b = self.buf_mut();
+                    if b.cursor.line >= b.scroll_row + h {
+                        let target = b.scroll_row + h - 1;
+                        let col = b.cursor.col;
+                        b.cursor.set_position(target, col, &b.buffer);
+                    }
                 }
             }
             MouseButton::ScrollDown => {
-                let max_scroll = self.buf().buffer.line_count().saturating_sub(1);
-                self.buf_mut().scroll_row = (self.buf().scroll_row + 3).min(max_scroll);
-                // Clamp cursor to visible area
-                let b = self.buf_mut();
-                if b.cursor.line < b.scroll_row {
-                    let target = b.scroll_row;
-                    let col = b.cursor.col;
-                    b.cursor.set_position(target, col, &b.buffer);
+                let target_pane = self.pane_at_mouse(me.col, me.row);
+                let buf_idx = target_pane
+                    .and_then(|p| self.layout.pane_buffer(p))
+                    .unwrap_or(self.active_buffer_index());
+                if buf_idx < self.buffers.len() {
+                    let max_scroll = self.buffers[buf_idx].buffer.line_count().saturating_sub(1);
+                    self.buffers[buf_idx].scroll_row =
+                        (self.buffers[buf_idx].scroll_row + 3).min(max_scroll);
+                }
+                if target_pane == Some(self.active_pane) || target_pane.is_none() {
+                    let b = self.buf_mut();
+                    if b.cursor.line < b.scroll_row {
+                        let target = b.scroll_row;
+                        let col = b.cursor.col;
+                        b.cursor.set_position(target, col, &b.buffer);
+                    }
                 }
             }
             _ => {}
         }
+    }
+
+    /// Find which pane a screen coordinate falls in.
+    fn pane_at_mouse(&self, col: u16, row: u16) -> Option<crate::layout::PaneId> {
+        for pane_info in self.layout.panes() {
+            if pane_info.rect.contains(col, row) {
+                return Some(pane_info.id);
+            }
+        }
+        None
     }
 
     // -----------------------------------------------------------------------

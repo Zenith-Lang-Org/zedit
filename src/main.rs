@@ -3,6 +3,7 @@ mod config;
 mod cursor;
 mod editor;
 mod input;
+mod layout;
 mod render;
 mod syntax;
 mod terminal;

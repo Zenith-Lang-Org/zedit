@@ -13,6 +13,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::input::{self, Event, Key, KeyEvent};
+use crate::layout::{Direction, LayoutState, PaneId, Rect, SplitDir};
 use crate::render::Screen;
 use crate::terminal::{self, ColorMode, Terminal};
 use crate::undo::CursorState;
@@ -94,6 +95,8 @@ pub struct Editor {
 
     // UI layout
     status_height: usize,
+    layout: LayoutState,
+    active_pane: PaneId,
 
     // Transient message
     message: Option<String>,
@@ -125,6 +128,8 @@ impl Editor {
         let (w, h) = terminal.size();
 
         let line_numbers = config.line_numbers;
+        let layout = LayoutState::new(0);
+        let active_pane = layout.first_pane();
         Ok(Editor {
             buffers: vec![BufferState::new_empty(line_numbers)],
             active_buffer: 0,
@@ -133,6 +138,8 @@ impl Editor {
             color_mode,
             config,
             status_height: 2,
+            layout,
+            active_pane,
             message: None,
             message_type: MessageType::Info,
             quit_confirm: false,
@@ -153,6 +160,8 @@ impl Editor {
         let bs =
             BufferState::from_file(path, config.line_numbers, &config.theme, &config.languages)?;
 
+        let layout = LayoutState::new(0);
+        let active_pane = layout.first_pane();
         Ok(Editor {
             buffers: vec![bs],
             active_buffer: 0,
@@ -161,6 +170,8 @@ impl Editor {
             color_mode,
             config,
             status_height: 2,
+            layout,
+            active_pane,
             message: None,
             message_type: MessageType::Info,
             quit_confirm: false,
@@ -175,24 +186,53 @@ impl Editor {
     // -- Active buffer accessors --
 
     fn buf(&self) -> &BufferState {
-        &self.buffers[self.active_buffer]
+        let idx = self
+            .layout
+            .pane_buffer(self.active_pane)
+            .unwrap_or(self.active_buffer);
+        &self.buffers[idx]
     }
 
     fn buf_mut(&mut self) -> &mut BufferState {
-        &mut self.buffers[self.active_buffer]
+        let idx = self
+            .layout
+            .pane_buffer(self.active_pane)
+            .unwrap_or(self.active_buffer);
+        &mut self.buffers[idx]
+    }
+
+    /// Get the buffer index for the active pane.
+    fn active_buffer_index(&self) -> usize {
+        self.layout
+            .pane_buffer(self.active_pane)
+            .unwrap_or(self.active_buffer)
     }
 
     pub(super) fn config(&self) -> &Config {
         &self.config
     }
 
+    /// Resolve the layout tree for the current terminal size.
+    fn resolve_layout(&mut self) {
+        let (w, h) = self.terminal.size();
+        let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+        self.layout.resolve(Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: pane_area_height,
+        });
+    }
+
     /// Run the main editor loop.
     pub fn run(&mut self) -> Result<(), String> {
+        self.resolve_layout();
         while self.running {
             // 1. Check for resize
             if self.terminal.check_resize() {
                 let (w, h) = self.terminal.size();
                 self.screen.resize(w as usize, h as usize);
+                self.resolve_layout();
                 self.adjust_viewport();
             }
 
@@ -288,54 +328,54 @@ impl Editor {
 
         match (&ke.key, ke.ctrl, ke.alt) {
             // -- Navigation (works with and without shift) --
-            (Key::Up, false, _) => {
+            (Key::Up, false, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_up(&b.buffer);
             }
-            (Key::Down, false, _) => {
+            (Key::Down, false, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_down(&b.buffer);
             }
-            (Key::Left, false, _) => {
+            (Key::Left, false, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_left(&b.buffer);
             }
-            (Key::Right, false, _) => {
+            (Key::Right, false, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_right(&b.buffer);
             }
 
-            (Key::Left, true, _) => {
+            (Key::Left, true, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_word_left(&b.buffer);
             }
-            (Key::Right, true, _) => {
+            (Key::Right, true, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_word_right(&b.buffer);
             }
 
-            (Key::Home, false, _) => {
+            (Key::Home, false, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_home(&b.buffer);
             }
-            (Key::End, false, _) => {
+            (Key::End, false, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_end(&b.buffer);
             }
 
-            (Key::Home, true, _) => self.buf_mut().cursor.move_to_start(),
-            (Key::End, true, _) => {
+            (Key::Home, true, false) => self.buf_mut().cursor.move_to_start(),
+            (Key::End, true, false) => {
                 let b = self.buf_mut();
                 b.cursor.move_to_end(&b.buffer);
             }
 
-            (Key::PageUp, false, _) => {
+            (Key::PageUp, false, false) => {
                 let h = self.text_area_height();
                 let b = self.buf_mut();
                 b.scroll_row = b.scroll_row.saturating_sub(h);
                 b.cursor.move_page_up(&b.buffer, h);
             }
-            (Key::PageDown, false, _) => {
+            (Key::PageDown, false, false) => {
                 let h = self.text_area_height();
                 let b = self.buf_mut();
                 let max_line = b.buffer.line_count().saturating_sub(1);
@@ -457,6 +497,48 @@ impl Editor {
                 self.start_prompt("Open: ", PromptAction::OpenFile);
             }
 
+            // -- Pane operations --
+            // Ctrl+\ — split horizontally (left|right)
+            (Key::Char('\\'), true, false) if !ke.shift => {
+                self.split_pane_horizontal();
+            }
+            // Ctrl+Shift+\ — split vertically (top|bottom)
+            (Key::Char('\\'), true, false) if ke.shift => {
+                self.split_pane_vertical();
+            }
+            // Ctrl+Shift+W — close active pane
+            (Key::Char('W'), true, false) => {
+                self.close_active_pane();
+            }
+
+            // Alt+Arrow — move focus to adjacent pane
+            (Key::Left, false, true) if !ke.shift => {
+                self.focus_pane(Direction::Left);
+            }
+            (Key::Right, false, true) if !ke.shift => {
+                self.focus_pane(Direction::Right);
+            }
+            (Key::Up, false, true) if !ke.shift => {
+                self.focus_pane(Direction::Up);
+            }
+            (Key::Down, false, true) if !ke.shift => {
+                self.focus_pane(Direction::Down);
+            }
+
+            // Alt+Shift+Arrow — resize active pane
+            (Key::Left, false, true) if ke.shift => {
+                self.resize_active_pane(-2);
+            }
+            (Key::Right, false, true) if ke.shift => {
+                self.resize_active_pane(2);
+            }
+            (Key::Up, false, true) if ke.shift => {
+                self.resize_active_pane_vertical(-2);
+            }
+            (Key::Down, false, true) if ke.shift => {
+                self.resize_active_pane_vertical(2);
+            }
+
             // -- Help --
             (Key::F(1), false, false) => {
                 self.help_visible = !self.help_visible;
@@ -482,5 +564,83 @@ impl Editor {
     fn set_message(&mut self, msg: &str, msg_type: MessageType) {
         self.message = Some(msg.to_string());
         self.message_type = msg_type;
+    }
+
+    // -----------------------------------------------------------------------
+    // Pane operations
+    // -----------------------------------------------------------------------
+
+    fn split_pane_horizontal(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        if let Some(new_id) =
+            self.layout
+                .split_pane(self.active_pane, SplitDir::Horizontal, buf_idx)
+        {
+            self.resolve_layout();
+            self.active_pane = new_id;
+            self.active_buffer = self.active_buffer_index();
+            self.set_message("Split horizontal", MessageType::Info);
+        }
+    }
+
+    fn split_pane_vertical(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        if let Some(new_id) = self
+            .layout
+            .split_pane(self.active_pane, SplitDir::Vertical, buf_idx)
+        {
+            self.resolve_layout();
+            self.active_pane = new_id;
+            self.active_buffer = self.active_buffer_index();
+            self.set_message("Split vertical", MessageType::Info);
+        }
+    }
+
+    fn close_active_pane(&mut self) {
+        if self.layout.pane_count() <= 1 {
+            self.set_message("Only one pane", MessageType::Warning);
+            return;
+        }
+        // Find a neighbor to move focus to before closing
+        let next = self
+            .layout
+            .adjacent_pane(self.active_pane, Direction::Left)
+            .or_else(|| {
+                self.layout
+                    .adjacent_pane(self.active_pane, Direction::Right)
+            })
+            .or_else(|| self.layout.adjacent_pane(self.active_pane, Direction::Up))
+            .or_else(|| self.layout.adjacent_pane(self.active_pane, Direction::Down))
+            .unwrap_or(self.layout.first_pane());
+        self.layout.close_pane(self.active_pane);
+        self.active_pane = next;
+        self.active_buffer = self.active_buffer_index();
+        self.resolve_layout();
+        self.set_message("Pane closed", MessageType::Info);
+    }
+
+    fn focus_pane(&mut self, dir: Direction) {
+        if let Some(target) = self.layout.adjacent_pane(self.active_pane, dir) {
+            self.active_pane = target;
+            self.active_buffer = self.active_buffer_index();
+        }
+    }
+
+    fn resize_active_pane(&mut self, delta: i16) {
+        let (w, h) = self.terminal.size();
+        let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+        let total = Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: pane_area_height,
+        };
+        self.layout.resize_split(self.active_pane, delta, total);
+        self.resolve_layout();
+    }
+
+    fn resize_active_pane_vertical(&mut self, delta: i16) {
+        // Vertical resize uses the same mechanism
+        self.resize_active_pane(delta);
     }
 }

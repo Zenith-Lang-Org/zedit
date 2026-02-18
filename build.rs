@@ -41,9 +41,7 @@ fn main() {
 
     // Grammar map function
     code.push_str("/// Map grammar filename to built-in embedded content.\n");
-    code.push_str(
-        "pub fn builtin_grammar_str(grammar_file: &str) -> Option<&'static str> {\n",
-    );
+    code.push_str("pub fn builtin_grammar_str(grammar_file: &str) -> Option<&'static str> {\n");
     code.push_str("    match grammar_file {\n");
 
     for file in &grammar_files {

@@ -200,15 +200,18 @@ impl Editor {
                 ) {
                     Ok(bs) => {
                         let display_name = shorten_path(path);
-                        // Open in new buffer if current buffer is non-empty or modified
-                        let current_empty = self.buf().buffer.is_empty()
-                            && !self.buf().buffer.is_modified()
-                            && self.buf().buffer.file_path().is_none();
+                        let buf_idx = self.active_buffer_index();
+                        // Open in current slot if current buffer is empty, else new buffer
+                        let current_empty = self.buffers[buf_idx].buffer.is_empty()
+                            && !self.buffers[buf_idx].buffer.is_modified()
+                            && self.buffers[buf_idx].buffer.file_path().is_none();
                         if current_empty {
-                            self.buffers[self.active_buffer] = bs;
+                            self.buffers[buf_idx] = bs;
                         } else {
                             self.buffers.push(bs);
-                            self.active_buffer = self.buffers.len() - 1;
+                            let new_idx = self.buffers.len() - 1;
+                            self.layout.set_pane_buffer(self.active_pane, new_idx);
+                            self.active_buffer = new_idx;
                         }
                         self.set_message(&format!("Opened: {}", display_name), MessageType::Info);
                     }
@@ -267,6 +270,7 @@ impl Editor {
             },
             PromptAction::SaveAs => {
                 let path = Path::new(&prompt.input);
+                let buf_idx = self.active_buffer_index();
                 match self.buf_mut().buffer.save_to(path) {
                     Ok(()) => {
                         let display_name = shorten_path(path);
@@ -275,7 +279,7 @@ impl Editor {
                         // Reload highlighter for new file extension
                         let theme_name = self.config.theme.clone();
                         let languages = &self.config.languages;
-                        self.buffers[self.active_buffer].highlighter =
+                        self.buffers[buf_idx].highlighter =
                             highlight::detect_language(path, languages).and_then(|lang| {
                                 highlight::load_grammar(&lang, languages).map(|grammar| {
                                     let theme = highlight::load_theme(&theme_name);
