@@ -347,7 +347,9 @@ fn read_bracketed_paste(term: &Terminal) -> Event {
         }
     }
 
-    let text = String::from_utf8_lossy(&buf).into_owned();
+    let raw = String::from_utf8_lossy(&buf).into_owned();
+    // Normalize line endings: terminals in raw mode often send \r instead of \n
+    let text = raw.replace("\r\n", "\n").replace('\r', "\n");
     Event::Paste(text)
 }
 
