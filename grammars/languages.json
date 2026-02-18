@@ -1,0 +1,18 @@
+[
+  { "name": "rust", "extensions": ["rs"], "grammar": "rust.tmLanguage.json", "comment": "//" },
+  { "name": "javascript", "extensions": ["js", "mjs", "cjs"], "grammar": "javascript.tmLanguage.json", "comment": "//" },
+  { "name": "typescript", "extensions": ["ts", "tsx"], "grammar": "typescript.tmLanguage.json", "comment": "//" },
+  { "name": "python", "extensions": ["py", "pyw", "pyi"], "grammar": "python.tmLanguage.json", "comment": "#" },
+  { "name": "c", "extensions": ["c", "h"], "grammar": "c.tmLanguage.json", "comment": "//" },
+  { "name": "cpp", "extensions": ["cpp", "cc", "cxx", "hpp", "hxx", "hh"], "grammar": "cpp.tmLanguage.json", "comment": "//" },
+  { "name": "php", "extensions": ["php", "phtml"], "grammar": "php.tmLanguage.json", "comment": "//" },
+  { "name": "json", "extensions": ["json", "jsonc"], "grammar": "json.tmLanguage.json", "comment": "//" },
+  { "name": "toml", "extensions": ["toml"], "grammar": "toml.tmLanguage.json", "comment": "#" },
+  { "name": "markdown", "extensions": ["md", "markdown"], "grammar": "markdown.tmLanguage.json" },
+  { "name": "shell", "extensions": ["sh", "bash", "zsh"], "grammar": "shell.tmLanguage.json", "comment": "#" },
+  { "name": "html", "extensions": ["html", "htm"], "grammar": "html.tmLanguage.json", "comment": "<!--" },
+  { "name": "css", "extensions": ["css"], "grammar": "css.tmLanguage.json", "comment": "//" },
+  { "name": "zenith", "extensions": ["zl"], "grammar": "zenith.tmLanguage.json", "comment": "//" },
+  { "name": "zymbol", "extensions": ["zy"], "grammar": "zymbol.tmLanguage.json", "comment": "//" },
+  { "name": "minilux", "extensions": ["mi"], "grammar": "minilux.tmLanguage.json", "comment": "#" }
+]
