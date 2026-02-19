@@ -485,6 +485,19 @@ impl Editor {
     // -----------------------------------------------------------------------
 
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) {
+        // If click is in sidebar area, focus it
+        if me.button == MouseButton::Left && me.pressed && !me.motion {
+            let sidebar_w = self.sidebar_width();
+            if sidebar_w > 0 && me.col < sidebar_w {
+                self.filetree_focused = true;
+                return;
+            }
+            // Click outside sidebar unfocuses it
+            if self.filetree_focused {
+                self.filetree_focused = false;
+            }
+        }
+
         match me.button {
             MouseButton::Left => {
                 if me.motion {

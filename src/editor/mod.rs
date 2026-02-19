@@ -1,5 +1,6 @@
 mod buffer_state;
 mod editing;
+mod filetree_integration;
 mod helpers;
 mod palette;
 mod prompt;
@@ -122,6 +123,10 @@ pub struct Editor {
     // Command palette
     palette: Option<palette::Palette>,
 
+    // File tree sidebar
+    filetree: Option<crate::filetree::FileTree>,
+    filetree_focused: bool,
+
     running: bool,
 }
 
@@ -153,6 +158,8 @@ impl Editor {
             mouse_dragging: false,
             help_visible: false,
             palette: None,
+            filetree: None,
+            filetree_focused: false,
             running: true,
         })
     }
@@ -186,6 +193,8 @@ impl Editor {
             mouse_dragging: false,
             help_visible: false,
             palette: None,
+            filetree: None,
+            filetree_focused: false,
             running: true,
         })
     }
@@ -219,14 +228,21 @@ impl Editor {
         &self.config
     }
 
+    /// Width of the file tree sidebar (0 if not visible).
+    fn sidebar_width(&self) -> u16 {
+        self.filetree.as_ref().map_or(0, |ft| ft.width)
+    }
+
     /// Resolve the layout tree for the current terminal size.
     fn resolve_layout(&mut self) {
         let (w, h) = self.terminal.size();
+        let sidebar_w = self.sidebar_width();
         let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+        let pane_area_width = w.saturating_sub(sidebar_w);
         self.layout.resolve(Rect {
-            x: 0,
+            x: sidebar_w,
             y: 0,
-            width: w,
+            width: pane_area_width,
             height: pane_area_height,
         });
     }
@@ -283,6 +299,17 @@ impl Editor {
                 self.handle_palette_key(ke);
             }
             return;
+        }
+
+        // When file tree is focused, route keys there first
+        if self.filetree_focused
+            && self.filetree.is_some()
+            && let Event::Key(ref ke) = event
+        {
+            let ke_copy = ke.clone();
+            if self.handle_filetree_key(ke_copy) {
+                return;
+            }
         }
 
         // Clear message on any event, but only when no prompt is active
@@ -599,6 +626,11 @@ impl Editor {
                 self.palette = Some(palette::Palette::new());
             }
 
+            // -- File tree toggle (Ctrl+B) --
+            (Key::Char('b'), true, false) => {
+                self.toggle_filetree();
+            }
+
             // -- Word Wrap toggle (Alt+Z) --
             (Key::Char('z'), false, true) => {
                 self.toggle_word_wrap();
@@ -715,11 +747,12 @@ impl Editor {
 
     fn resize_active_pane(&mut self, delta: i16) {
         let (w, h) = self.terminal.size();
+        let sidebar_w = self.sidebar_width();
         let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
         let total = Rect {
-            x: 0,
+            x: sidebar_w,
             y: 0,
-            width: w,
+            width: w.saturating_sub(sidebar_w),
             height: pane_area_height,
         };
         self.layout.resize_split(self.active_pane, delta, total);

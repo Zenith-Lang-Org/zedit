@@ -100,6 +100,8 @@ pub struct Config {
     pub auto_indent: bool,
     pub word_wrap: bool,
     pub languages: Vec<LanguageDef>,
+    pub filetree_width: u16,
+    pub filetree_ignored: Vec<String>,
 }
 
 impl Default for Config {
@@ -112,6 +114,8 @@ impl Default for Config {
             auto_indent: true,
             word_wrap: false,
             languages: builtin_languages(),
+            filetree_width: 30,
+            filetree_ignored: Vec::new(),
         }
     }
 }
@@ -158,6 +162,15 @@ impl Config {
         }
         if let Some(b) = val.get("word_wrap").and_then(|v| v.as_bool()) {
             config.word_wrap = b;
+        }
+        if let Some(n) = val.get("filetree_width").and_then(|v| v.as_f64()) {
+            config.filetree_width = (n as u16).clamp(15, 60);
+        }
+        if let Some(arr) = val.get("filetree_ignored").and_then(|v| v.as_array()) {
+            config.filetree_ignored = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
         }
         // config.json overrides take highest priority
         if let Some(user_langs) = parse_languages_from_config(&val) {

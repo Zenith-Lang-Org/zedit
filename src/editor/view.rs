@@ -151,6 +151,12 @@ impl Editor {
         let screen_width = self.screen.width();
         let screen_height = self.screen.height();
 
+        // Render file tree sidebar if visible
+        if let Some(ref mut ft) = self.filetree {
+            let sidebar_height = screen_height.saturating_sub(self.status_height);
+            ft.render(&mut self.screen, sidebar_height, self.filetree_focused);
+        }
+
         // Render each pane
         let panes: Vec<_> = self.layout.panes().to_vec();
         for pane_info in &panes {
@@ -235,8 +241,16 @@ impl Editor {
                 String::new()
             };
 
+            // File tree indicator
+            let tree_indicator = if self.filetree.is_some() {
+                "[Tree] "
+            } else {
+                ""
+            };
+
             let left = format!(
-                " {}{}{}{}{}{}",
+                " {}{}{}{}{}{}{}",
+                tree_indicator,
                 pane_indicator,
                 buf_indicator,
                 filename,
@@ -999,7 +1013,7 @@ impl Editor {
             "  \u{21e7}Tab    Unindent SELECTION                   ",
             "  Ctrl+/  Comment   Shift+\u{2190}\u{2192}\u{2191}\u{2193} Extend sel     ",
             "  Ctrl+L  Sel line  Ctrl+A    Select all      ",
-            "  Ctrl+\u{21e7}P Palette                              ",
+            "  Ctrl+\u{21e7}P Palette  Ctrl+B    File tree       ",
             "        Press Esc or F1 to close              ",
         ];
 

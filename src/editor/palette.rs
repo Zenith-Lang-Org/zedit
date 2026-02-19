@@ -51,6 +51,8 @@ pub(super) enum PaletteAction {
     // View
     ToggleHelp,
     ToggleWrap,
+    ToggleFileTree,
+    FocusFileTree,
     CommandPalette,
 }
 
@@ -262,6 +264,16 @@ impl Palette {
                 label: "View: Toggle Word Wrap",
                 shortcut: "Alt+Z",
                 action: PaletteAction::ToggleWrap,
+            },
+            PaletteEntry {
+                label: "View: Toggle File Tree",
+                shortcut: "Ctrl+B",
+                action: PaletteAction::ToggleFileTree,
+            },
+            PaletteEntry {
+                label: "View: Focus File Tree",
+                shortcut: "",
+                action: PaletteAction::FocusFileTree,
             },
             PaletteEntry {
                 label: "View: Command Palette",
@@ -538,6 +550,14 @@ impl Editor {
                 self.help_visible = !self.help_visible;
             }
             ToggleWrap => self.toggle_word_wrap(),
+            ToggleFileTree => self.toggle_filetree(),
+            FocusFileTree => {
+                if self.filetree.is_none() {
+                    self.toggle_filetree();
+                } else {
+                    self.filetree_focused = true;
+                }
+            }
             CommandPalette => {
                 // Re-open palette (already closed by taking it)
                 self.palette = Some(Palette::new());

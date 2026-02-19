@@ -2,6 +2,7 @@ mod buffer;
 mod config;
 mod cursor;
 mod editor;
+mod filetree;
 mod git;
 mod input;
 mod layout;
