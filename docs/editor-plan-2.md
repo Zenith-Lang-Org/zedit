@@ -4,6 +4,32 @@ From text editor to terminal IDE. Phases 7δ–20.
 
 ---
 
+## Implementation Roadmap
+
+Phases reordered by dependency graph and complexity (quick wins first, heavy phases deferred until their dependencies are ready).
+
+| #  | Phase | Feature              | ~Lines | Dependencies      | Status |
+|----|-------|----------------------|--------|-------------------|--------|
+| 1  | 8     | Layout & Pane System | 600    | —                 | DONE   |
+| 2  | 10    | Tab Bar              | 250    | —                 | DONE   |
+| 3  | 12    | Multi-Cursor Editing | 900    | —                 | DONE   |
+| 4  | 13    | Git Gutter           | 630    | —                 | DONE   |
+| 5  | 15    | Command Palette      | 530    | —                 |        |
+| 6  | 16    | Soft Word Wrap       | 600    | —                 |        |
+| 7  | 11    | File Tree Sidebar    | 750    | Phase 8           |        |
+| 8  | 9     | Integrated Terminal  | 1,450  | Phase 8           |        |
+| 9  | 14    | Session + Swap Files | 650    | Phase 8           |        |
+| 10 | 17    | LSP Client           | 1,650  | Phase 9           |        |
+| 11 | 19    | Diff / Merge View    | 650    | Phase 8 + 13      |        |
+| 12 | 20    | Minimap              | 330    | Phase 8           |        |
+| 13 | 18    | Plugin System        | 700    | Phase 15          |        |
+
+Phase 7δ (Runtime Grammar System) is independent and can be done at any point.
+
+Total: ~9,690 new lines across 13 phases.
+
+---
+
 ## Phase 7δ (Delta MVP): External Grammar System + VS Code Extension Import
 
 **Goal**: Remove all grammar files from the compiled binary. Language support becomes fully runtime-configurable. Users can import syntax highlighting, LSP configuration, and terminal tasks directly from VS Code extensions — the largest ecosystem of language tooling in existence.

@@ -63,8 +63,12 @@ impl Editor {
     pub(super) fn render(&mut self) {
         // Update gutter width for active buffer
         let buf_idx = self.active_buffer_index();
+        let has_git = self.buffers[buf_idx].git_info.is_some();
         self.buffers[buf_idx].gutter_width = if self.config.line_numbers {
-            compute_gutter_width(self.buffers[buf_idx].buffer.line_count())
+            let base = compute_gutter_width(self.buffers[buf_idx].buffer.line_count());
+            if has_git { base + 2 } else { base }
+        } else if has_git {
+            2
         } else {
             0
         };
@@ -79,8 +83,12 @@ impl Editor {
             // Update gutter width for this pane's buffer
             let bi = pane_info.buffer_index;
             if bi < self.buffers.len() {
+                let has_git = self.buffers[bi].git_info.is_some();
                 self.buffers[bi].gutter_width = if self.config.line_numbers {
-                    compute_gutter_width(self.buffers[bi].buffer.line_count())
+                    let base = compute_gutter_width(self.buffers[bi].buffer.line_count());
+                    if has_git { base + 2 } else { base }
+                } else if has_git {
+                    2
                 } else {
                     0
                 };
@@ -155,7 +163,11 @@ impl Editor {
 
             let left = format!(
                 " {}{}{}{}{}{}",
-                pane_indicator, buf_indicator, filename, modified_marker, regex_indicator,
+                pane_indicator,
+                buf_indicator,
+                filename,
+                modified_marker,
+                regex_indicator,
                 multi_cursor_indicator
             );
             let right = format!("{} | {} ", position, color_str);
@@ -240,8 +252,7 @@ impl Editor {
             terminal::move_cursor(msg_row_1based, (prompt_cursor_col + 1) as u16);
         } else if let Some(rect) = self.layout.pane_rect(self.active_pane) {
             let b = self.buf();
-            let cursor_screen_row =
-                b.cursor().line.saturating_sub(b.scroll_row) + rect.y as usize;
+            let cursor_screen_row = b.cursor().line.saturating_sub(b.scroll_row) + rect.y as usize;
             let cursor_display = self.cursor_display_col();
             let cursor_screen_col = cursor_display
                 .saturating_sub(b.scroll_col)
@@ -262,6 +273,16 @@ impl Editor {
             return;
         }
 
+        // Refresh git info if stale
+        {
+            let bs = &mut self.buffers[buffer_idx];
+            let line_count = bs.buffer.line_count();
+            if let Some(gi) = &mut bs.git_info {
+                let buf_ref = &bs.buffer;
+                gi.refresh_if_stale(line_count, |i| buf_ref.get_line(i).unwrap_or_default());
+            }
+        }
+
         let pane_x = rect.x as usize;
         let pane_y = rect.y as usize;
         let pane_w = rect.width as usize;
@@ -272,6 +293,7 @@ impl Editor {
         let scroll_col = bs.scroll_col;
         let gutter_width = bs.gutter_width;
         let line_count = bs.buffer.line_count();
+        let has_git = bs.git_info.is_some();
 
         // Collect all selection ranges for this pane
         let sel_ranges: Vec<(usize, usize)> = if pane_id == self.active_pane {
@@ -290,8 +312,7 @@ impl Editor {
         };
 
         // Collect secondary cursor byte offsets for rendering
-        let secondary_cursor_offsets: Vec<usize> = if pane_id == self.active_pane && bs.is_multi()
-        {
+        let secondary_cursor_offsets: Vec<usize> = if pane_id == self.active_pane && bs.is_multi() {
             bs.cursors
                 .iter()
                 .enumerate()
@@ -307,17 +328,44 @@ impl Editor {
             let file_line = scroll_row + local_row;
 
             if file_line < line_count {
+                // Git gutter column
+                let git_col_width = if has_git { 2 } else { 0 };
+                if has_git {
+                    let status = self.buffers[buffer_idx]
+                        .git_info
+                        .as_ref()
+                        .map(|gi| gi.line_status(file_line))
+                        .unwrap_or(crate::git::LineStatus::Unchanged);
+                    let (ch, fg) = match status {
+                        crate::git::LineStatus::Added => ('+', Color::Ansi(2)),
+                        crate::git::LineStatus::Modified => ('~', Color::Ansi(3)),
+                        crate::git::LineStatus::DeletedBelow => ('\u{25B8}', Color::Ansi(1)),
+                        crate::git::LineStatus::Unchanged => (' ', Color::Default),
+                    };
+                    self.screen
+                        .put_char(screen_row, pane_x, ch, fg, Color::Default, false);
+                    self.screen.put_char(
+                        screen_row,
+                        pane_x + 1,
+                        ' ',
+                        Color::Default,
+                        Color::Default,
+                        false,
+                    );
+                }
+
                 // Gutter: right-aligned line number
-                if gutter_width > 0 {
+                let line_num_width = gutter_width.saturating_sub(git_col_width);
+                if line_num_width > 0 && self.config.line_numbers {
                     let num_str = format!("{}", file_line + 1);
-                    let pad = gutter_width.saturating_sub(num_str.len() + 1);
+                    let pad = line_num_width.saturating_sub(num_str.len() + 1);
                     let gutter_fg = Color::Color256(240);
                     let gutter_bg = Color::Default;
 
                     for col in 0..pad {
                         self.screen.put_char(
                             screen_row,
-                            pane_x + col,
+                            pane_x + git_col_width + col,
                             ' ',
                             gutter_fg,
                             gutter_bg,
@@ -326,17 +374,17 @@ impl Editor {
                     }
                     self.screen.put_str(
                         screen_row,
-                        pane_x + pad,
+                        pane_x + git_col_width + pad,
                         &num_str,
                         gutter_fg,
                         gutter_bg,
                         false,
                     );
                     let sep_col = pad + num_str.len();
-                    if sep_col < gutter_width {
+                    if sep_col < line_num_width {
                         self.screen.put_char(
                             screen_row,
-                            pane_x + sep_col,
+                            pane_x + git_col_width + sep_col,
                             ' ',
                             gutter_fg,
                             gutter_bg,

@@ -231,7 +231,9 @@ impl Editor {
         let line_start = b.buffer.line_start(line).unwrap_or(0);
         let col = byte_pos - line_start;
         let b = self.buf_mut();
-        b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+        b.cursors[b.primary]
+            .cursor
+            .set_position(line, col, &b.buffer);
     }
 
     pub(super) fn execute_replace_all(&mut self, find_pattern: &str, replacement: &str) {

@@ -57,7 +57,9 @@ impl Editor {
         let line = b.buffer.byte_to_line(start);
         let line_start = b.buffer.line_start(line).unwrap_or(0);
         let col = start - line_start;
-        b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+        b.cursors[b.primary]
+            .cursor
+            .set_position(line, col, &b.buffer);
         b.set_selection(None);
         self.invalidate_highlight();
         Some(deleted)
@@ -264,10 +266,7 @@ impl Editor {
                 });
                 b.sort_and_merge();
                 let count = b.cursors.len();
-                self.set_message(
-                    &format!("{} cursors", count),
-                    MessageType::Info,
-                );
+                self.set_message(&format!("{} cursors", count), MessageType::Info);
             }
             None => {
                 self.set_message("All occurrences selected", MessageType::Info);
@@ -364,7 +363,9 @@ impl Editor {
         b.set_selection(Some(Selection { anchor, head }));
         // Move cursor to end of word
         let line = b.cursor().line;
-        b.cursors[b.primary].cursor.set_position(line, word_end, &b.buffer);
+        b.cursors[b.primary]
+            .cursor
+            .set_position(line, word_end, &b.buffer);
     }
 
     /// Add a new cursor at (line, byte_col) — for Alt+Click.

@@ -25,6 +25,7 @@ impl Editor {
         );
         b.cursors[b.primary].cursor.move_right(&b.buffer);
         self.invalidate_highlight();
+        self.invalidate_git();
     }
 
     pub(super) fn insert_newline(&mut self) {
@@ -61,6 +62,7 @@ impl Editor {
             b.cursors[b.primary].cursor.move_right(&b.buffer);
         }
         self.invalidate_highlight();
+        self.invalidate_git();
     }
 
     pub(super) fn insert_tab(&mut self) {
@@ -88,6 +90,7 @@ impl Editor {
             b.cursors[b.primary].cursor.move_right(&b.buffer);
         }
         self.invalidate_highlight();
+        self.invalidate_git();
     }
 
     pub(super) fn backspace(&mut self) {
@@ -113,6 +116,7 @@ impl Editor {
             GroupContext::Deleting,
         );
         self.invalidate_highlight();
+        self.invalidate_git();
     }
 
     pub(super) fn delete_at_cursor(&mut self) {
@@ -135,6 +139,7 @@ impl Editor {
             );
             b.cursors[b.primary].cursor.clamp(&b.buffer);
             self.invalidate_highlight();
+            self.invalidate_git();
         }
     }
 
@@ -162,6 +167,7 @@ impl Editor {
         // Move cursor to duplicated line
         b.cursors[b.primary].cursor.move_down(&b.buffer);
         self.invalidate_highlight();
+        self.invalidate_git();
         self.set_message("Line duplicated", MessageType::Info);
     }
 
@@ -196,6 +202,7 @@ impl Editor {
         b.cursors[b.primary].cursor.col = 0;
         b.cursors[b.primary].cursor.desired_col = 0;
         self.invalidate_highlight();
+        self.invalidate_git();
         self.set_message("Line deleted", MessageType::Info);
     }
 
@@ -247,6 +254,7 @@ impl Editor {
             b.cursors[b.primary].cursor.desired_col = new_col;
         }
         self.invalidate_highlight();
+        self.invalidate_git();
     }
 
     pub(super) fn select_line(&mut self) {
@@ -349,6 +357,7 @@ impl Editor {
         let b = self.buf_mut();
         b.cursors[b.primary].cursor.clamp(&b.buffer);
         self.invalidate_highlight();
+        self.invalidate_git();
     }
 
     // -----------------------------------------------------------------------
@@ -366,6 +375,12 @@ impl Editor {
                 let b = self.buf_mut();
                 b.buffer.mark_saved();
                 b.undo_stack.mark_saved(cs);
+                // Reload HEAD content and refresh git diff after save
+                if let Some(path) = b.buffer.file_path().map(|p| p.to_path_buf())
+                    && let Some(gi) = &mut b.git_info
+                {
+                    gi.reload_head(&path);
+                }
                 self.set_message("Saved!", MessageType::Info);
             }
             Err(e) => {
@@ -478,7 +493,9 @@ impl Editor {
                         && let Some((line, col)) = self.screen_to_buffer(me.col, me.row)
                     {
                         let b = self.buf_mut();
-                        b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+                        b.cursors[b.primary]
+                            .cursor
+                            .set_position(line, col, &b.buffer);
                         let head = b.cursor().byte_offset(&b.buffer);
                         if let Some(ref mut sel) = b.cursors[b.primary].selection {
                             sel.head = head;
@@ -508,7 +525,9 @@ impl Editor {
                         }
 
                         let b = self.buf_mut();
-                        b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+                        b.cursors[b.primary]
+                            .cursor
+                            .set_position(line, col, &b.buffer);
                         let offset = b.cursor().byte_offset(&b.buffer);
                         b.set_selection(Some(Selection {
                             anchor: offset,
@@ -544,7 +563,9 @@ impl Editor {
                     if b.cursor().line >= b.scroll_row + h {
                         let target = b.scroll_row + h - 1;
                         let col = b.cursor().col;
-                        b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
+                        b.cursors[b.primary]
+                            .cursor
+                            .set_position(target, col, &b.buffer);
                     }
                 }
             }
@@ -563,7 +584,9 @@ impl Editor {
                     if b.cursor().line < b.scroll_row {
                         let target = b.scroll_row;
                         let col = b.cursor().col;
-                        b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
+                        b.cursors[b.primary]
+                            .cursor
+                            .set_position(target, col, &b.buffer);
                     }
                 }
             }
@@ -604,6 +627,7 @@ impl Editor {
             b.cursors[b.primary].cursor.move_right(&b.buffer);
         }
         self.invalidate_highlight();
+        self.invalidate_git();
     }
 
     // -----------------------------------------------------------------------
@@ -623,6 +647,12 @@ impl Editor {
         let cursor_line = self.buf().cursor().line;
         if let Some(h) = &mut self.buf_mut().highlighter {
             h.invalidate_from(cursor_line);
+        }
+    }
+
+    pub(super) fn invalidate_git(&mut self) {
+        if let Some(gi) = &mut self.buf_mut().git_info {
+            gi.mark_stale();
         }
     }
 
@@ -674,14 +704,12 @@ impl Editor {
         }
 
         // Invalidate from the earliest affected line
-        let min_line = b
-            .cursors
-            .iter()
-            .map(|cs| cs.cursor.line)
-            .min()
-            .unwrap_or(0);
+        let min_line = b.cursors.iter().map(|cs| cs.cursor.line).min().unwrap_or(0);
         if let Some(h) = &mut b.highlighter {
             h.invalidate_from(min_line.saturating_sub(1));
+        }
+        if let Some(gi) = &mut b.git_info {
+            gi.mark_stale();
         }
     }
 
@@ -739,14 +767,12 @@ impl Editor {
         // It's safest to sort and merge
         b.sort_and_merge();
 
-        let min_line = b
-            .cursors
-            .iter()
-            .map(|cs| cs.cursor.line)
-            .min()
-            .unwrap_or(0);
+        let min_line = b.cursors.iter().map(|cs| cs.cursor.line).min().unwrap_or(0);
         if let Some(h) = &mut b.highlighter {
             h.invalidate_from(min_line.saturating_sub(1));
+        }
+        if let Some(gi) = &mut b.git_info {
+            gi.mark_stale();
         }
     }
 
@@ -793,14 +819,12 @@ impl Editor {
             }
         }
 
-        let min_line = b
-            .cursors
-            .iter()
-            .map(|cs| cs.cursor.line)
-            .min()
-            .unwrap_or(0);
+        let min_line = b.cursors.iter().map(|cs| cs.cursor.line).min().unwrap_or(0);
         if let Some(h) = &mut b.highlighter {
             h.invalidate_from(min_line.saturating_sub(1));
+        }
+        if let Some(gi) = &mut b.git_info {
+            gi.mark_stale();
         }
     }
 
@@ -847,14 +871,12 @@ impl Editor {
 
         b.sort_and_merge();
 
-        let min_line = b
-            .cursors
-            .iter()
-            .map(|cs| cs.cursor.line)
-            .min()
-            .unwrap_or(0);
+        let min_line = b.cursors.iter().map(|cs| cs.cursor.line).min().unwrap_or(0);
         if let Some(h) = &mut b.highlighter {
             h.invalidate_from(min_line.saturating_sub(1));
+        }
+        if let Some(gi) = &mut b.git_info {
+            gi.mark_stale();
         }
     }
 
@@ -902,14 +924,12 @@ impl Editor {
         }
         b.sort_and_merge();
 
-        let min_line = b
-            .cursors
-            .iter()
-            .map(|cs| cs.cursor.line)
-            .min()
-            .unwrap_or(0);
+        let min_line = b.cursors.iter().map(|cs| cs.cursor.line).min().unwrap_or(0);
         if let Some(h) = &mut b.highlighter {
             h.invalidate_from(min_line.saturating_sub(1));
+        }
+        if let Some(gi) = &mut b.git_info {
+            gi.mark_stale();
         }
     }
 

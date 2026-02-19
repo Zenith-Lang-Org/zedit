@@ -260,7 +260,9 @@ impl Editor {
                     let max = self.buf().buffer.line_count().saturating_sub(1);
                     let target = (n - 1).min(max);
                     let b = self.buf_mut();
-                    b.cursors[b.primary].cursor.set_position(target, 0, &b.buffer);
+                    b.cursors[b.primary]
+                        .cursor
+                        .set_position(target, 0, &b.buffer);
                     b.set_selection(None);
                     self.set_message(&format!("Jumped to line {}", target + 1), MessageType::Info);
                 }

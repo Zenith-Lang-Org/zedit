@@ -490,6 +490,7 @@ impl Editor {
                     b.cursors[b.primary].cursor.desired_col = restored.desired_col;
                     b.cursors[b.primary].cursor.clamp(&b.buffer);
                     self.invalidate_highlight();
+                    self.invalidate_git();
                     self.set_message("Undo", MessageType::Info);
                 } else {
                     self.set_message("Nothing to undo", MessageType::Warning);
@@ -507,6 +508,7 @@ impl Editor {
                     b.cursors[b.primary].cursor.desired_col = restored.desired_col;
                     b.cursors[b.primary].cursor.clamp(&b.buffer);
                     self.invalidate_highlight();
+                    self.invalidate_git();
                     self.set_message("Redo", MessageType::Info);
                 } else {
                     self.set_message("Nothing to redo", MessageType::Warning);

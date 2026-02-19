@@ -42,6 +42,7 @@ pub(super) struct BufferState {
     pub(super) search: Option<SearchState>,
     pub(super) highlighter: Option<Highlighter>,
     pub(super) gutter_width: usize,
+    pub(super) git_info: Option<crate::git::GitInfo>,
 }
 
 impl BufferState {
@@ -65,6 +66,7 @@ impl BufferState {
             search: None,
             highlighter: None,
             gutter_width,
+            git_info: None,
         }
     }
 
@@ -86,6 +88,7 @@ impl BufferState {
                 Highlighter::new(grammar, theme).with_lang(&lang)
             })
         });
+        let git_info = crate::git::GitInfo::from_file(path);
         Ok(BufferState {
             buffer,
             cursors: vec![CursorSelection {
@@ -99,6 +102,7 @@ impl BufferState {
             search: None,
             highlighter,
             gutter_width,
+            git_info,
         })
     }
 
@@ -138,12 +142,11 @@ impl BufferState {
         }
 
         // Remember the primary cursor's byte offset to re-find it after sorting
-        let primary_offset = self.cursors[self.primary]
-            .cursor
-            .byte_offset(&self.buffer);
+        let primary_offset = self.cursors[self.primary].cursor.byte_offset(&self.buffer);
 
         // Sort by byte offset
-        self.cursors.sort_by_key(|cs| cs.cursor.byte_offset(&self.buffer));
+        self.cursors
+            .sort_by_key(|cs| cs.cursor.byte_offset(&self.buffer));
 
         // Merge overlapping cursors (same byte offset)
         let mut merged = Vec::with_capacity(self.cursors.len());
