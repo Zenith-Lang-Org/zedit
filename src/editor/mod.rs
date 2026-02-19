@@ -6,6 +6,7 @@ mod prompt;
 mod search;
 mod selection;
 mod view;
+mod wrap;
 
 #[cfg(test)]
 mod tests;
@@ -239,6 +240,7 @@ impl Editor {
                 let (w, h) = self.terminal.size();
                 self.screen.resize(w as usize, h as usize);
                 self.resolve_layout();
+                self.recompute_all_wrap_maps();
                 self.adjust_viewport();
             }
 
@@ -343,10 +345,18 @@ impl Editor {
         match (&ke.key, ke.ctrl, ke.alt) {
             // -- Navigation (works with and without shift) --
             (Key::Up, false, false) => {
-                self.move_all_cursors(|c, buf| c.move_up(buf));
+                if self.buf().wrap_map.is_some() {
+                    self.move_cursor_up_visual();
+                } else {
+                    self.move_all_cursors(|c, buf| c.move_up(buf));
+                }
             }
             (Key::Down, false, false) => {
-                self.move_all_cursors(|c, buf| c.move_down(buf));
+                if self.buf().wrap_map.is_some() {
+                    self.move_cursor_down_visual();
+                } else {
+                    self.move_all_cursors(|c, buf| c.move_down(buf));
+                }
             }
             (Key::Left, false, false) => {
                 self.move_all_cursors(|c, buf| c.move_left(buf));
@@ -363,10 +373,18 @@ impl Editor {
             }
 
             (Key::Home, false, false) => {
-                self.move_all_cursors(|c, buf| c.move_home(buf));
+                if self.buf().wrap_map.is_some() {
+                    self.move_cursor_home_visual();
+                } else {
+                    self.move_all_cursors(|c, buf| c.move_home(buf));
+                }
             }
             (Key::End, false, false) => {
-                self.move_all_cursors(|c, buf| c.move_end(buf));
+                if self.buf().wrap_map.is_some() {
+                    self.move_cursor_end_visual();
+                } else {
+                    self.move_all_cursors(|c, buf| c.move_end(buf));
+                }
             }
 
             (Key::Home, true, false) => {
@@ -388,20 +406,34 @@ impl Editor {
                 if self.buf().is_multi() {
                     self.buf_mut().collapse_to_primary();
                 }
-                let h = self.text_area_height();
-                let b = self.buf_mut();
-                b.scroll_row = b.scroll_row.saturating_sub(h);
-                b.cursors[b.primary].cursor.move_page_up(&b.buffer, h);
+                if self.buf().wrap_map.is_some() {
+                    let h = self.text_area_height();
+                    for _ in 0..h {
+                        self.move_cursor_up_visual();
+                    }
+                } else {
+                    let h = self.text_area_height();
+                    let b = self.buf_mut();
+                    b.scroll_row = b.scroll_row.saturating_sub(h);
+                    b.cursors[b.primary].cursor.move_page_up(&b.buffer, h);
+                }
             }
             (Key::PageDown, false, false) => {
                 if self.buf().is_multi() {
                     self.buf_mut().collapse_to_primary();
                 }
-                let h = self.text_area_height();
-                let b = self.buf_mut();
-                let max_line = b.buffer.line_count().saturating_sub(1);
-                b.scroll_row = (b.scroll_row + h).min(max_line);
-                b.cursors[b.primary].cursor.move_page_down(&b.buffer, h);
+                if self.buf().wrap_map.is_some() {
+                    let h = self.text_area_height();
+                    for _ in 0..h {
+                        self.move_cursor_down_visual();
+                    }
+                } else {
+                    let h = self.text_area_height();
+                    let b = self.buf_mut();
+                    let max_line = b.buffer.line_count().saturating_sub(1);
+                    b.scroll_row = (b.scroll_row + h).min(max_line);
+                    b.cursors[b.primary].cursor.move_page_down(&b.buffer, h);
+                }
             }
 
             // -- Editing (delete selection first if active) --
@@ -567,6 +599,11 @@ impl Editor {
                 self.palette = Some(palette::Palette::new());
             }
 
+            // -- Word Wrap toggle (Alt+Z) --
+            (Key::Char('z'), false, true) => {
+                self.toggle_word_wrap();
+            }
+
             // -- Help --
             (Key::F(1), false, false) => {
                 self.help_visible = !self.help_visible;
@@ -692,5 +729,194 @@ impl Editor {
     fn resize_active_pane_vertical(&mut self, delta: i16) {
         // Vertical resize uses the same mechanism
         self.resize_active_pane(delta);
+    }
+
+    // -----------------------------------------------------------------------
+    // Word wrap
+    // -----------------------------------------------------------------------
+
+    fn toggle_word_wrap(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        if self.buffers[buf_idx].wrap_map.is_some() {
+            // Disable wrap
+            self.buffers[buf_idx].wrap_map = None;
+            self.buffers[buf_idx].scroll_visual_offset = 0;
+            self.set_message("Word wrap off", MessageType::Info);
+        } else {
+            // Enable wrap
+            let wrap_col = self.wrap_col_for_buffer(buf_idx);
+            let wm = wrap::WrapMap::new(&self.buffers[buf_idx].buffer, wrap_col);
+            self.buffers[buf_idx].wrap_map = Some(wm);
+            self.buffers[buf_idx].scroll_col = 0;
+            self.buffers[buf_idx].scroll_visual_offset = 0;
+            self.set_message("Word wrap on", MessageType::Info);
+        }
+    }
+
+    /// Calculate the wrap column for a given buffer (pane width minus gutter).
+    fn wrap_col_for_buffer(&self, buf_idx: usize) -> usize {
+        let pane_width = if let Some(rect) = self.layout.pane_rect(self.active_pane) {
+            rect.width as usize
+        } else {
+            self.screen.width()
+        };
+        pane_width.saturating_sub(self.buffers[buf_idx].gutter_width)
+    }
+
+    /// Move cursor up one visual row (accounting for wrapped segments).
+    fn move_cursor_up_visual(&mut self) {
+        let b = self.buf();
+        let cursor_line = b.cursor().line;
+        let cursor_col = b.cursor().col;
+        let line_text = b.buffer.get_line(cursor_line).unwrap_or_default();
+
+        let (visual_row, _visual_col) = if let Some(ref wm) = b.wrap_map {
+            wm.buffer_to_visual(cursor_line, cursor_col, &line_text)
+        } else {
+            return;
+        };
+
+        if visual_row == 0 {
+            return; // Already at top
+        }
+
+        let target_visual_row = visual_row - 1;
+        let desired_display_col = b.cursor().desired_col;
+
+        let (target_line, target_segment) = b
+            .wrap_map
+            .as_ref()
+            .unwrap()
+            .visual_to_buffer(target_visual_row);
+        let target_line_text = b.buffer.get_line(target_line).unwrap_or_default();
+        let (seg_start, seg_end) = b
+            .wrap_map
+            .as_ref()
+            .unwrap()
+            .segment_byte_range(target_line, target_segment);
+        let seg_end_clamped = seg_end.min(target_line_text.len());
+        let seg_text = &target_line_text[seg_start..seg_end_clamped];
+        let byte_in_seg = display_col_to_byte_col(seg_text, desired_display_col);
+        let new_col = seg_start + byte_in_seg;
+
+        let b = self.buf_mut();
+        b.cursors[b.primary].cursor.line = target_line;
+        b.cursors[b.primary].cursor.col = new_col;
+        // Preserve desired_col for vertical movement
+        b.cursors[b.primary].cursor.clamp(&b.buffer);
+    }
+
+    /// Move cursor down one visual row (accounting for wrapped segments).
+    fn move_cursor_down_visual(&mut self) {
+        let b = self.buf();
+        let cursor_line = b.cursor().line;
+        let cursor_col = b.cursor().col;
+        let line_text = b.buffer.get_line(cursor_line).unwrap_or_default();
+
+        let (visual_row, _visual_col) = if let Some(ref wm) = b.wrap_map {
+            wm.buffer_to_visual(cursor_line, cursor_col, &line_text)
+        } else {
+            return;
+        };
+
+        let total = b.wrap_map.as_ref().unwrap().total_visual_rows();
+        if visual_row + 1 >= total {
+            return; // Already at bottom
+        }
+
+        let target_visual_row = visual_row + 1;
+        let desired_display_col = b.cursor().desired_col;
+
+        let (target_line, target_segment) = b
+            .wrap_map
+            .as_ref()
+            .unwrap()
+            .visual_to_buffer(target_visual_row);
+        let target_line_text = b.buffer.get_line(target_line).unwrap_or_default();
+        let (seg_start, seg_end) = b
+            .wrap_map
+            .as_ref()
+            .unwrap()
+            .segment_byte_range(target_line, target_segment);
+        let seg_end_clamped = seg_end.min(target_line_text.len());
+        let seg_text = &target_line_text[seg_start..seg_end_clamped];
+        let byte_in_seg = display_col_to_byte_col(seg_text, desired_display_col);
+        let new_col = seg_start + byte_in_seg;
+
+        let b = self.buf_mut();
+        b.cursors[b.primary].cursor.line = target_line;
+        b.cursors[b.primary].cursor.col = new_col;
+        b.cursors[b.primary].cursor.clamp(&b.buffer);
+    }
+
+    /// Move cursor to start of current visual segment (Home in wrap mode).
+    fn move_cursor_home_visual(&mut self) {
+        let b = self.buf();
+        let cursor_line = b.cursor().line;
+        let cursor_col = b.cursor().col;
+        let line_text = b.buffer.get_line(cursor_line).unwrap_or_default();
+
+        let (visual_row, _) = if let Some(ref wm) = b.wrap_map {
+            wm.buffer_to_visual(cursor_line, cursor_col, &line_text)
+        } else {
+            return;
+        };
+
+        let (target_line, target_segment) =
+            b.wrap_map.as_ref().unwrap().visual_to_buffer(visual_row);
+        let (seg_start, _) = b
+            .wrap_map
+            .as_ref()
+            .unwrap()
+            .segment_byte_range(target_line, target_segment);
+
+        let b = self.buf_mut();
+        b.cursors[b.primary].cursor.col = seg_start;
+        b.cursors[b.primary].cursor.desired_col = seg_start;
+    }
+
+    /// Move cursor to end of current visual segment (End in wrap mode).
+    fn move_cursor_end_visual(&mut self) {
+        let b = self.buf();
+        let cursor_line = b.cursor().line;
+        let cursor_col = b.cursor().col;
+        let line_text = b.buffer.get_line(cursor_line).unwrap_or_default();
+
+        let (visual_row, _) = if let Some(ref wm) = b.wrap_map {
+            wm.buffer_to_visual(cursor_line, cursor_col, &line_text)
+        } else {
+            return;
+        };
+
+        let (target_line, target_segment) =
+            b.wrap_map.as_ref().unwrap().visual_to_buffer(visual_row);
+        let target_line_text = b.buffer.get_line(target_line).unwrap_or_default();
+        let (_, seg_end) = b
+            .wrap_map
+            .as_ref()
+            .unwrap()
+            .segment_byte_range(target_line, target_segment);
+        let seg_end_clamped = seg_end.min(target_line_text.len());
+
+        let b = self.buf_mut();
+        b.cursors[b.primary].cursor.col = seg_end_clamped;
+        b.cursors[b.primary].cursor.desired_col = seg_end_clamped;
+        b.cursors[b.primary].cursor.clamp(&b.buffer);
+    }
+
+    /// Recompute wrap maps for all buffers that have wrapping enabled (e.g., after resize).
+    fn recompute_all_wrap_maps(&mut self) {
+        let panes: Vec<_> = self.layout.panes().to_vec();
+        for pane_info in &panes {
+            let bi = pane_info.buffer_index;
+            if bi < self.buffers.len() {
+                let bs = &mut self.buffers[bi];
+                if let Some(ref mut wm) = bs.wrap_map {
+                    let pane_w = pane_info.rect.width as usize;
+                    let wrap_col = pane_w.saturating_sub(bs.gutter_width);
+                    wm.rebuild_with_col(&bs.buffer, wrap_col);
+                }
+            }
+        }
     }
 }

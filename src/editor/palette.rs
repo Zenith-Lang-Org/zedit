@@ -50,6 +50,7 @@ pub(super) enum PaletteAction {
     FocusDown,
     // View
     ToggleHelp,
+    ToggleWrap,
     CommandPalette,
 }
 
@@ -256,6 +257,11 @@ impl Palette {
                 label: "View: Toggle Help",
                 shortcut: "F1",
                 action: PaletteAction::ToggleHelp,
+            },
+            PaletteEntry {
+                label: "View: Toggle Word Wrap",
+                shortcut: "Alt+Z",
+                action: PaletteAction::ToggleWrap,
             },
             PaletteEntry {
                 label: "View: Command Palette",
@@ -531,6 +537,7 @@ impl Editor {
             ToggleHelp => {
                 self.help_visible = !self.help_visible;
             }
+            ToggleWrap => self.toggle_word_wrap(),
             CommandPalette => {
                 // Re-open palette (already closed by taking it)
                 self.palette = Some(Palette::new());

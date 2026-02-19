@@ -676,7 +676,7 @@ Post-MVP phases (each ~2-4 weeks):
 | -------- | -------------------------------------------------------- |
 | Phase 8  | Multi-cursor editing (Ctrl+D select next occurrence)     |
 | Phase 9  | File tree sidebar (split terminal view)                  |
-| Phase 10 | Soft word wrap for prose editing                         |
+| Phase 10 | ~~Soft word wrap for prose editing~~ → Done (Phase 16)   |
 | Phase 11 | Session restore (remember open files and cursor positions) |
 | Phase 12 | Integrated terminal (split pane with shell)              |
 | Phase 13 | LSP client (completions, diagnostics, go-to-definition)  |

@@ -15,7 +15,7 @@ Phases reordered by dependency graph and complexity (quick wins first, heavy pha
 | 3  | 12    | Multi-Cursor Editing | 900    | —                 | DONE   |
 | 4  | 13    | Git Gutter           | 630    | —                 | DONE   |
 | 5  | 15    | Command Palette      | 530    | —                 | DONE   |
-| 6  | 16    | Soft Word Wrap       | 600    | —                 |        |
+| 6  | 16    | Soft Word Wrap       | 600    | —                 | DONE   |
 | 7  | 11    | File Tree Sidebar    | 750    | Phase 8           |        |
 | 8  | 9     | Integrated Terminal  | 1,450  | Phase 8           |        |
 | 9  | 14    | Session + Swap Files | 650    | Phase 8           |        |

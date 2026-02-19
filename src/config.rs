@@ -98,6 +98,7 @@ pub struct Config {
     pub theme: String,
     pub line_numbers: bool,
     pub auto_indent: bool,
+    pub word_wrap: bool,
     pub languages: Vec<LanguageDef>,
 }
 
@@ -109,6 +110,7 @@ impl Default for Config {
             theme: "zedit-dark".to_string(),
             line_numbers: true,
             auto_indent: true,
+            word_wrap: false,
             languages: builtin_languages(),
         }
     }
@@ -153,6 +155,9 @@ impl Config {
         }
         if let Some(b) = val.get("auto_indent").and_then(|v| v.as_bool()) {
             config.auto_indent = b;
+        }
+        if let Some(b) = val.get("word_wrap").and_then(|v| v.as_bool()) {
+            config.word_wrap = b;
         }
         // config.json overrides take highest priority
         if let Some(user_langs) = parse_languages_from_config(&val) {

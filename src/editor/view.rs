@@ -29,6 +29,14 @@ impl Editor {
         let h = self.text_area_height();
         let w = self.text_area_width();
 
+        if self.buf().wrap_map.is_some() {
+            self.adjust_viewport_wrapped(h);
+        } else {
+            self.adjust_viewport_unwrapped(h, w);
+        }
+    }
+
+    fn adjust_viewport_unwrapped(&mut self, h: usize, w: usize) {
         let b = self.buf();
         let cursor_line = b.cursor().line;
         let scroll_row = b.scroll_row;
@@ -51,6 +59,72 @@ impl Editor {
             } else if display_col >= scroll_col + w {
                 self.buf_mut().scroll_col = display_col - w + 1;
             }
+        }
+    }
+
+    fn adjust_viewport_wrapped(&mut self, h: usize) {
+        if h == 0 {
+            return;
+        }
+
+        // No horizontal scrolling in wrap mode
+        self.buf_mut().scroll_col = 0;
+
+        let b = self.buf();
+        let cursor_line = b.cursor().line;
+        let cursor_col = b.cursor().col;
+        let scroll_row = b.scroll_row;
+        let scroll_visual_offset = b.scroll_visual_offset;
+
+        let line_text = b.buffer.get_line(cursor_line).unwrap_or_default();
+
+        // Get cursor's visual row
+        let cursor_visual_row = if let Some(ref wm) = b.wrap_map {
+            let (vr, _) = wm.buffer_to_visual(cursor_line, cursor_col, &line_text);
+            vr
+        } else {
+            return;
+        };
+
+        // Get scroll start visual row
+        let scroll_visual_row = if let Some(ref wm) = b.wrap_map {
+            if scroll_row < wm.total_visual_rows() {
+                let base = if let Some(ref wm2) = b.wrap_map {
+                    // visual_offsets for scroll_row
+                    let (vr, _) = wm2.buffer_to_visual(scroll_row, 0, "");
+                    vr
+                } else {
+                    0
+                };
+                base + scroll_visual_offset
+            } else {
+                0
+            }
+        } else {
+            return;
+        };
+
+        if cursor_visual_row < scroll_visual_row {
+            // Cursor above viewport: scroll up
+            let (line, seg) = self
+                .buf()
+                .wrap_map
+                .as_ref()
+                .unwrap()
+                .visual_to_buffer(cursor_visual_row);
+            self.buf_mut().scroll_row = line;
+            self.buf_mut().scroll_visual_offset = seg;
+        } else if cursor_visual_row >= scroll_visual_row + h {
+            // Cursor below viewport: scroll down
+            let target_start = cursor_visual_row - h + 1;
+            let (line, seg) = self
+                .buf()
+                .wrap_map
+                .as_ref()
+                .unwrap()
+                .visual_to_buffer(target_start);
+            self.buf_mut().scroll_row = line;
+            self.buf_mut().scroll_visual_offset = seg;
         }
     }
 
@@ -267,17 +341,47 @@ impl Editor {
             terminal::move_cursor(msg_row_1based, (prompt_cursor_col + 1) as u16);
         } else if let Some(rect) = self.layout.pane_rect(self.active_pane) {
             let b = self.buf();
-            let cursor_screen_row = b.cursor().line.saturating_sub(b.scroll_row) + rect.y as usize;
-            let cursor_display = self.cursor_display_col();
-            let cursor_screen_col = cursor_display
-                .saturating_sub(b.scroll_col)
-                .saturating_add(b.gutter_width)
-                + rect.x as usize;
+            if b.wrap_map.is_some() {
+                // Wrapped mode: compute visual position
+                let cursor_line = b.cursor().line;
+                let cursor_col = b.cursor().col;
+                let line_text = b.buffer.get_line(cursor_line).unwrap_or_default();
 
-            terminal::move_cursor(
-                (cursor_screen_row + 1) as u16,
-                (cursor_screen_col + 1) as u16,
-            );
+                let (cursor_visual_row, cursor_visual_col) = b
+                    .wrap_map
+                    .as_ref()
+                    .map(|wm| wm.buffer_to_visual(cursor_line, cursor_col, &line_text))
+                    .unwrap_or((0, 0));
+
+                // Compute scroll start visual row
+                let scroll_visual_row = b
+                    .wrap_map
+                    .as_ref()
+                    .map(|wm| {
+                        let (vr, _) = wm.buffer_to_visual(b.scroll_row, 0, "");
+                        vr + b.scroll_visual_offset
+                    })
+                    .unwrap_or(0);
+
+                let screen_row =
+                    cursor_visual_row.saturating_sub(scroll_visual_row) + rect.y as usize;
+                let screen_col = cursor_visual_col + b.gutter_width + rect.x as usize;
+
+                terminal::move_cursor((screen_row + 1) as u16, (screen_col + 1) as u16);
+            } else {
+                let cursor_screen_row =
+                    b.cursor().line.saturating_sub(b.scroll_row) + rect.y as usize;
+                let cursor_display = self.cursor_display_col();
+                let cursor_screen_col = cursor_display
+                    .saturating_sub(b.scroll_col)
+                    .saturating_add(b.gutter_width)
+                    + rect.x as usize;
+
+                terminal::move_cursor(
+                    (cursor_screen_row + 1) as u16,
+                    (cursor_screen_col + 1) as u16,
+                );
+            }
         }
         terminal::flush();
     }
@@ -298,6 +402,16 @@ impl Editor {
             }
         }
 
+        let has_wrap = self.buffers[buffer_idx].wrap_map.is_some();
+        if has_wrap {
+            self.render_editor_pane_wrapped(rect, buffer_idx, pane_id);
+        } else {
+            self.render_editor_pane_unwrapped(rect, buffer_idx, pane_id);
+        }
+    }
+
+    /// Render a pane without word wrap (original behavior).
+    fn render_editor_pane_unwrapped(&mut self, rect: Rect, buffer_idx: usize, pane_id: PaneId) {
         let pane_x = rect.x as usize;
         let pane_y = rect.y as usize;
         let pane_w = rect.width as usize;
@@ -514,6 +628,302 @@ impl Editor {
                         false,
                     );
                 }
+            }
+        }
+    }
+
+    /// Render a pane with word wrap enabled.
+    fn render_editor_pane_wrapped(&mut self, rect: Rect, buffer_idx: usize, pane_id: PaneId) {
+        let pane_x = rect.x as usize;
+        let pane_y = rect.y as usize;
+        let pane_w = rect.width as usize;
+        let pane_h = rect.height as usize;
+
+        let bs = &self.buffers[buffer_idx];
+        let scroll_row = bs.scroll_row;
+        let scroll_visual_offset = bs.scroll_visual_offset;
+        let gutter_width = bs.gutter_width;
+        let line_count = bs.buffer.line_count();
+        let has_git = bs.git_info.is_some();
+
+        // Collect selection ranges
+        let sel_ranges: Vec<(usize, usize)> = if pane_id == self.active_pane {
+            bs.cursors
+                .iter()
+                .filter_map(|cs| {
+                    cs.selection.map(|sel| {
+                        let s = sel.anchor.min(sel.head);
+                        let e = sel.anchor.max(sel.head);
+                        (s, e)
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let secondary_cursor_offsets: Vec<usize> = if pane_id == self.active_pane && bs.is_multi() {
+            bs.cursors
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != bs.primary)
+                .map(|(_, cs)| cs.cursor.byte_offset(&bs.buffer))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Walk from scroll_row, skipping scroll_visual_offset segments
+        let mut file_line = scroll_row;
+        let mut segment = scroll_visual_offset;
+        let git_col_width = if has_git { 2 } else { 0 };
+
+        for local_row in 0..pane_h {
+            let screen_row = pane_y + local_row;
+
+            if file_line >= line_count {
+                // Tilde line
+                self.screen.put_char(
+                    screen_row,
+                    pane_x,
+                    '~',
+                    Color::Color256(240),
+                    Color::Default,
+                    false,
+                );
+                for col in (pane_x + 1)..(pane_x + pane_w) {
+                    self.screen.put_char(
+                        screen_row,
+                        col,
+                        ' ',
+                        Color::Default,
+                        Color::Default,
+                        false,
+                    );
+                }
+                continue;
+            }
+
+            let visual_rows_this_line = self.buffers[buffer_idx]
+                .wrap_map
+                .as_ref()
+                .map(|wm| wm.visual_rows_for(file_line))
+                .unwrap_or(1);
+
+            let is_first_segment = segment == 0;
+
+            // Git gutter (only on first segment)
+            if has_git {
+                if is_first_segment {
+                    let status = self.buffers[buffer_idx]
+                        .git_info
+                        .as_ref()
+                        .map(|gi| gi.line_status(file_line))
+                        .unwrap_or(crate::git::LineStatus::Unchanged);
+                    let (ch, fg) = match status {
+                        crate::git::LineStatus::Added => ('+', Color::Ansi(2)),
+                        crate::git::LineStatus::Modified => ('~', Color::Ansi(3)),
+                        crate::git::LineStatus::DeletedBelow => ('\u{25B8}', Color::Ansi(1)),
+                        crate::git::LineStatus::Unchanged => (' ', Color::Default),
+                    };
+                    self.screen
+                        .put_char(screen_row, pane_x, ch, fg, Color::Default, false);
+                } else {
+                    self.screen.put_char(
+                        screen_row,
+                        pane_x,
+                        ' ',
+                        Color::Default,
+                        Color::Default,
+                        false,
+                    );
+                }
+                self.screen.put_char(
+                    screen_row,
+                    pane_x + 1,
+                    ' ',
+                    Color::Default,
+                    Color::Default,
+                    false,
+                );
+            }
+
+            // Gutter
+            let line_num_width = gutter_width.saturating_sub(git_col_width);
+            if line_num_width > 0 && self.config.line_numbers {
+                let gutter_fg = Color::Color256(240);
+                let gutter_bg = Color::Default;
+
+                if is_first_segment {
+                    // Show line number
+                    let num_str = format!("{}", file_line + 1);
+                    let pad = line_num_width.saturating_sub(num_str.len() + 1);
+                    for col in 0..pad {
+                        self.screen.put_char(
+                            screen_row,
+                            pane_x + git_col_width + col,
+                            ' ',
+                            gutter_fg,
+                            gutter_bg,
+                            false,
+                        );
+                    }
+                    self.screen.put_str(
+                        screen_row,
+                        pane_x + git_col_width + pad,
+                        &num_str,
+                        gutter_fg,
+                        gutter_bg,
+                        false,
+                    );
+                    let sep_col = pad + num_str.len();
+                    if sep_col < line_num_width {
+                        self.screen.put_char(
+                            screen_row,
+                            pane_x + git_col_width + sep_col,
+                            ' ',
+                            gutter_fg,
+                            gutter_bg,
+                            false,
+                        );
+                    }
+                } else {
+                    // Continuation: show ↪ indicator
+                    for col in 0..line_num_width.saturating_sub(2) {
+                        self.screen.put_char(
+                            screen_row,
+                            pane_x + git_col_width + col,
+                            ' ',
+                            gutter_fg,
+                            gutter_bg,
+                            false,
+                        );
+                    }
+                    let arrow_col = pane_x + git_col_width + line_num_width.saturating_sub(2);
+                    self.screen.put_char(
+                        screen_row, arrow_col, '\u{21AA}', gutter_fg, gutter_bg, false,
+                    );
+                    if line_num_width >= 1 {
+                        self.screen.put_char(
+                            screen_row,
+                            arrow_col + 1,
+                            ' ',
+                            gutter_fg,
+                            gutter_bg,
+                            false,
+                        );
+                    }
+                }
+            }
+
+            // Segment content
+            let (seg_start, seg_end) = self.buffers[buffer_idx]
+                .wrap_map
+                .as_ref()
+                .map(|wm| wm.segment_byte_range(file_line, segment))
+                .unwrap_or((0, usize::MAX));
+
+            let line_text = self.buffers[buffer_idx]
+                .buffer
+                .get_line(file_line)
+                .unwrap_or_default();
+            let line_start_byte = self.buffers[buffer_idx]
+                .buffer
+                .line_start(file_line)
+                .unwrap_or(0);
+
+            let seg_end_clamped = seg_end.min(line_text.len());
+
+            // Syntax highlighting spans
+            let spans = {
+                let bs = &mut self.buffers[buffer_idx];
+                bs.highlighter.as_mut().map(|hl| {
+                    let buf_ref = &bs.buffer;
+                    hl.style_line(file_line, &line_text, |l| buf_ref.get_line(l))
+                })
+            };
+
+            let mut display_col: usize = 0;
+            let mut byte_offset_in_line: usize = 0;
+            let text_start_col = pane_x + gutter_width;
+
+            for ch in line_text.chars() {
+                let char_len = ch.len_utf8();
+                let cw = crate::unicode::char_width(ch);
+
+                // Only render chars within this segment
+                if byte_offset_in_line >= seg_start && byte_offset_in_line < seg_end_clamped {
+                    let screen_col = text_start_col + display_col;
+                    if screen_col >= pane_x + pane_w {
+                        break;
+                    }
+
+                    let char_byte = line_start_byte + byte_offset_in_line;
+                    let is_selected = sel_ranges
+                        .iter()
+                        .any(|(s, e)| char_byte >= *s && char_byte < *e);
+                    let is_secondary_cursor = secondary_cursor_offsets.contains(&char_byte);
+
+                    let (fg, bg, bold) = if is_selected {
+                        (Color::Ansi(0), Color::Ansi(7), true)
+                    } else if is_secondary_cursor {
+                        (Color::Ansi(0), Color::Color256(246), true)
+                    } else if pane_id == self.active_pane {
+                        if let Some(is_current) = self.match_at_byte(char_byte) {
+                            if is_current {
+                                (Color::Ansi(0), Color::Ansi(6), true)
+                            } else {
+                                (Color::Ansi(0), Color::Ansi(3), false)
+                            }
+                        } else {
+                            match &spans {
+                                Some(s) => highlight::lookup_style(s, byte_offset_in_line),
+                                None => (Color::Default, Color::Default, false),
+                            }
+                        }
+                    } else {
+                        match &spans {
+                            Some(s) => highlight::lookup_style(s, byte_offset_in_line),
+                            None => (Color::Default, Color::Default, false),
+                        }
+                    };
+                    self.screen
+                        .put_char(screen_row, screen_col, ch, fg, bg, bold);
+                    display_col += cw;
+                }
+
+                byte_offset_in_line += char_len;
+            }
+
+            // Fill remaining with spaces
+            let start_fill = text_start_col + display_col;
+            let line_end_byte = line_start_byte + line_text.len();
+            // Show trailing selection/cursor only on the last segment of the line
+            let is_last_segment = segment + 1 >= visual_rows_this_line;
+            for col in start_fill..(pane_x + pane_w) {
+                let is_trailing_selected = is_last_segment
+                    && sel_ranges
+                        .iter()
+                        .any(|(s, e)| line_end_byte >= *s && line_end_byte < *e)
+                    && col == start_fill;
+                let is_secondary_cursor_trail = is_last_segment
+                    && secondary_cursor_offsets.contains(&line_end_byte)
+                    && col == start_fill;
+                let (fg, bg, bold) = if is_trailing_selected {
+                    (Color::Ansi(0), Color::Ansi(7), true)
+                } else if is_secondary_cursor_trail {
+                    (Color::Ansi(0), Color::Color256(246), true)
+                } else {
+                    (Color::Default, Color::Default, false)
+                };
+                self.screen.put_char(screen_row, col, ' ', fg, bg, bold);
+            }
+
+            // Advance to next segment or next line
+            segment += 1;
+            if segment >= visual_rows_this_line {
+                file_line += 1;
+                segment = 0;
             }
         }
     }
@@ -898,6 +1308,13 @@ impl Editor {
             let local_col = (col - r.x) as usize;
 
             let bs = &self.buffers[pane_info.buffer_index];
+
+            if bs.wrap_map.is_some() {
+                return self
+                    .screen_to_buffer_wrapped(local_row, local_col, pane_info.buffer_index)
+                    .map(|(line, byte_col)| (line, byte_col, pane_info.id));
+            }
+
             let file_line = bs.scroll_row + local_row;
             if file_line >= bs.buffer.line_count() {
                 return None;
@@ -910,6 +1327,49 @@ impl Editor {
             let line_text = bs.buffer.get_line(file_line).unwrap_or_default();
             let byte_col = display_col_to_byte_col(&line_text, display_col);
             return Some((file_line, byte_col, pane_info.id));
+        }
+        None
+    }
+
+    /// Convert local pane coordinates to buffer position when wrapping is active.
+    fn screen_to_buffer_wrapped(
+        &self,
+        local_row: usize,
+        local_col: usize,
+        buffer_idx: usize,
+    ) -> Option<(usize, usize)> {
+        let bs = &self.buffers[buffer_idx];
+        let wm = bs.wrap_map.as_ref()?;
+        let gutter_width = bs.gutter_width;
+
+        // Walk from scroll position to find the file_line and segment
+        let mut file_line = bs.scroll_row;
+        let mut segment = bs.scroll_visual_offset;
+        let line_count = bs.buffer.line_count();
+
+        for row_i in 0..=local_row {
+            if file_line >= line_count {
+                return None;
+            }
+            if row_i == local_row {
+                // This is the target row
+                let display_col = local_col.saturating_sub(gutter_width);
+
+                let line_text = bs.buffer.get_line(file_line).unwrap_or_default();
+                let (seg_start, seg_end) = wm.segment_byte_range(file_line, segment);
+                let seg_end_clamped = seg_end.min(line_text.len());
+                let seg_text = &line_text[seg_start..seg_end_clamped];
+                let byte_in_seg = display_col_to_byte_col(seg_text, display_col);
+                return Some((file_line, seg_start + byte_in_seg));
+            }
+
+            // Advance
+            let visual_rows = wm.visual_rows_for(file_line);
+            segment += 1;
+            if segment >= visual_rows {
+                file_line += 1;
+                segment = 0;
+            }
         }
         None
     }

@@ -43,6 +43,9 @@ pub(super) struct BufferState {
     pub(super) highlighter: Option<Highlighter>,
     pub(super) gutter_width: usize,
     pub(super) git_info: Option<crate::git::GitInfo>,
+    pub(super) wrap_map: Option<super::wrap::WrapMap>,
+    /// Visual row offset within the first visible line when wrapping.
+    pub(super) scroll_visual_offset: usize,
 }
 
 impl BufferState {
@@ -67,6 +70,8 @@ impl BufferState {
             highlighter: None,
             gutter_width,
             git_info: None,
+            wrap_map: None,
+            scroll_visual_offset: 0,
         }
     }
 
@@ -103,6 +108,8 @@ impl BufferState {
             highlighter,
             gutter_width,
             git_info,
+            wrap_map: None,
+            scroll_visual_offset: 0,
         })
     }
 

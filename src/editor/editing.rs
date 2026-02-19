@@ -691,6 +691,14 @@ impl Editor {
         if let Some(h) = &mut self.buf_mut().highlighter {
             h.invalidate_from(cursor_line);
         }
+        self.invalidate_wrap();
+    }
+
+    pub(super) fn invalidate_wrap(&mut self) {
+        let b = self.buf_mut();
+        if let Some(ref mut wm) = b.wrap_map {
+            wm.rebuild(&b.buffer);
+        }
     }
 
     pub(super) fn invalidate_git(&mut self) {
