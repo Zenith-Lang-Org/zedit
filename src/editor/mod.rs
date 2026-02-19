@@ -1,6 +1,7 @@
 mod buffer_state;
 mod editing;
 mod helpers;
+mod palette;
 mod prompt;
 mod search;
 mod selection;
@@ -117,6 +118,9 @@ pub struct Editor {
     // Help overlay
     help_visible: bool,
 
+    // Command palette
+    palette: Option<palette::Palette>,
+
     running: bool,
 }
 
@@ -147,6 +151,7 @@ impl Editor {
             prompt: None,
             mouse_dragging: false,
             help_visible: false,
+            palette: None,
             running: true,
         })
     }
@@ -179,6 +184,7 @@ impl Editor {
             prompt: None,
             mouse_dragging: false,
             help_visible: false,
+            palette: None,
             running: true,
         })
     }
@@ -265,6 +271,14 @@ impl Editor {
                     }
                     _ => {}
                 }
+            }
+            return;
+        }
+
+        // When command palette is open, route all keys to it
+        if self.palette.is_some() {
+            if let Event::Key(ke) = event {
+                self.handle_palette_key(ke);
             }
             return;
         }
@@ -476,44 +490,8 @@ impl Editor {
             (Key::PageUp, true, false) => self.prev_buffer(),
 
             // -- Undo/Redo --
-            (Key::Char('z'), true, false) => {
-                // Collapse multi-cursor on undo
-                if self.buf().is_multi() {
-                    self.buf_mut().collapse_to_primary();
-                }
-                self.buf_mut().set_selection(None);
-                let cs = self.cursor_state();
-                let b = self.buf_mut();
-                if let Some(restored) = b.undo_stack.undo(&mut b.buffer, cs) {
-                    b.cursors[b.primary].cursor.line = restored.line;
-                    b.cursors[b.primary].cursor.col = restored.col;
-                    b.cursors[b.primary].cursor.desired_col = restored.desired_col;
-                    b.cursors[b.primary].cursor.clamp(&b.buffer);
-                    self.invalidate_highlight();
-                    self.invalidate_git();
-                    self.set_message("Undo", MessageType::Info);
-                } else {
-                    self.set_message("Nothing to undo", MessageType::Warning);
-                }
-            }
-            (Key::Char('y'), true, false) => {
-                if self.buf().is_multi() {
-                    self.buf_mut().collapse_to_primary();
-                }
-                self.buf_mut().set_selection(None);
-                let b = self.buf_mut();
-                if let Some(restored) = b.undo_stack.redo(&mut b.buffer) {
-                    b.cursors[b.primary].cursor.line = restored.line;
-                    b.cursors[b.primary].cursor.col = restored.col;
-                    b.cursors[b.primary].cursor.desired_col = restored.desired_col;
-                    b.cursors[b.primary].cursor.clamp(&b.buffer);
-                    self.invalidate_highlight();
-                    self.invalidate_git();
-                    self.set_message("Redo", MessageType::Info);
-                } else {
-                    self.set_message("Nothing to redo", MessageType::Warning);
-                }
-            }
+            (Key::Char('z'), true, false) => self.do_undo(),
+            (Key::Char('y'), true, false) => self.do_redo(),
 
             // -- Search --
             (Key::Char('f'), true, false) => {
@@ -582,6 +560,11 @@ impl Editor {
             }
             (Key::Down, false, true) if ke.shift => {
                 self.resize_active_pane_vertical(2);
+            }
+
+            // -- Command Palette --
+            (Key::Char('P'), true, false) => {
+                self.palette = Some(palette::Palette::new());
             }
 
             // -- Help --

@@ -14,7 +14,7 @@ Phases reordered by dependency graph and complexity (quick wins first, heavy pha
 | 2  | 10    | Tab Bar              | 250    | —                 | DONE   |
 | 3  | 12    | Multi-Cursor Editing | 900    | —                 | DONE   |
 | 4  | 13    | Git Gutter           | 630    | —                 | DONE   |
-| 5  | 15    | Command Palette      | 530    | —                 |        |
+| 5  | 15    | Command Palette      | 530    | —                 | DONE   |
 | 6  | 16    | Soft Word Wrap       | 600    | —                 |        |
 | 7  | 11    | File Tree Sidebar    | 750    | Phase 8           |        |
 | 8  | 9     | Integrated Terminal  | 1,450  | Phase 8           |        |
@@ -1825,6 +1825,21 @@ The palette renders as a centered overlay (not a pane), similar to VS Code's `Ct
 | Input handling        | ~80   |
 | Match highlighting    | ~50   |
 | Editor integration    | ~50   |
+
+### Implementation Notes (DONE)
+
+Implemented in `src/editor/palette.rs` with integration into `mod.rs`, `editing.rs`, and `view.rs`.
+
+**Deviations from plan:**
+- Used an enum `PaletteAction` instead of function pointers (`fn(&mut Editor)`) for the command registry. This avoids lifetime complexity and integrates naturally with the existing `match`-based dispatch pattern used throughout the editor (prompts, keybindings).
+- The `PaletteEntry` struct uses `label` + `shortcut` + `action` (enum) instead of `id` + `label` + `keybinding` + `category` + `action` (fn ptr). Categories are encoded as label prefixes (e.g. `"File: Save"`) which simplifies the data structure and works well with fuzzy matching.
+- Fuzzy scoring uses a simpler greedy-forward algorithm: +1 per match, +5 consecutive bonus, +10 word boundary bonus, distance-from-start penalty. No gap penalty or length penalty — the simpler scoring produces good results for the ~35 command set.
+
+**Files changed:**
+- `src/editor/palette.rs` (new) — `PaletteAction` enum (35 commands), `PaletteEntry`, `Palette` struct, `fuzzy_score()`, `handle_palette_key()`, `execute_palette_action()`, 11 unit tests.
+- `src/editor/mod.rs` — Module declaration, `palette: Option<Palette>` field, event interception, `Ctrl+Shift+P` keybinding.
+- `src/editor/editing.rs` — Extracted `do_undo()` / `do_redo()` methods (previously inline in `handle_key`).
+- `src/editor/view.rs` — `render_palette()` overlay (box-drawing borders, yellow highlighted matches, blue selected row, right-aligned shortcuts), palette cursor positioning.
 
 ---
 

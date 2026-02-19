@@ -239,11 +239,26 @@ impl Editor {
             self.render_help();
         }
 
+        // Command palette overlay
+        if self.palette.is_some() {
+            self.render_palette();
+        }
+
         // Flush the screen
         self.screen.flush(&self.color_mode);
 
         // Position the hardware cursor
-        if let Some(ref prompt) = self.prompt {
+        if let Some(ref palette) = self.palette {
+            // Cursor in the palette input field
+            let screen_w = self.screen.width();
+            let palette_width = (screen_w * 60 / 100).clamp(40, 80).min(screen_w);
+            let start_col = (screen_w - palette_width) / 2;
+            let input_col =
+                start_col + 3 + crate::unicode::str_width(&palette.input[..palette.cursor_pos]);
+            terminal::move_cursor(2, (input_col + 1) as u16); // row 1 (0-indexed) = input row
+            terminal::flush();
+            return;
+        } else if let Some(ref prompt) = self.prompt {
             // Cursor on message line within prompt input
             let prompt_cursor_col = 1
                 + crate::unicode::str_width(&prompt.label)
@@ -574,7 +589,7 @@ impl Editor {
             "  \u{21e7}Tab    Unindent SELECTION                   ",
             "  Ctrl+/  Comment   Shift+\u{2190}\u{2192}\u{2191}\u{2193} Extend sel     ",
             "  Ctrl+L  Sel line  Ctrl+A    Select all      ",
-            "                                              ",
+            "  Ctrl+\u{21e7}P Palette                              ",
             "        Press Esc or F1 to close              ",
         ];
 
@@ -652,6 +667,188 @@ impl Editor {
 
         // Bottom border
         let bottom_row = start_row + box_height - 1;
+        self.screen
+            .put_char(bottom_row, start_col, '\u{2514}', border_fg, bg, false);
+        for col in 1..box_width - 1 {
+            self.screen.put_char(
+                bottom_row,
+                start_col + col,
+                '\u{2500}',
+                border_fg,
+                bg,
+                false,
+            );
+        }
+        self.screen.put_char(
+            bottom_row,
+            start_col + box_width - 1,
+            '\u{2518}',
+            border_fg,
+            bg,
+            false,
+        );
+    }
+
+    fn render_palette(&mut self) {
+        let palette = match self.palette {
+            Some(ref p) => p,
+            None => return,
+        };
+
+        let screen_w = self.screen.width();
+        let screen_h = self.screen.height();
+
+        // Width: 60% of screen, clamped to [40, 80]
+        let panel_width = (screen_w * 60 / 100).clamp(40, 80).min(screen_w);
+        let box_width = panel_width;
+        let max_visible: usize = 10;
+        let visible_count = palette.filtered.len().min(max_visible);
+        // box: 1 top border + 1 input row + 1 separator + visible_count result rows + 1 bottom border
+        let box_height = 3 + visible_count + 1;
+
+        if box_width > screen_w || box_height > screen_h {
+            return;
+        }
+
+        let start_col = (screen_w - box_width) / 2;
+        let start_row = 0; // top of screen
+
+        let border_fg = Color::Ansi(6); // cyan
+        let bg = Color::Color256(235); // dark bg
+        let text_fg = Color::Ansi(7); // white
+        let input_fg = Color::Default;
+        let shortcut_fg = Color::Color256(240); // dim
+        let highlight_fg = Color::Ansi(3); // yellow for matched chars
+        let selected_bg = Color::Ansi(4); // blue for selected row
+
+        // Top border: ┌───...───┐
+        self.screen
+            .put_char(start_row, start_col, '\u{250c}', border_fg, bg, false);
+        for col in 1..box_width - 1 {
+            self.screen
+                .put_char(start_row, start_col + col, '\u{2500}', border_fg, bg, false);
+        }
+        self.screen.put_char(
+            start_row,
+            start_col + box_width - 1,
+            '\u{2510}',
+            border_fg,
+            bg,
+            false,
+        );
+
+        // Input row: │ > query... │
+        let input_row = start_row + 1;
+        self.screen
+            .put_char(input_row, start_col, '\u{2502}', border_fg, bg, false);
+        // Fill with bg
+        for col in 1..box_width - 1 {
+            self.screen
+                .put_char(input_row, start_col + col, ' ', input_fg, bg, false);
+        }
+        self.screen.put_char(
+            input_row,
+            start_col + box_width - 1,
+            '\u{2502}',
+            border_fg,
+            bg,
+            false,
+        );
+        // "> " prefix
+        self.screen
+            .put_str(input_row, start_col + 1, "> ", border_fg, bg, true);
+        // Query text
+        let max_input_width = box_width.saturating_sub(4);
+        let display_input: String = palette.input.chars().take(max_input_width).collect();
+        self.screen.put_str(
+            input_row,
+            start_col + 3,
+            &display_input,
+            input_fg,
+            bg,
+            false,
+        );
+
+        // Separator: ├───...───┤
+        let sep_row = start_row + 2;
+        self.screen
+            .put_char(sep_row, start_col, '\u{251c}', border_fg, bg, false);
+        for col in 1..box_width - 1 {
+            self.screen
+                .put_char(sep_row, start_col + col, '\u{2500}', border_fg, bg, false);
+        }
+        self.screen.put_char(
+            sep_row,
+            start_col + box_width - 1,
+            '\u{2524}',
+            border_fg,
+            bg,
+            false,
+        );
+
+        // Result rows
+        let content_width = box_width - 2; // inside borders
+        for i in 0..visible_count {
+            let row = start_row + 3 + i;
+            let filter_idx = palette.scroll_offset + i;
+            let is_selected = filter_idx == palette.selected;
+            let row_bg = if is_selected { selected_bg } else { bg };
+
+            // Left border
+            self.screen
+                .put_char(row, start_col, '\u{2502}', border_fg, bg, false);
+            // Fill row
+            for col in 1..box_width - 1 {
+                self.screen
+                    .put_char(row, start_col + col, ' ', text_fg, row_bg, false);
+            }
+            // Right border
+            self.screen.put_char(
+                row,
+                start_col + box_width - 1,
+                '\u{2502}',
+                border_fg,
+                bg,
+                false,
+            );
+
+            if filter_idx < palette.filtered.len() {
+                let entry_idx = palette.filtered[filter_idx];
+                let entry = palette.entry(entry_idx);
+                let matched_positions = palette.match_positions(entry_idx);
+
+                // Draw label with highlighted match positions
+                let label_chars: Vec<char> = entry.label.chars().collect();
+                let max_label_width = content_width.saturating_sub(entry.shortcut.len() + 3);
+                let mut col_offset = 0;
+                for (ci, &ch) in label_chars.iter().enumerate() {
+                    if col_offset >= max_label_width {
+                        break;
+                    }
+                    let is_match = matched_positions.contains(&ci);
+                    let fg = if is_match { highlight_fg } else { text_fg };
+                    let bold = is_match;
+                    self.screen
+                        .put_char(row, start_col + 1 + col_offset, ch, fg, row_bg, bold);
+                    col_offset += crate::unicode::char_width(ch);
+                }
+
+                // Right-aligned shortcut
+                let shortcut_width = crate::unicode::str_width(entry.shortcut);
+                let shortcut_start = start_col + box_width - 1 - shortcut_width - 1;
+                self.screen.put_str(
+                    row,
+                    shortcut_start,
+                    entry.shortcut,
+                    shortcut_fg,
+                    row_bg,
+                    false,
+                );
+            }
+        }
+
+        // Bottom border: └───...───┘
+        let bottom_row = start_row + 3 + visible_count;
         self.screen
             .put_char(bottom_row, start_col, '\u{2514}', border_fg, bg, false);
         for col in 1..box_width - 1 {

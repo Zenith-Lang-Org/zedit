@@ -631,6 +631,49 @@ impl Editor {
     }
 
     // -----------------------------------------------------------------------
+    // Undo / Redo
+    // -----------------------------------------------------------------------
+
+    pub(super) fn do_undo(&mut self) {
+        if self.buf().is_multi() {
+            self.buf_mut().collapse_to_primary();
+        }
+        self.buf_mut().set_selection(None);
+        let cs = self.cursor_state();
+        let b = self.buf_mut();
+        if let Some(restored) = b.undo_stack.undo(&mut b.buffer, cs) {
+            b.cursors[b.primary].cursor.line = restored.line;
+            b.cursors[b.primary].cursor.col = restored.col;
+            b.cursors[b.primary].cursor.desired_col = restored.desired_col;
+            b.cursors[b.primary].cursor.clamp(&b.buffer);
+            self.invalidate_highlight();
+            self.invalidate_git();
+            self.set_message("Undo", MessageType::Info);
+        } else {
+            self.set_message("Nothing to undo", MessageType::Warning);
+        }
+    }
+
+    pub(super) fn do_redo(&mut self) {
+        if self.buf().is_multi() {
+            self.buf_mut().collapse_to_primary();
+        }
+        self.buf_mut().set_selection(None);
+        let b = self.buf_mut();
+        if let Some(restored) = b.undo_stack.redo(&mut b.buffer) {
+            b.cursors[b.primary].cursor.line = restored.line;
+            b.cursors[b.primary].cursor.col = restored.col;
+            b.cursors[b.primary].cursor.desired_col = restored.desired_col;
+            b.cursors[b.primary].cursor.clamp(&b.buffer);
+            self.invalidate_highlight();
+            self.invalidate_git();
+            self.set_message("Redo", MessageType::Info);
+        } else {
+            self.set_message("Nothing to redo", MessageType::Warning);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Undo/highlight helpers
     // -----------------------------------------------------------------------
 
