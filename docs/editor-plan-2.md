@@ -17,7 +17,7 @@ Phases reordered by dependency graph and complexity (quick wins first, heavy pha
 | 5  | 15    | Command Palette      | 530    | —                 | DONE   |
 | 6  | 16    | Soft Word Wrap       | 600    | —                 | DONE   |
 | 7  | 11    | File Tree Sidebar    | 750    | Phase 8           | DONE   |
-| 8  | 9     | Integrated Terminal  | 1,450  | Phase 8           |        |
+| 8  | 9     | Integrated Terminal  | 1,450  | Phase 8           | DONE   |
 | 9  | 14    | Session + Swap Files | 650    | Phase 8           |        |
 | 10 | 17    | LSP Client           | 1,650  | Phase 9           |        |
 | 11 | 19    | Diff / Merge View    | 650    | Phase 8 + 13      |        |

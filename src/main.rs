@@ -5,6 +5,7 @@ mod editor;
 mod filetree;
 mod git;
 mod input;
+mod keybindings;
 mod layout;
 mod pty;
 mod render;

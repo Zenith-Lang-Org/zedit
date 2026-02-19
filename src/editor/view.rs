@@ -1033,6 +1033,7 @@ impl Editor {
             "  Ctrl+/  Comment   Shift+\u{2190}\u{2192}\u{2191}\u{2193} Extend sel     ",
             "  Ctrl+L  Sel line  Ctrl+A    Select all      ",
             "  Ctrl+\u{21e7}P Palette  Ctrl+B    File tree       ",
+            "  Ctrl+T  Terminal  Alt+Z     Toggle wrap     ",
             "        Press Esc or F1 to close              ",
         ];
 
@@ -1277,12 +1278,12 @@ impl Editor {
                 }
 
                 // Right-aligned shortcut
-                let shortcut_width = crate::unicode::str_width(entry.shortcut);
+                let shortcut_width = crate::unicode::str_width(&entry.shortcut);
                 let shortcut_start = start_col + box_width - 1 - shortcut_width - 1;
                 self.screen.put_str(
                     row,
                     shortcut_start,
-                    entry.shortcut,
+                    &entry.shortcut,
                     shortcut_fg,
                     row_bg,
                     false,
@@ -1341,35 +1342,85 @@ impl Editor {
         let vt = &self.vterms[term_idx];
         let vt_cols = vt.cols() as usize;
         let vt_rows = vt.rows() as usize;
+        let scroll_offset = vt.scroll_offset();
+        let scrollback = vt.scrollback();
+
+        // Number of scrollback lines to show at the top of the pane
+        let scrollback_lines = scroll_offset.min(scrollback.len()).min(pane_h);
+        // Remaining rows show the live screen buffer
+        // Remaining rows show the live screen buffer
 
         for local_row in 0..pane_h {
             for local_col in 0..pane_w {
                 let screen_row = pane_y + local_row;
                 let screen_col = pane_x + local_col;
 
-                if local_row < vt_rows && local_col < vt_cols {
-                    let cell = &vt.cells()[local_row * vt_cols + local_col];
-                    let style = crate::render::CellStyle {
-                        fg: cell.fg,
-                        bg: cell.bg,
-                        bold: cell.bold,
-                        underline: cell.underline,
-                        inverse: cell.inverse,
-                        italic: cell.italic,
-                    };
-                    self.screen
-                        .put_cell_styled(screen_row, screen_col, cell.ch, style);
+                if local_row < scrollback_lines {
+                    // Render from scrollback
+                    let sb_idx = scrollback.len() - scroll_offset + local_row;
+                    if sb_idx < scrollback.len() && local_col < scrollback[sb_idx].len() {
+                        let cell = &scrollback[sb_idx][local_col];
+                        let style = crate::render::CellStyle {
+                            fg: cell.fg,
+                            bg: cell.bg,
+                            bold: cell.bold,
+                            underline: cell.underline,
+                            inverse: cell.inverse,
+                            italic: cell.italic,
+                        };
+                        self.screen
+                            .put_cell_styled(screen_row, screen_col, cell.ch, style);
+                    } else {
+                        self.screen.put_char(
+                            screen_row,
+                            screen_col,
+                            ' ',
+                            Color::Default,
+                            Color::Default,
+                            false,
+                        );
+                    }
                 } else {
-                    self.screen.put_char(
-                        screen_row,
-                        screen_col,
-                        ' ',
-                        Color::Default,
-                        Color::Default,
-                        false,
-                    );
+                    // Render from live screen buffer
+                    let vt_row = local_row - scrollback_lines;
+                    if vt_row < vt_rows && local_col < vt_cols {
+                        let cell = &vt.cells()[vt_row * vt_cols + local_col];
+                        let style = crate::render::CellStyle {
+                            fg: cell.fg,
+                            bg: cell.bg,
+                            bold: cell.bold,
+                            underline: cell.underline,
+                            inverse: cell.inverse,
+                            italic: cell.italic,
+                        };
+                        self.screen
+                            .put_cell_styled(screen_row, screen_col, cell.ch, style);
+                    } else {
+                        self.screen.put_char(
+                            screen_row,
+                            screen_col,
+                            ' ',
+                            Color::Default,
+                            Color::Default,
+                            false,
+                        );
+                    }
                 }
             }
+        }
+
+        // Show scrollback indicator when scrolled up
+        if scroll_offset > 0 {
+            let indicator = format!("[Scrollback: -{} lines]", scroll_offset);
+            let ind_col = pane_x + pane_w.saturating_sub(indicator.len()) / 2;
+            self.screen.put_str(
+                pane_y,
+                ind_col,
+                &indicator,
+                Color::Ansi(0),
+                Color::Ansi(3),
+                true,
+            );
         }
 
         // Show "[Process exited]" if PTY is dead

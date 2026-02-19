@@ -16,6 +16,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::input::{self, Event, Key, KeyEvent};
+use crate::keybindings::EditorAction;
 use crate::layout::{Direction, LayoutState, PaneContent, PaneId, Rect, SplitDir};
 use crate::pty::{self, POLLIN, PollFd, Pty};
 use crate::render::Screen;
@@ -133,6 +134,7 @@ pub struct Editor {
     pub(super) vterms: Vec<VTerm>,
     pub(super) ptys: Vec<Pty>,
     terminal_panel_pane: Option<PaneId>,
+    terminal_idx: Option<usize>,
 
     running: bool,
 }
@@ -170,6 +172,7 @@ impl Editor {
             vterms: Vec::new(),
             ptys: Vec::new(),
             terminal_panel_pane: None,
+            terminal_idx: None,
             running: true,
         })
     }
@@ -208,6 +211,7 @@ impl Editor {
             vterms: Vec::new(),
             ptys: Vec::new(),
             terminal_panel_pane: None,
+            terminal_idx: None,
             running: true,
         })
     }
@@ -422,9 +426,8 @@ impl Editor {
     /// Toggle the integrated terminal panel (bottom split).
     fn toggle_terminal_panel(&mut self) {
         if let Some(pane_id) = self.terminal_panel_pane {
-            // Close terminal panel
+            // Hide terminal panel — keep PTY/VTerm alive via terminal_idx
             if self.layout.pane_exists(pane_id) {
-                // Move focus to an editor pane
                 let next = self
                     .layout
                     .adjacent_pane(pane_id, Direction::Up)
@@ -438,11 +441,49 @@ impl Editor {
             }
             self.terminal_panel_pane = None;
             self.resolve_layout();
-            self.set_message("Terminal closed", MessageType::Info);
+            self.set_message("Terminal hidden", MessageType::Info);
         } else {
-            // Open terminal panel
-            self.new_terminal_panel();
+            // Restore existing session or spawn new
+            self.restore_or_new_terminal_panel();
         }
+    }
+
+    /// Restore the previous terminal session or spawn a new one.
+    fn restore_or_new_terminal_panel(&mut self) {
+        // Check if we have a living PTY to reuse
+        if let Some(idx) = self.terminal_idx
+            && idx < self.ptys.len()
+            && !self.ptys[idx].is_dead()
+        {
+            // Reuse existing session — just re-split the pane
+            let split_target = self.active_pane;
+            let content = PaneContent::Terminal(idx);
+            if let Some(new_id) =
+                self.layout
+                    .split_pane_with_content(split_target, SplitDir::Vertical, content)
+            {
+                self.resolve_layout();
+                let (w, h) = self.terminal.size();
+                let sidebar_w = self.sidebar_width();
+                let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+                let total = Rect {
+                    x: sidebar_w,
+                    y: 0,
+                    width: w.saturating_sub(sidebar_w),
+                    height: pane_area_height,
+                };
+                let delta = (pane_area_height as i16) * 20 / 100;
+                self.layout.resize_split(split_target, delta, total);
+                self.terminal_panel_pane = Some(new_id);
+                self.active_pane = new_id;
+                self.resolve_layout();
+                self.sync_pty_sizes();
+                self.set_message("Terminal restored", MessageType::Info);
+            }
+            return;
+        }
+        // No living session — spawn new
+        self.new_terminal_panel();
     }
 
     /// Spawn a new terminal in a bottom 30% split.
@@ -468,6 +509,7 @@ impl Editor {
         let term_idx = self.vterms.len();
         self.vterms.push(vterm);
         self.ptys.push(pty);
+        self.terminal_idx = Some(term_idx);
 
         // Split the active pane vertically (top|bottom) with 70/30 ratio
         let content = PaneContent::Terminal(term_idx);
@@ -580,18 +622,79 @@ impl Editor {
         if self.active_pane_is_terminal() {
             match event {
                 Event::Key(ref ke) => {
+                    // Shift+PageUp/PageDown: terminal scrollback navigation
+                    if ke.shift && matches!(ke.key, Key::PageUp | Key::PageDown) {
+                        if let Some(idx) = self.active_terminal_index() {
+                            let pane_h = self
+                                .layout
+                                .pane_rect(self.active_pane)
+                                .map(|r| r.height as isize)
+                                .unwrap_or(24);
+                            let delta = if ke.key == Key::PageUp {
+                                -pane_h
+                            } else {
+                                pane_h
+                            };
+                            self.vterms[idx].scroll_view(delta);
+                        }
+                        return;
+                    }
                     // Intercept editor-level keybindings
                     if self.is_terminal_intercepted_key(ke) {
                         self.handle_terminal_meta_key(ke.clone());
                         return;
                     }
+                    // Any keypress resets scroll to bottom
+                    if let Some(idx) = self.active_terminal_index() {
+                        let off = self.vterms[idx].scroll_offset();
+                        if off > 0 {
+                            self.vterms[idx].scroll_view(off as isize);
+                        }
+                    }
                     // Forward to PTY
                     self.forward_key_to_pty(ke);
                 }
                 Event::Paste(ref text) => {
+                    // Reset scroll on paste
+                    if let Some(idx) = self.active_terminal_index() {
+                        let off = self.vterms[idx].scroll_offset();
+                        if off > 0 {
+                            self.vterms[idx].scroll_view(off as isize);
+                        }
+                    }
                     self.forward_paste_to_pty(text);
                 }
-                Event::Mouse(_) | Event::None => {}
+                Event::Mouse(me) => {
+                    // Left-click outside the terminal pane switches focus
+                    if me.button == crate::input::MouseButton::Left && me.pressed && !me.motion {
+                        if let Some(clicked_pane) = self.pane_at_mouse(me.col, me.row)
+                            && clicked_pane != self.active_pane
+                        {
+                            self.active_pane = clicked_pane;
+                            self.active_buffer = self.active_buffer_index();
+                            return;
+                        }
+                        // Also handle clicks in the sidebar area
+                        let sidebar_w = self.sidebar_width();
+                        if sidebar_w > 0 && me.col < sidebar_w {
+                            self.handle_mouse(me);
+                            return;
+                        }
+                    }
+                    // Handle scroll wheel in terminal pane
+                    if let Some(idx) = self.active_terminal_index() {
+                        match me.button {
+                            crate::input::MouseButton::ScrollUp => {
+                                self.vterms[idx].scroll_view(-3);
+                            }
+                            crate::input::MouseButton::ScrollDown => {
+                                self.vterms[idx].scroll_view(3);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Event::None => {}
             }
             return;
         }
@@ -631,58 +734,104 @@ impl Editor {
     }
 
     /// Check if a key event should be intercepted when in terminal mode.
+    /// Any key bound to an editor action is intercepted so it works even
+    /// when the terminal pane is focused.
     fn is_terminal_intercepted_key(&self, ke: &KeyEvent) -> bool {
-        // Alt+Arrow: pane focus
-        if ke.alt && !ke.shift && matches!(ke.key, Key::Up | Key::Down | Key::Left | Key::Right) {
+        // Alt+Arrow: pane focus/resize — always intercepted (structural)
+        if ke.alt && matches!(ke.key, Key::Up | Key::Down | Key::Left | Key::Right) {
             return true;
         }
-        // Alt+Shift+Arrow: pane resize
-        if ke.alt && ke.shift && matches!(ke.key, Key::Up | Key::Down | Key::Left | Key::Right) {
-            return true;
-        }
-        // Ctrl+`: toggle terminal
-        if ke.ctrl && ke.key == Key::Char('`') {
-            return true;
-        }
-        // Ctrl+Shift+T: new terminal
-        if ke.ctrl && ke.key == Key::Char('T') {
-            return true;
-        }
-        // Ctrl+Shift+W: close pane
-        if ke.ctrl && ke.key == Key::Char('W') {
-            return true;
-        }
-        // Ctrl+P: command palette
-        if ke.ctrl && ke.key == Key::Char('p') {
-            return true;
-        }
-        false
+        // Intercept ALL keymap-bound actions
+        self.config.keybindings.lookup(ke).is_some()
     }
 
     /// Handle intercepted keys when in terminal mode.
     fn handle_terminal_meta_key(&mut self, ke: KeyEvent) {
-        match (&ke.key, ke.ctrl, ke.alt) {
-            (Key::Left, false, true) if !ke.shift => self.focus_pane(Direction::Left),
-            (Key::Right, false, true) if !ke.shift => self.focus_pane(Direction::Right),
-            (Key::Up, false, true) if !ke.shift => self.focus_pane(Direction::Up),
-            (Key::Down, false, true) if !ke.shift => self.focus_pane(Direction::Down),
-            (Key::Left, false, true) if ke.shift => self.resize_active_pane(-2),
-            (Key::Right, false, true) if ke.shift => self.resize_active_pane(2),
-            (Key::Up, false, true) if ke.shift => self.resize_active_pane_vertical(-2),
-            (Key::Down, false, true) if ke.shift => self.resize_active_pane_vertical(2),
-            (Key::Char('`'), true, _) => self.toggle_terminal_panel(),
-            (Key::Char('T'), true, _) => self.new_terminal(),
-            (Key::Char('W'), true, _) => self.close_active_pane(),
-            (Key::Char('p'), true, _) => {
-                self.palette = Some(palette::Palette::new());
+        // Alt+Arrow pane operations (structural, not configurable)
+        if ke.alt && matches!(ke.key, Key::Up | Key::Down | Key::Left | Key::Right) {
+            match (&ke.key, ke.shift) {
+                (Key::Left, false) => self.focus_pane(Direction::Left),
+                (Key::Right, false) => self.focus_pane(Direction::Right),
+                (Key::Up, false) => self.focus_pane(Direction::Up),
+                (Key::Down, false) => self.focus_pane(Direction::Down),
+                (Key::Left, true) => self.resize_active_pane(-2),
+                (Key::Right, true) => self.resize_active_pane(2),
+                (Key::Up, true) => self.resize_active_pane_vertical(-2),
+                (Key::Down, true) => self.resize_active_pane_vertical(2),
+                _ => {}
             }
-            _ => {}
+            return;
+        }
+        // All other intercepted keys go through keymap
+        if let Some(action) = self.config.keybindings.lookup(&ke) {
+            self.execute_action(action);
+        }
+    }
+
+    /// Execute a configurable editor action.
+    fn execute_action(&mut self, action: EditorAction) {
+        match action {
+            EditorAction::Save => self.save(),
+            EditorAction::SaveAs => self.start_prompt("Save as: ", PromptAction::SaveAs),
+            EditorAction::OpenFile => self.start_prompt("Open: ", PromptAction::OpenFile),
+            EditorAction::Quit => self.quit(),
+            EditorAction::NewBuffer => self.new_buffer(),
+            EditorAction::CloseBuffer => self.close_buffer(),
+            EditorAction::Undo => self.do_undo(),
+            EditorAction::Redo => self.do_redo(),
+            EditorAction::DuplicateLine => self.duplicate_line(),
+            EditorAction::DeleteLine => self.delete_line(),
+            EditorAction::ToggleComment => self.toggle_comment(),
+            EditorAction::Unindent => self.unindent(),
+            EditorAction::Copy => self.copy_selection(),
+            EditorAction::Cut => self.cut_selection(),
+            EditorAction::Paste => self.paste_clipboard(),
+            EditorAction::SelectAll => self.select_all(),
+            EditorAction::SelectLine => self.select_line(),
+            EditorAction::SelectNextOccurrence => self.select_next_occurrence(),
+            EditorAction::SelectAllOccurrences => self.select_all_occurrences(),
+            EditorAction::Find => self.open_find_prompt(PromptAction::Find),
+            EditorAction::Replace => self.open_find_prompt(PromptAction::Replace),
+            EditorAction::FindNext => self.search_next(),
+            EditorAction::FindPrev => self.search_prev(),
+            EditorAction::GoToLine => self.start_prompt("Go to line: ", PromptAction::GoToLine),
+            EditorAction::NextBuffer => self.next_buffer(),
+            EditorAction::PrevBuffer => self.prev_buffer(),
+            EditorAction::SplitHorizontal => self.split_pane_horizontal(),
+            EditorAction::SplitVertical => self.split_pane_vertical(),
+            EditorAction::ClosePane => self.close_active_pane(),
+            EditorAction::FocusLeft => self.focus_pane(Direction::Left),
+            EditorAction::FocusRight => self.focus_pane(Direction::Right),
+            EditorAction::FocusUp => self.focus_pane(Direction::Up),
+            EditorAction::FocusDown => self.focus_pane(Direction::Down),
+            EditorAction::ResizePaneLeft => self.resize_active_pane(-2),
+            EditorAction::ResizePaneRight => self.resize_active_pane(2),
+            EditorAction::ResizePaneUp => self.resize_active_pane_vertical(-2),
+            EditorAction::ResizePaneDown => self.resize_active_pane_vertical(2),
+            EditorAction::ToggleHelp => {
+                self.help_visible = !self.help_visible;
+            }
+            EditorAction::ToggleWrap => self.toggle_word_wrap(),
+            EditorAction::ToggleFileTree => self.toggle_filetree(),
+            EditorAction::FocusFileTree => {
+                if self.filetree.is_none() {
+                    self.toggle_filetree();
+                } else {
+                    self.filetree_focused = true;
+                }
+            }
+            EditorAction::CommandPalette => {
+                self.palette = Some(palette::Palette::new(&self.config.keybindings));
+            }
+            EditorAction::ToggleTerminal => self.toggle_terminal_panel(),
+            EditorAction::NewTerminal => self.new_terminal(),
         }
     }
 
     fn handle_key(&mut self, ke: KeyEvent) {
-        // Reset quit confirmation on any key that isn't Ctrl+Q
-        if !(ke.ctrl && ke.key == Key::Char('q')) {
+        // Reset quit confirmation on any key that isn't the Quit or CloseBuffer binding
+        let action = self.config.keybindings.lookup(&ke);
+        if action != Some(EditorAction::Quit) && action != Some(EditorAction::CloseBuffer) {
             self.quit_confirm = false;
         }
 
@@ -703,289 +852,154 @@ impl Editor {
             self.start_or_continue_selection();
         }
 
-        match (&ke.key, ke.ctrl, ke.alt) {
-            // -- Navigation (works with and without shift) --
-            (Key::Up, false, false) => {
-                if self.buf().wrap_map.is_some() {
-                    self.move_cursor_up_visual();
-                } else {
-                    self.move_all_cursors(|c, buf| c.move_up(buf));
-                }
-            }
-            (Key::Down, false, false) => {
-                if self.buf().wrap_map.is_some() {
-                    self.move_cursor_down_visual();
-                } else {
-                    self.move_all_cursors(|c, buf| c.move_down(buf));
-                }
-            }
-            (Key::Left, false, false) => {
-                self.move_all_cursors(|c, buf| c.move_left(buf));
-            }
-            (Key::Right, false, false) => {
-                self.move_all_cursors(|c, buf| c.move_right(buf));
-            }
-
-            (Key::Left, true, false) => {
-                self.move_all_cursors(|c, buf| c.move_word_left(buf));
-            }
-            (Key::Right, true, false) => {
-                self.move_all_cursors(|c, buf| c.move_word_right(buf));
-            }
-
-            (Key::Home, false, false) => {
-                if self.buf().wrap_map.is_some() {
-                    self.move_cursor_home_visual();
-                } else {
-                    self.move_all_cursors(|c, buf| c.move_home(buf));
-                }
-            }
-            (Key::End, false, false) => {
-                if self.buf().wrap_map.is_some() {
-                    self.move_cursor_end_visual();
-                } else {
-                    self.move_all_cursors(|c, buf| c.move_end(buf));
-                }
-            }
-
-            (Key::Home, true, false) => {
-                // Ctrl+Home: collapse to single cursor at start
-                if self.buf().is_multi() {
-                    self.buf_mut().collapse_to_primary();
-                }
-                self.buf_mut().cursor_mut().move_to_start();
-            }
-            (Key::End, true, false) => {
-                if self.buf().is_multi() {
-                    self.buf_mut().collapse_to_primary();
-                }
-                let b = self.buf_mut();
-                b.cursors[b.primary].cursor.move_to_end(&b.buffer);
-            }
-
-            (Key::PageUp, false, false) => {
-                if self.buf().is_multi() {
-                    self.buf_mut().collapse_to_primary();
-                }
-                if self.buf().wrap_map.is_some() {
-                    let h = self.text_area_height();
-                    for _ in 0..h {
+        // Try configurable keybindings first
+        if let Some(action) = self.config.keybindings.lookup(&ke) {
+            self.execute_action(action);
+        } else {
+            // Structural keys: navigation, text input, escape
+            match (&ke.key, ke.ctrl, ke.alt) {
+                // -- Navigation --
+                (Key::Up, false, false) => {
+                    if self.buf().wrap_map.is_some() {
                         self.move_cursor_up_visual();
+                    } else {
+                        self.move_all_cursors(|c, buf| c.move_up(buf));
                     }
-                } else {
-                    let h = self.text_area_height();
-                    let b = self.buf_mut();
-                    b.scroll_row = b.scroll_row.saturating_sub(h);
-                    b.cursors[b.primary].cursor.move_page_up(&b.buffer, h);
                 }
-            }
-            (Key::PageDown, false, false) => {
-                if self.buf().is_multi() {
-                    self.buf_mut().collapse_to_primary();
-                }
-                if self.buf().wrap_map.is_some() {
-                    let h = self.text_area_height();
-                    for _ in 0..h {
+                (Key::Down, false, false) => {
+                    if self.buf().wrap_map.is_some() {
                         self.move_cursor_down_visual();
+                    } else {
+                        self.move_all_cursors(|c, buf| c.move_down(buf));
                     }
-                } else {
-                    let h = self.text_area_height();
+                }
+                (Key::Left, false, false) => {
+                    self.move_all_cursors(|c, buf| c.move_left(buf));
+                }
+                (Key::Right, false, false) => {
+                    self.move_all_cursors(|c, buf| c.move_right(buf));
+                }
+
+                (Key::Left, true, false) => {
+                    self.move_all_cursors(|c, buf| c.move_word_left(buf));
+                }
+                (Key::Right, true, false) => {
+                    self.move_all_cursors(|c, buf| c.move_word_right(buf));
+                }
+
+                (Key::Home, false, false) => {
+                    if self.buf().wrap_map.is_some() {
+                        self.move_cursor_home_visual();
+                    } else {
+                        self.move_all_cursors(|c, buf| c.move_home(buf));
+                    }
+                }
+                (Key::End, false, false) => {
+                    if self.buf().wrap_map.is_some() {
+                        self.move_cursor_end_visual();
+                    } else {
+                        self.move_all_cursors(|c, buf| c.move_end(buf));
+                    }
+                }
+
+                (Key::Home, true, false) => {
+                    if self.buf().is_multi() {
+                        self.buf_mut().collapse_to_primary();
+                    }
+                    self.buf_mut().cursor_mut().move_to_start();
+                }
+                (Key::End, true, false) => {
+                    if self.buf().is_multi() {
+                        self.buf_mut().collapse_to_primary();
+                    }
                     let b = self.buf_mut();
-                    let max_line = b.buffer.line_count().saturating_sub(1);
-                    b.scroll_row = (b.scroll_row + h).min(max_line);
-                    b.cursors[b.primary].cursor.move_page_down(&b.buffer, h);
+                    b.cursors[b.primary].cursor.move_to_end(&b.buffer);
                 }
-            }
 
-            // -- Editing (delete selection first if active) --
-            (Key::Char(ch), false, false) => {
-                if self.buf().is_multi() {
-                    self.insert_char_multi(*ch);
-                } else {
-                    self.delete_selection();
-                    self.insert_char(*ch);
+                (Key::PageUp, false, false) => {
+                    if self.buf().is_multi() {
+                        self.buf_mut().collapse_to_primary();
+                    }
+                    if self.buf().wrap_map.is_some() {
+                        let h = self.text_area_height();
+                        for _ in 0..h {
+                            self.move_cursor_up_visual();
+                        }
+                    } else {
+                        let h = self.text_area_height();
+                        let b = self.buf_mut();
+                        b.scroll_row = b.scroll_row.saturating_sub(h);
+                        b.cursors[b.primary].cursor.move_page_up(&b.buffer, h);
+                    }
                 }
-            }
-            (Key::Enter, false, false) => {
-                if self.buf().is_multi() {
-                    self.insert_newline_multi();
-                } else {
-                    self.delete_selection();
-                    self.insert_newline();
+                (Key::PageDown, false, false) => {
+                    if self.buf().is_multi() {
+                        self.buf_mut().collapse_to_primary();
+                    }
+                    if self.buf().wrap_map.is_some() {
+                        let h = self.text_area_height();
+                        for _ in 0..h {
+                            self.move_cursor_down_visual();
+                        }
+                    } else {
+                        let h = self.text_area_height();
+                        let b = self.buf_mut();
+                        let max_line = b.buffer.line_count().saturating_sub(1);
+                        b.scroll_row = (b.scroll_row + h).min(max_line);
+                        b.cursors[b.primary].cursor.move_page_down(&b.buffer, h);
+                    }
                 }
-            }
-            (Key::Tab, false, false) => {
-                if self.buf().is_multi() {
-                    self.insert_tab_multi();
-                } else {
-                    self.delete_selection();
-                    self.insert_tab();
+
+                // -- Text input --
+                (Key::Char(ch), false, false) => {
+                    if self.buf().is_multi() {
+                        self.insert_char_multi(*ch);
+                    } else {
+                        self.delete_selection();
+                        self.insert_char(*ch);
+                    }
                 }
-            }
-            (Key::BackTab, false, _) => {
-                self.unindent();
-            }
-            (Key::Backspace, false, false) => {
-                if self.buf().is_multi() {
-                    self.backspace_multi();
-                } else if self.delete_selection().is_none() {
-                    self.backspace();
+                (Key::Enter, false, false) => {
+                    if self.buf().is_multi() {
+                        self.insert_newline_multi();
+                    } else {
+                        self.delete_selection();
+                        self.insert_newline();
+                    }
                 }
-            }
-            (Key::Delete, false, false) => {
-                if self.buf().is_multi() {
-                    self.delete_at_multi();
-                } else if self.delete_selection().is_none() {
-                    self.delete_at_cursor();
+                (Key::Tab, false, false) => {
+                    if self.buf().is_multi() {
+                        self.insert_tab_multi();
+                    } else {
+                        self.delete_selection();
+                        self.insert_tab();
+                    }
                 }
-            }
-
-            // -- Clipboard --
-            (Key::Char('c'), true, false) => self.copy_selection(),
-            (Key::Char('x'), true, false) => self.cut_selection(),
-            (Key::Char('v'), true, false) => self.paste_clipboard(),
-            (Key::Char('a'), true, false) => self.select_all(),
-
-            // -- Commands --
-            (Key::Char('s'), true, false) if !ke.shift => self.save(),
-            (Key::Char('S'), true, false) => {
-                // Ctrl+Shift+S → Save As
-                self.start_prompt("Save as: ", PromptAction::SaveAs);
-            }
-            (Key::Char('q'), true, false) => self.quit(),
-
-            // -- Select next occurrence (Ctrl+D) --
-            (Key::Char('d'), true, false) if !ke.shift => self.select_next_occurrence(),
-            // -- Duplicate line (Ctrl+Shift+D) --
-            (Key::Char('D'), true, false) => self.duplicate_line(),
-
-            // -- Select all occurrences (Ctrl+Shift+L) --
-            (Key::Char('L'), true, false) => self.select_all_occurrences(),
-
-            // -- Delete line (Ctrl+Shift+K) --
-            (Key::Char('K'), true, false) => self.delete_line(),
-
-            // -- Select line (Ctrl+L) --
-            (Key::Char('l'), true, false) => self.select_line(),
-
-            // -- Go to line (Ctrl+G) --
-            (Key::Char('g'), true, false) => {
-                self.start_prompt("Go to line: ", PromptAction::GoToLine);
-            }
-
-            // -- Toggle comment (Ctrl+/) --
-            (Key::Char('/'), true, false) => self.toggle_comment(),
-
-            // -- Multi-buffer --
-            (Key::Char('n'), true, false) => self.new_buffer(),
-            (Key::Char('w'), true, false) => self.close_buffer(),
-            (Key::PageDown, true, false) => self.next_buffer(),
-            (Key::PageUp, true, false) => self.prev_buffer(),
-
-            // -- Undo/Redo --
-            (Key::Char('z'), true, false) => self.do_undo(),
-            (Key::Char('y'), true, false) => self.do_redo(),
-
-            // -- Search --
-            (Key::Char('f'), true, false) => {
-                self.open_find_prompt(PromptAction::Find);
-            }
-            (Key::Char('h'), true, false) => {
-                self.open_find_prompt(PromptAction::Replace);
-            }
-            (Key::F(3), false, false) if !ke.shift => {
-                self.search_next();
-            }
-            (Key::F(3), false, false) if ke.shift => {
-                self.search_prev();
-            }
-
-            // -- File --
-            (Key::Char('o'), true, false) => {
-                self.start_prompt("Open: ", PromptAction::OpenFile);
-            }
-
-            // -- Escape: collapse multi-cursor or cancel --
-            (Key::Escape, false, false) => {
-                if self.buf().is_multi() {
-                    self.buf_mut().collapse_to_primary();
-                    self.set_message("Single cursor", MessageType::Info);
+                (Key::Backspace, false, false) => {
+                    if self.buf().is_multi() {
+                        self.backspace_multi();
+                    } else if self.delete_selection().is_none() {
+                        self.backspace();
+                    }
                 }
-            }
+                (Key::Delete, false, false) => {
+                    if self.buf().is_multi() {
+                        self.delete_at_multi();
+                    } else if self.delete_selection().is_none() {
+                        self.delete_at_cursor();
+                    }
+                }
 
-            // -- Pane operations --
-            // Ctrl+\ — split horizontally (left|right)
-            (Key::Char('\\'), true, false) if !ke.shift => {
-                self.split_pane_horizontal();
-            }
-            // Ctrl+Shift+\ — split vertically (top|bottom)
-            (Key::Char('\\'), true, false) if ke.shift => {
-                self.split_pane_vertical();
-            }
-            // Ctrl+Shift+W — close active pane
-            (Key::Char('W'), true, false) => {
-                self.close_active_pane();
-            }
+                // -- Escape: collapse multi-cursor --
+                (Key::Escape, false, false) => {
+                    if self.buf().is_multi() {
+                        self.buf_mut().collapse_to_primary();
+                        self.set_message("Single cursor", MessageType::Info);
+                    }
+                }
 
-            // Alt+Arrow — move focus to adjacent pane
-            (Key::Left, false, true) if !ke.shift => {
-                self.focus_pane(Direction::Left);
+                _ => {}
             }
-            (Key::Right, false, true) if !ke.shift => {
-                self.focus_pane(Direction::Right);
-            }
-            (Key::Up, false, true) if !ke.shift => {
-                self.focus_pane(Direction::Up);
-            }
-            (Key::Down, false, true) if !ke.shift => {
-                self.focus_pane(Direction::Down);
-            }
-
-            // Alt+Shift+Arrow — resize active pane
-            (Key::Left, false, true) if ke.shift => {
-                self.resize_active_pane(-2);
-            }
-            (Key::Right, false, true) if ke.shift => {
-                self.resize_active_pane(2);
-            }
-            (Key::Up, false, true) if ke.shift => {
-                self.resize_active_pane_vertical(-2);
-            }
-            (Key::Down, false, true) if ke.shift => {
-                self.resize_active_pane_vertical(2);
-            }
-
-            // -- Command Palette (Ctrl+P / Ctrl+Shift+P) --
-            (Key::Char('p'), true, false) if !ke.shift => {
-                self.palette = Some(palette::Palette::new());
-            }
-
-            // -- File tree toggle (Ctrl+B) --
-            (Key::Char('b'), true, false) => {
-                self.toggle_filetree();
-            }
-
-            // -- Integrated Terminal (Ctrl+`) --
-            (Key::Char('`'), true, false) => {
-                self.toggle_terminal_panel();
-            }
-
-            // -- New Terminal (Ctrl+Shift+T) --
-            (Key::Char('T'), true, false) => {
-                self.new_terminal();
-            }
-
-            // -- Word Wrap toggle (Alt+Z) --
-            (Key::Char('z'), false, true) => {
-                self.toggle_word_wrap();
-            }
-
-            // -- Help --
-            (Key::F(1), false, false) => {
-                self.help_visible = !self.help_visible;
-            }
-
-            _ => {}
         }
 
         // After navigation: extend or clear selection

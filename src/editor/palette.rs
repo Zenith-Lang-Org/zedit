@@ -1,4 +1,5 @@
 use crate::input::{Key, KeyEvent};
+use crate::keybindings::{EditorAction, KeyMap};
 
 use super::*;
 
@@ -65,7 +66,7 @@ pub(super) enum PaletteAction {
 
 pub(super) struct PaletteEntry {
     pub label: &'static str,
-    pub shortcut: &'static str,
+    pub shortcut: String,
     pub action: PaletteAction,
 }
 
@@ -83,218 +84,214 @@ pub(super) struct Palette {
 }
 
 impl Palette {
-    pub fn new() -> Self {
-        let entries = vec![
+    pub fn new(keymap: &KeyMap) -> Self {
+        // Each entry: (label, PaletteAction, EditorAction for shortcut lookup)
+        let defs: &[(&str, PaletteAction, Option<EditorAction>)] = &[
             // File
-            PaletteEntry {
-                label: "File: Save",
-                shortcut: "Ctrl+S",
-                action: PaletteAction::Save,
-            },
-            PaletteEntry {
-                label: "File: Save As",
-                shortcut: "Ctrl+Shift+S",
-                action: PaletteAction::SaveAs,
-            },
-            PaletteEntry {
-                label: "File: Open",
-                shortcut: "Ctrl+O",
-                action: PaletteAction::OpenFile,
-            },
-            PaletteEntry {
-                label: "File: Quit",
-                shortcut: "Ctrl+Q",
-                action: PaletteAction::Quit,
-            },
-            PaletteEntry {
-                label: "File: New Buffer",
-                shortcut: "Ctrl+N",
-                action: PaletteAction::NewBuffer,
-            },
-            PaletteEntry {
-                label: "File: Close Buffer",
-                shortcut: "Ctrl+W",
-                action: PaletteAction::CloseBuffer,
-            },
+            ("File: Save", PaletteAction::Save, Some(EditorAction::Save)),
+            (
+                "File: Save As",
+                PaletteAction::SaveAs,
+                Some(EditorAction::SaveAs),
+            ),
+            (
+                "File: Open",
+                PaletteAction::OpenFile,
+                Some(EditorAction::OpenFile),
+            ),
+            ("File: Quit", PaletteAction::Quit, Some(EditorAction::Quit)),
+            (
+                "File: New Buffer",
+                PaletteAction::NewBuffer,
+                Some(EditorAction::NewBuffer),
+            ),
+            (
+                "File: Close Buffer",
+                PaletteAction::CloseBuffer,
+                Some(EditorAction::CloseBuffer),
+            ),
             // Edit
-            PaletteEntry {
-                label: "Edit: Undo",
-                shortcut: "Ctrl+Z",
-                action: PaletteAction::Undo,
-            },
-            PaletteEntry {
-                label: "Edit: Redo",
-                shortcut: "Ctrl+Y",
-                action: PaletteAction::Redo,
-            },
-            PaletteEntry {
-                label: "Edit: Duplicate Line",
-                shortcut: "Ctrl+Shift+D",
-                action: PaletteAction::DuplicateLine,
-            },
-            PaletteEntry {
-                label: "Edit: Delete Line",
-                shortcut: "Ctrl+Shift+K",
-                action: PaletteAction::DeleteLine,
-            },
-            PaletteEntry {
-                label: "Edit: Toggle Comment",
-                shortcut: "Ctrl+/",
-                action: PaletteAction::ToggleComment,
-            },
-            PaletteEntry {
-                label: "Edit: Unindent",
-                shortcut: "Shift+Tab",
-                action: PaletteAction::Unindent,
-            },
+            ("Edit: Undo", PaletteAction::Undo, Some(EditorAction::Undo)),
+            ("Edit: Redo", PaletteAction::Redo, Some(EditorAction::Redo)),
+            (
+                "Edit: Duplicate Line",
+                PaletteAction::DuplicateLine,
+                Some(EditorAction::DuplicateLine),
+            ),
+            (
+                "Edit: Delete Line",
+                PaletteAction::DeleteLine,
+                Some(EditorAction::DeleteLine),
+            ),
+            (
+                "Edit: Toggle Comment",
+                PaletteAction::ToggleComment,
+                Some(EditorAction::ToggleComment),
+            ),
+            (
+                "Edit: Unindent",
+                PaletteAction::Unindent,
+                Some(EditorAction::Unindent),
+            ),
             // Selection
-            PaletteEntry {
-                label: "Selection: Copy",
-                shortcut: "Ctrl+C",
-                action: PaletteAction::Copy,
-            },
-            PaletteEntry {
-                label: "Selection: Cut",
-                shortcut: "Ctrl+X",
-                action: PaletteAction::Cut,
-            },
-            PaletteEntry {
-                label: "Selection: Paste",
-                shortcut: "Ctrl+V",
-                action: PaletteAction::Paste,
-            },
-            PaletteEntry {
-                label: "Selection: Select All",
-                shortcut: "Ctrl+A",
-                action: PaletteAction::SelectAll,
-            },
-            PaletteEntry {
-                label: "Selection: Select Line",
-                shortcut: "Ctrl+L",
-                action: PaletteAction::SelectLine,
-            },
+            (
+                "Selection: Copy",
+                PaletteAction::Copy,
+                Some(EditorAction::Copy),
+            ),
+            (
+                "Selection: Cut",
+                PaletteAction::Cut,
+                Some(EditorAction::Cut),
+            ),
+            (
+                "Selection: Paste",
+                PaletteAction::Paste,
+                Some(EditorAction::Paste),
+            ),
+            (
+                "Selection: Select All",
+                PaletteAction::SelectAll,
+                Some(EditorAction::SelectAll),
+            ),
+            (
+                "Selection: Select Line",
+                PaletteAction::SelectLine,
+                Some(EditorAction::SelectLine),
+            ),
             // Search
-            PaletteEntry {
-                label: "Search: Find",
-                shortcut: "Ctrl+F",
-                action: PaletteAction::Find,
-            },
-            PaletteEntry {
-                label: "Search: Replace",
-                shortcut: "Ctrl+H",
-                action: PaletteAction::Replace,
-            },
-            PaletteEntry {
-                label: "Search: Find Next",
-                shortcut: "F3",
-                action: PaletteAction::FindNext,
-            },
-            PaletteEntry {
-                label: "Search: Find Previous",
-                shortcut: "Shift+F3",
-                action: PaletteAction::FindPrev,
-            },
+            (
+                "Search: Find",
+                PaletteAction::Find,
+                Some(EditorAction::Find),
+            ),
+            (
+                "Search: Replace",
+                PaletteAction::Replace,
+                Some(EditorAction::Replace),
+            ),
+            (
+                "Search: Find Next",
+                PaletteAction::FindNext,
+                Some(EditorAction::FindNext),
+            ),
+            (
+                "Search: Find Previous",
+                PaletteAction::FindPrev,
+                Some(EditorAction::FindPrev),
+            ),
             // Multi-cursor
-            PaletteEntry {
-                label: "Multi-Cursor: Select Next Occurrence",
-                shortcut: "Ctrl+D",
-                action: PaletteAction::SelectNextOccurrence,
-            },
-            PaletteEntry {
-                label: "Multi-Cursor: Select All Occurrences",
-                shortcut: "Ctrl+Shift+L",
-                action: PaletteAction::SelectAllOccurrences,
-            },
+            (
+                "Multi-Cursor: Select Next Occurrence",
+                PaletteAction::SelectNextOccurrence,
+                Some(EditorAction::SelectNextOccurrence),
+            ),
+            (
+                "Multi-Cursor: Select All Occurrences",
+                PaletteAction::SelectAllOccurrences,
+                Some(EditorAction::SelectAllOccurrences),
+            ),
             // Navigate
-            PaletteEntry {
-                label: "Navigate: Go to Line",
-                shortcut: "Ctrl+G",
-                action: PaletteAction::GoToLine,
-            },
-            PaletteEntry {
-                label: "Navigate: Next Buffer",
-                shortcut: "Ctrl+PgDn",
-                action: PaletteAction::NextBuffer,
-            },
-            PaletteEntry {
-                label: "Navigate: Previous Buffer",
-                shortcut: "Ctrl+PgUp",
-                action: PaletteAction::PrevBuffer,
-            },
+            (
+                "Navigate: Go to Line",
+                PaletteAction::GoToLine,
+                Some(EditorAction::GoToLine),
+            ),
+            (
+                "Navigate: Next Buffer",
+                PaletteAction::NextBuffer,
+                Some(EditorAction::NextBuffer),
+            ),
+            (
+                "Navigate: Previous Buffer",
+                PaletteAction::PrevBuffer,
+                Some(EditorAction::PrevBuffer),
+            ),
             // Pane
-            PaletteEntry {
-                label: "Pane: Split Horizontal",
-                shortcut: "Ctrl+\\",
-                action: PaletteAction::SplitHorizontal,
-            },
-            PaletteEntry {
-                label: "Pane: Split Vertical",
-                shortcut: "Ctrl+Shift+\\",
-                action: PaletteAction::SplitVertical,
-            },
-            PaletteEntry {
-                label: "Pane: Close Pane",
-                shortcut: "Ctrl+Shift+W",
-                action: PaletteAction::ClosePane,
-            },
-            PaletteEntry {
-                label: "Pane: Focus Left",
-                shortcut: "Alt+Left",
-                action: PaletteAction::FocusLeft,
-            },
-            PaletteEntry {
-                label: "Pane: Focus Right",
-                shortcut: "Alt+Right",
-                action: PaletteAction::FocusRight,
-            },
-            PaletteEntry {
-                label: "Pane: Focus Up",
-                shortcut: "Alt+Up",
-                action: PaletteAction::FocusUp,
-            },
-            PaletteEntry {
-                label: "Pane: Focus Down",
-                shortcut: "Alt+Down",
-                action: PaletteAction::FocusDown,
-            },
+            (
+                "Pane: Split Horizontal",
+                PaletteAction::SplitHorizontal,
+                Some(EditorAction::SplitHorizontal),
+            ),
+            (
+                "Pane: Split Vertical",
+                PaletteAction::SplitVertical,
+                Some(EditorAction::SplitVertical),
+            ),
+            (
+                "Pane: Close Pane",
+                PaletteAction::ClosePane,
+                Some(EditorAction::ClosePane),
+            ),
+            (
+                "Pane: Focus Left",
+                PaletteAction::FocusLeft,
+                Some(EditorAction::FocusLeft),
+            ),
+            (
+                "Pane: Focus Right",
+                PaletteAction::FocusRight,
+                Some(EditorAction::FocusRight),
+            ),
+            (
+                "Pane: Focus Up",
+                PaletteAction::FocusUp,
+                Some(EditorAction::FocusUp),
+            ),
+            (
+                "Pane: Focus Down",
+                PaletteAction::FocusDown,
+                Some(EditorAction::FocusDown),
+            ),
             // View
-            PaletteEntry {
-                label: "View: Toggle Help",
-                shortcut: "F1",
-                action: PaletteAction::ToggleHelp,
-            },
-            PaletteEntry {
-                label: "View: Toggle Word Wrap",
-                shortcut: "Alt+Z",
-                action: PaletteAction::ToggleWrap,
-            },
-            PaletteEntry {
-                label: "View: Toggle File Tree",
-                shortcut: "Ctrl+B",
-                action: PaletteAction::ToggleFileTree,
-            },
-            PaletteEntry {
-                label: "View: Focus File Tree",
-                shortcut: "",
-                action: PaletteAction::FocusFileTree,
-            },
-            PaletteEntry {
-                label: "View: Command Palette",
-                shortcut: "Ctrl+Shift+P",
-                action: PaletteAction::CommandPalette,
-            },
+            (
+                "View: Toggle Help",
+                PaletteAction::ToggleHelp,
+                Some(EditorAction::ToggleHelp),
+            ),
+            (
+                "View: Toggle Word Wrap",
+                PaletteAction::ToggleWrap,
+                Some(EditorAction::ToggleWrap),
+            ),
+            (
+                "View: Toggle File Tree",
+                PaletteAction::ToggleFileTree,
+                Some(EditorAction::ToggleFileTree),
+            ),
+            ("View: Focus File Tree", PaletteAction::FocusFileTree, None),
+            (
+                "View: Command Palette",
+                PaletteAction::CommandPalette,
+                Some(EditorAction::CommandPalette),
+            ),
             // Terminal
-            PaletteEntry {
-                label: "Terminal: Toggle Terminal",
-                shortcut: "Ctrl+`",
-                action: PaletteAction::ToggleTerminal,
-            },
-            PaletteEntry {
-                label: "Terminal: New Terminal",
-                shortcut: "Ctrl+Shift+T",
-                action: PaletteAction::NewTerminal,
-            },
+            (
+                "Terminal: Toggle Terminal",
+                PaletteAction::ToggleTerminal,
+                Some(EditorAction::ToggleTerminal),
+            ),
+            (
+                "Terminal: New Terminal",
+                PaletteAction::NewTerminal,
+                Some(EditorAction::NewTerminal),
+            ),
         ];
+
+        let entries: Vec<PaletteEntry> = defs
+            .iter()
+            .map(|&(label, action, editor_action)| {
+                let shortcut = editor_action
+                    .map(|ea| keymap.label(ea).to_string())
+                    .unwrap_or_default();
+                PaletteEntry {
+                    label,
+                    shortcut,
+                    action,
+                }
+            })
+            .collect();
+
         let filtered: Vec<usize> = (0..entries.len()).collect();
         Palette {
             input: String::new(),
@@ -574,7 +571,7 @@ impl Editor {
             }
             CommandPalette => {
                 // Re-open palette (already closed by taking it)
-                self.palette = Some(Palette::new());
+                self.palette = Some(Palette::new(&self.config.keybindings));
             }
             ToggleTerminal => self.toggle_terminal_panel(),
             NewTerminal => self.new_terminal(),
@@ -645,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_palette_filter() {
-        let mut p = Palette::new();
+        let mut p = Palette::new(&KeyMap::defaults());
         p.input = "save".to_string();
         p.cursor_pos = 4;
         p.update_filter();
@@ -657,13 +654,13 @@ mod tests {
 
     #[test]
     fn test_palette_empty_filter_shows_all() {
-        let p = Palette::new();
+        let p = Palette::new(&KeyMap::defaults());
         assert_eq!(p.filtered.len(), p.entries.len());
     }
 
     #[test]
     fn test_palette_navigation() {
-        let mut p = Palette::new();
+        let mut p = Palette::new(&KeyMap::defaults());
         assert_eq!(p.selected, 0);
         p.move_down();
         assert_eq!(p.selected, 1);

@@ -104,6 +104,7 @@ pub struct Config {
     pub filetree_ignored: Vec<String>,
     pub terminal_shell: String,
     pub terminal_scrollback: usize,
+    pub keybindings: crate::keybindings::KeyMap,
 }
 
 impl Default for Config {
@@ -120,6 +121,7 @@ impl Default for Config {
             filetree_ignored: Vec::new(),
             terminal_shell: String::new(),
             terminal_scrollback: 1000,
+            keybindings: crate::keybindings::KeyMap::defaults(),
         }
     }
 }
@@ -182,6 +184,10 @@ impl Config {
         if let Some(n) = val.get("terminal_scrollback").and_then(|v| v.as_f64()) {
             config.terminal_scrollback = (n as usize).clamp(100, 100_000);
         }
+        // Keybinding overrides
+        let keybindings_val = val.get("keybindings");
+        config.keybindings = crate::keybindings::KeyMap::new(keybindings_val);
+
         // config.json overrides take highest priority
         if let Some(user_langs) = parse_languages_from_config(&val) {
             config.languages = merge_languages(user_langs, config.languages);

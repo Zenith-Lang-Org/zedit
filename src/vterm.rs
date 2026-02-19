@@ -202,6 +202,10 @@ impl VTerm {
         self.scroll_offset
     }
 
+    pub fn scrollback(&self) -> &[Vec<VTermCell>] {
+        &self.scrollback
+    }
+
     pub fn take_responses(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.responses)
     }

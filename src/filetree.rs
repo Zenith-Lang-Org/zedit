@@ -225,6 +225,24 @@ impl FileTree {
     }
 
     /// Navigate to parent directory of current item.
+    /// Map a screen row (relative to tree content start, i.e. row 0 = first item)
+    /// to a tree item and move the cursor there. Returns true if the row mapped
+    /// to a valid item.
+    pub fn select_by_row(&mut self, row: usize) -> bool {
+        let item_count = if self.mode == TreeMode::Filter {
+            self.filtered_visible.len()
+        } else {
+            self.visible.len()
+        };
+        let idx = self.scroll_offset + row;
+        if idx < item_count {
+            self.cursor = idx;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn go_parent(&mut self) {
         let current_path = match self.current_flat_node() {
             Some(n) => n.path.clone(),

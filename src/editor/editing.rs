@@ -440,6 +440,7 @@ impl Editor {
         let removed = buf_idx;
         self.buffers.remove(removed);
         self.layout.adjust_buffer_indices_after_remove(removed);
+        self.resolve_layout();
         self.active_buffer = self.active_buffer_index();
         self.set_message("Buffer closed", MessageType::Info);
     }
@@ -485,17 +486,68 @@ impl Editor {
     // -----------------------------------------------------------------------
 
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) {
-        // If click is in sidebar area, focus it
-        if me.button == MouseButton::Left && me.pressed && !me.motion {
-            let sidebar_w = self.sidebar_width();
-            if sidebar_w > 0 && me.col < sidebar_w {
-                self.filetree_focused = true;
-                return;
+        let sidebar_w = self.sidebar_width();
+
+        // Handle mouse events in the sidebar area
+        if sidebar_w > 0 && me.col < sidebar_w {
+            match me.button {
+                MouseButton::Left if me.pressed && !me.motion => {
+                    self.filetree_focused = true;
+                    // Row 0 is the title bar; tree content starts at row 1
+                    if me.row > 0 {
+                        let open_path = self.filetree.as_mut().and_then(|ft| {
+                            let content_row = (me.row - 1) as usize;
+                            if ft.select_by_row(content_row) {
+                                ft.enter()
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(path) = open_path {
+                            self.open_file_from_tree(&path);
+                        }
+                    }
+                    return;
+                }
+                MouseButton::ScrollUp => {
+                    if let Some(ref mut ft) = self.filetree {
+                        for _ in 0..3 {
+                            ft.move_up();
+                        }
+                    }
+                    return;
+                }
+                MouseButton::ScrollDown => {
+                    if let Some(ref mut ft) = self.filetree {
+                        for _ in 0..3 {
+                            ft.move_down();
+                        }
+                    }
+                    return;
+                }
+                _ => return,
             }
-            // Click outside sidebar unfocuses it
-            if self.filetree_focused {
-                self.filetree_focused = false;
-            }
+        }
+
+        // Click outside sidebar unfocuses it
+        if me.button == MouseButton::Left && me.pressed && !me.motion && self.filetree_focused {
+            self.filetree_focused = false;
+        }
+
+        // Click on a terminal pane switches focus to it
+        if me.button == MouseButton::Left
+            && me.pressed
+            && !me.motion
+            && let Some(pane_id) = self.pane_at_mouse(me.col, me.row)
+            && pane_id != self.active_pane
+            && matches!(
+                self.layout.pane_content(pane_id),
+                Some(crate::layout::PaneContent::Terminal(_))
+            )
+        {
+            self.active_pane = pane_id;
+            self.active_buffer = self.active_buffer_index();
+            return;
         }
 
         match me.button {
@@ -608,7 +660,7 @@ impl Editor {
     }
 
     /// Find which pane a screen coordinate falls in.
-    fn pane_at_mouse(&self, col: u16, row: u16) -> Option<crate::layout::PaneId> {
+    pub(super) fn pane_at_mouse(&self, col: u16, row: u16) -> Option<crate::layout::PaneId> {
         for pane_info in self.layout.panes() {
             if pane_info.rect.contains(col, row) {
                 return Some(pane_info.id);
