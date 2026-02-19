@@ -15,6 +15,12 @@
 pub struct PaneId(pub u32);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PaneContent {
+    Buffer(usize),
+    Terminal(usize),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SplitDir {
     Horizontal, // children go left | right
     Vertical,   // children go top | bottom
@@ -50,7 +56,7 @@ pub enum Direction {
 enum LayoutNode {
     Leaf {
         id: PaneId,
-        buffer_index: usize,
+        content: PaneContent,
     },
     Split {
         dir: SplitDir,
@@ -68,7 +74,17 @@ enum LayoutNode {
 pub struct PaneInfo {
     pub id: PaneId,
     pub rect: Rect,
-    pub buffer_index: usize,
+    pub content: PaneContent,
+}
+
+impl PaneInfo {
+    /// Convenience: get buffer_index if this pane holds a buffer.
+    pub fn buffer_index(&self) -> Option<usize> {
+        match self.content {
+            PaneContent::Buffer(idx) => Some(idx),
+            PaneContent::Terminal(_) => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +102,10 @@ impl LayoutState {
     pub fn new(buffer_index: usize) -> Self {
         let id = PaneId(0);
         Self {
-            root: LayoutNode::Leaf { id, buffer_index },
+            root: LayoutNode::Leaf {
+                id,
+                content: PaneContent::Buffer(buffer_index),
+            },
             next_id: 1,
             resolved: Vec::new(),
         }
@@ -113,34 +132,59 @@ impl LayoutState {
         self.resolved.iter().find(|p| p.id == id).map(|p| p.rect)
     }
 
-    /// Look up the buffer index for a pane.
+    /// Look up the buffer index for a pane (returns Some only for Buffer panes).
     pub fn pane_buffer(&self, id: PaneId) -> Option<usize> {
         self.resolved
             .iter()
             .find(|p| p.id == id)
-            .map(|p| p.buffer_index)
+            .and_then(|p| match p.content {
+                PaneContent::Buffer(idx) => Some(idx),
+                PaneContent::Terminal(_) => None,
+            })
+    }
+
+    /// Look up the content for a pane.
+    pub fn pane_content(&self, id: PaneId) -> Option<PaneContent> {
+        self.resolved.iter().find(|p| p.id == id).map(|p| p.content)
     }
 
     /// Set the buffer index for a pane.
     pub fn set_pane_buffer(&mut self, id: PaneId, buffer_index: usize) {
-        set_buffer_in_node(&mut self.root, id, buffer_index);
-        // Update resolved cache too
+        set_content_in_node(&mut self.root, id, PaneContent::Buffer(buffer_index));
         if let Some(info) = self.resolved.iter_mut().find(|p| p.id == id) {
-            info.buffer_index = buffer_index;
+            info.content = PaneContent::Buffer(buffer_index);
+        }
+    }
+
+    /// Set the content for a pane.
+    pub fn set_pane_content(&mut self, id: PaneId, content: PaneContent) {
+        set_content_in_node(&mut self.root, id, content);
+        if let Some(info) = self.resolved.iter_mut().find(|p| p.id == id) {
+            info.content = content;
         }
     }
 
     /// Split a leaf pane into two. Returns the id of the new pane.
-    /// The original pane keeps its buffer; the new pane gets `new_buffer_index`.
+    /// The original pane keeps its content; the new pane gets `new_buffer_index`.
     pub fn split_pane(
         &mut self,
         pane_id: PaneId,
         dir: SplitDir,
         new_buffer_index: usize,
     ) -> Option<PaneId> {
+        self.split_pane_with_content(pane_id, dir, PaneContent::Buffer(new_buffer_index))
+    }
+
+    /// Split a leaf pane into two with arbitrary content for the new pane.
+    pub fn split_pane_with_content(
+        &mut self,
+        pane_id: PaneId,
+        dir: SplitDir,
+        new_content: PaneContent,
+    ) -> Option<PaneId> {
         let new_id = PaneId(self.next_id);
         self.next_id += 1;
-        if split_node(&mut self.root, pane_id, dir, new_id, new_buffer_index) {
+        if split_node(&mut self.root, pane_id, dir, new_id, new_content) {
             Some(new_id)
         } else {
             self.next_id -= 1;
@@ -211,10 +255,14 @@ impl LayoutState {
         result
     }
 
-    /// Update all panes that reference `old_index` to `new_index`.
-    /// Also decrement any buffer indices > `removed_index` (for when a buffer is removed).
+    /// Update all buffer panes: decrement indices > removed_index, redirect removed to previous.
     pub fn adjust_buffer_indices_after_remove(&mut self, removed_index: usize) {
         adjust_indices(&mut self.root, removed_index);
+    }
+
+    /// Get buffer index for a pane, if it's a buffer pane.
+    pub fn pane_buffer_index(&self, id: PaneId) -> Option<usize> {
+        self.pane_buffer(id)
     }
 
     fn leaf_count(&self, node: &LayoutNode) -> usize {
@@ -235,11 +283,11 @@ fn leaf_count_recursive(node: &LayoutNode) -> usize {
 
 fn resolve_node(node: &LayoutNode, rect: Rect, out: &mut Vec<PaneInfo>) {
     match node {
-        LayoutNode::Leaf { id, buffer_index } => {
+        LayoutNode::Leaf { id, content } => {
             out.push(PaneInfo {
                 id: *id,
                 rect,
-                buffer_index: *buffer_index,
+                content: *content,
             });
         }
         LayoutNode::Split {
@@ -305,22 +353,22 @@ fn split_node(
     target: PaneId,
     dir: SplitDir,
     new_id: PaneId,
-    new_buffer_index: usize,
+    new_content: PaneContent,
 ) -> bool {
     match node {
-        LayoutNode::Leaf { id, buffer_index } if *id == target => {
+        LayoutNode::Leaf { id, content } if *id == target => {
             let old_id = *id;
-            let old_buf = *buffer_index;
+            let old_content = *content;
             *node = LayoutNode::Split {
                 dir,
                 children: vec![
                     LayoutNode::Leaf {
                         id: old_id,
-                        buffer_index: old_buf,
+                        content: old_content,
                     },
                     LayoutNode::Leaf {
                         id: new_id,
-                        buffer_index: new_buffer_index,
+                        content: new_content,
                     },
                 ],
                 ratios: vec![0.5, 0.5],
@@ -330,7 +378,7 @@ fn split_node(
         LayoutNode::Leaf { .. } => false,
         LayoutNode::Split { children, .. } => {
             for child in children.iter_mut() {
-                if split_node(child, target, dir, new_id, new_buffer_index) {
+                if split_node(child, target, dir, new_id, new_content) {
                     return true;
                 }
             }
@@ -391,15 +439,15 @@ fn find_leaf(node: &LayoutNode, target: PaneId) -> bool {
     }
 }
 
-fn set_buffer_in_node(node: &mut LayoutNode, target: PaneId, buf_idx: usize) {
+fn set_content_in_node(node: &mut LayoutNode, target: PaneId, new_content: PaneContent) {
     match node {
-        LayoutNode::Leaf { id, buffer_index } if *id == target => {
-            *buffer_index = buf_idx;
+        LayoutNode::Leaf { id, content } if *id == target => {
+            *content = new_content;
         }
         LayoutNode::Leaf { .. } => {}
         LayoutNode::Split { children, .. } => {
             for child in children.iter_mut() {
-                set_buffer_in_node(child, target, buf_idx);
+                set_content_in_node(child, target, new_content);
             }
         }
     }
@@ -407,7 +455,10 @@ fn set_buffer_in_node(node: &mut LayoutNode, target: PaneId, buf_idx: usize) {
 
 fn collect_panes_with_buffer(node: &LayoutNode, buf_idx: usize, out: &mut Vec<PaneId>) {
     match node {
-        LayoutNode::Leaf { id, buffer_index } if *buffer_index == buf_idx => {
+        LayoutNode::Leaf {
+            id,
+            content: PaneContent::Buffer(bi),
+        } if *bi == buf_idx => {
             out.push(*id);
         }
         LayoutNode::Leaf { .. } => {}
@@ -421,14 +472,17 @@ fn collect_panes_with_buffer(node: &LayoutNode, buf_idx: usize, out: &mut Vec<Pa
 
 fn adjust_indices(node: &mut LayoutNode, removed: usize) {
     match node {
-        LayoutNode::Leaf { buffer_index, .. } => {
-            if *buffer_index == removed {
-                // Point to previous buffer or 0
-                *buffer_index = removed.saturating_sub(1);
-            } else if *buffer_index > removed {
-                *buffer_index -= 1;
+        LayoutNode::Leaf {
+            content: PaneContent::Buffer(bi),
+            ..
+        } => {
+            if *bi == removed {
+                *bi = removed.saturating_sub(1);
+            } else if *bi > removed {
+                *bi -= 1;
             }
         }
+        LayoutNode::Leaf { .. } => {} // Terminal panes: no index adjustment
         LayoutNode::Split { children, .. } => {
             for child in children.iter_mut() {
                 adjust_indices(child, removed);
@@ -507,7 +561,7 @@ mod tests {
         layout.resolve(total);
         assert_eq!(layout.pane_count(), 1);
         assert_eq!(layout.panes()[0].rect, total);
-        assert_eq!(layout.panes()[0].buffer_index, 0);
+        assert_eq!(layout.panes()[0].content, PaneContent::Buffer(0));
     }
 
     #[test]

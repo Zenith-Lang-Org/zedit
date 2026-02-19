@@ -50,11 +50,11 @@ impl Termios {
 }
 
 #[repr(C)]
-struct Winsize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
+pub(crate) struct Winsize {
+    pub ws_row: u16,
+    pub ws_col: u16,
+    pub ws_xpixel: u16,
+    pub ws_ypixel: u16,
 }
 
 // Linux x86-64 sigaction layout

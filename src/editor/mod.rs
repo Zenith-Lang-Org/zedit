@@ -16,10 +16,12 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::input::{self, Event, Key, KeyEvent};
-use crate::layout::{Direction, LayoutState, PaneId, Rect, SplitDir};
+use crate::layout::{Direction, LayoutState, PaneContent, PaneId, Rect, SplitDir};
+use crate::pty::{self, POLLIN, PollFd, Pty};
 use crate::render::Screen;
 use crate::terminal::{self, ColorMode, Terminal};
 use crate::undo::CursorState;
+use crate::vterm::VTerm;
 
 use buffer_state::*;
 use helpers::*;
@@ -127,6 +129,11 @@ pub struct Editor {
     filetree: Option<crate::filetree::FileTree>,
     filetree_focused: bool,
 
+    // Integrated terminal
+    pub(super) vterms: Vec<VTerm>,
+    pub(super) ptys: Vec<Pty>,
+    terminal_panel_pane: Option<PaneId>,
+
     running: bool,
 }
 
@@ -160,6 +167,9 @@ impl Editor {
             palette: None,
             filetree: None,
             filetree_focused: false,
+            vterms: Vec::new(),
+            ptys: Vec::new(),
+            terminal_panel_pane: None,
             running: true,
         })
     }
@@ -195,6 +205,9 @@ impl Editor {
             palette: None,
             filetree: None,
             filetree_focused: false,
+            vterms: Vec::new(),
+            ptys: Vec::new(),
+            terminal_panel_pane: None,
             running: true,
         })
     }
@@ -247,6 +260,22 @@ impl Editor {
         });
     }
 
+    /// Check if the active pane is a terminal pane.
+    fn active_pane_is_terminal(&self) -> bool {
+        matches!(
+            self.layout.pane_content(self.active_pane),
+            Some(PaneContent::Terminal(_))
+        )
+    }
+
+    /// Get the terminal index for the active pane, if it's a terminal.
+    fn active_terminal_index(&self) -> Option<usize> {
+        match self.layout.pane_content(self.active_pane) {
+            Some(PaneContent::Terminal(idx)) => Some(idx),
+            _ => None,
+        }
+    }
+
     /// Run the main editor loop.
     pub fn run(&mut self) -> Result<(), String> {
         self.resolve_layout();
@@ -257,22 +286,257 @@ impl Editor {
                 self.screen.resize(w as usize, h as usize);
                 self.resolve_layout();
                 self.recompute_all_wrap_maps();
-                self.adjust_viewport();
+                self.sync_pty_sizes();
+                if !self.active_pane_is_terminal() {
+                    self.adjust_viewport();
+                }
             }
 
-            // 2. Render
+            // 2. Drain PTY output
+            self.drain_all_ptys();
+
+            // 3. Reap dead children
+            for pty in &mut self.ptys {
+                pty.reap();
+            }
+
+            // 4. Render
             self.render();
 
-            // 3. Read event (blocks until input or timeout)
-            let event = input::read_event(&self.terminal);
+            // 5. Poll stdin + PTY fds
+            let (stdin_ready, pty_ready) = self.poll_fds(50);
 
-            // 4. Handle event
-            if event != Event::None {
-                self.handle_event(event);
+            // 6. Drain ready PTYs again
+            for idx in &pty_ready {
+                self.drain_pty(*idx);
+            }
+
+            // 7. Handle stdin if ready
+            if stdin_ready {
+                let event = input::read_event(&self.terminal);
+                if event != Event::None {
+                    self.handle_event(event);
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// Poll stdin and all PTY master fds.
+    /// Returns (stdin_ready, vec_of_pty_indices_with_data).
+    fn poll_fds(&self, timeout_ms: i32) -> (bool, Vec<usize>) {
+        let mut fds = Vec::with_capacity(1 + self.ptys.len());
+
+        // stdin
+        fds.push(PollFd {
+            fd: 0, // STDIN_FILENO
+            events: POLLIN,
+            revents: 0,
+        });
+
+        // PTY master fds
+        for pty in &self.ptys {
+            if !pty.is_dead() {
+                fds.push(PollFd {
+                    fd: pty.master_fd(),
+                    events: POLLIN,
+                    revents: 0,
+                });
+            }
+        }
+
+        let _result = pty::poll_fds(&mut fds, timeout_ms);
+
+        let stdin_ready = fds[0].revents & POLLIN != 0;
+        let mut pty_ready = Vec::new();
+
+        let mut fd_idx = 1;
+        for (i, pty) in self.ptys.iter().enumerate() {
+            if !pty.is_dead() {
+                if fd_idx < fds.len() && fds[fd_idx].revents & POLLIN != 0 {
+                    pty_ready.push(i);
+                }
+                fd_idx += 1;
+            }
+        }
+
+        (stdin_ready, pty_ready)
+    }
+
+    /// Drain output from all PTYs into their VTerms.
+    fn drain_all_ptys(&mut self) {
+        for i in 0..self.ptys.len() {
+            self.drain_pty(i);
+        }
+    }
+
+    /// Drain output from a single PTY into its VTerm.
+    fn drain_pty(&mut self, idx: usize) {
+        if idx >= self.ptys.len() || idx >= self.vterms.len() {
+            return;
+        }
+        if self.ptys[idx].is_dead() {
+            return;
+        }
+
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = self.ptys[idx].read_nonblocking(&mut buf);
+            if n == 0 {
+                break;
+            }
+            self.vterms[idx].feed(&buf[..n]);
+
+            // Send any responses back to PTY (e.g., DSR 6n)
+            let responses = self.vterms[idx].take_responses();
+            for resp in responses {
+                self.ptys[idx].write_bytes(&resp);
+            }
+        }
+    }
+
+    /// Sync PTY/VTerm sizes to match their pane rects.
+    fn sync_pty_sizes(&mut self) {
+        let panes: Vec<_> = self.layout.panes().to_vec();
+        for pane_info in &panes {
+            if let PaneContent::Terminal(ti) = pane_info.content
+                && ti < self.ptys.len()
+                && ti < self.vterms.len()
+            {
+                let cols = pane_info.rect.width;
+                let rows = pane_info.rect.height;
+                if cols > 0 && rows > 0 {
+                    self.ptys[ti].resize(cols, rows);
+                    self.vterms[ti].resize(cols, rows);
+                }
+            }
+        }
+    }
+
+    /// Detect the user's shell.
+    fn detect_shell() -> String {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    }
+
+    /// Toggle the integrated terminal panel (bottom split).
+    fn toggle_terminal_panel(&mut self) {
+        if let Some(pane_id) = self.terminal_panel_pane {
+            // Close terminal panel
+            if self.layout.pane_exists(pane_id) {
+                // Move focus to an editor pane
+                let next = self
+                    .layout
+                    .adjacent_pane(pane_id, Direction::Up)
+                    .or_else(|| self.layout.adjacent_pane(pane_id, Direction::Left))
+                    .unwrap_or(self.layout.first_pane());
+                self.layout.close_pane(pane_id);
+                self.active_pane = next;
+                if let Some(PaneContent::Buffer(_)) = self.layout.pane_content(self.active_pane) {
+                    self.active_buffer = self.active_buffer_index();
+                }
+            }
+            self.terminal_panel_pane = None;
+            self.resolve_layout();
+            self.set_message("Terminal closed", MessageType::Info);
+        } else {
+            // Open terminal panel
+            self.new_terminal_panel();
+        }
+    }
+
+    /// Spawn a new terminal in a bottom 30% split.
+    fn new_terminal_panel(&mut self) {
+        let shell = Self::detect_shell();
+
+        // Get the pane to split (use the active pane or find an editor pane)
+        let split_target = self.active_pane;
+
+        // Create VTerm and PTY
+        let vterm = VTerm::new(80, 12); // Will be resized after layout
+        let pty = match Pty::spawn(80, 12, &shell) {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_message(
+                    &format!("Failed to spawn terminal: {}", e),
+                    MessageType::Error,
+                );
+                return;
+            }
+        };
+
+        let term_idx = self.vterms.len();
+        self.vterms.push(vterm);
+        self.ptys.push(pty);
+
+        // Split the active pane vertically (top|bottom) with 70/30 ratio
+        let content = PaneContent::Terminal(term_idx);
+        if let Some(new_id) =
+            self.layout
+                .split_pane_with_content(split_target, SplitDir::Vertical, content)
+        {
+            // Adjust ratios: we want the original pane to be 70%, terminal 30%
+            // The split creates 50/50 by default, so resize
+            self.resolve_layout();
+
+            // Resize to get ~70/30 split
+            let (w, h) = self.terminal.size();
+            let sidebar_w = self.sidebar_width();
+            let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+            let total = Rect {
+                x: sidebar_w,
+                y: 0,
+                width: w.saturating_sub(sidebar_w),
+                height: pane_area_height,
+            };
+            // Grow the original pane by 20% (from 50% to 70%)
+            let delta = (pane_area_height as i16) * 20 / 100;
+            self.layout.resize_split(split_target, delta, total);
+
+            self.terminal_panel_pane = Some(new_id);
+            self.active_pane = new_id;
+            self.resolve_layout();
+            self.sync_pty_sizes();
+            self.set_message("Terminal opened", MessageType::Info);
+        }
+    }
+
+    /// Spawn a new terminal tab (Ctrl+Shift+T).
+    fn new_terminal(&mut self) {
+        if self.terminal_panel_pane.is_none() {
+            self.new_terminal_panel();
+        } else {
+            // TODO: support multiple terminal tabs
+            self.set_message("Terminal already open", MessageType::Warning);
+        }
+    }
+
+    /// Forward a key event to the active PTY.
+    fn forward_key_to_pty(&mut self, ke: &KeyEvent) {
+        let term_idx = match self.active_terminal_index() {
+            Some(idx) => idx,
+            None => return,
+        };
+        if term_idx >= self.ptys.len() || self.ptys[term_idx].is_dead() {
+            return;
+        }
+
+        let bytes = key_event_to_bytes(ke);
+        if !bytes.is_empty() {
+            self.ptys[term_idx].write_bytes(&bytes);
+        }
+    }
+
+    /// Forward pasted text to the active PTY.
+    fn forward_paste_to_pty(&mut self, text: &str) {
+        let term_idx = match self.active_terminal_index() {
+            Some(idx) => idx,
+            None => return,
+        };
+        if term_idx >= self.ptys.len() || self.ptys[term_idx].is_dead() {
+            return;
+        }
+        self.ptys[term_idx].write_bytes(text.as_bytes());
     }
 
     // -----------------------------------------------------------------------
@@ -312,6 +576,26 @@ impl Editor {
             }
         }
 
+        // When active pane is a terminal, forward most keys to PTY
+        if self.active_pane_is_terminal() {
+            match event {
+                Event::Key(ref ke) => {
+                    // Intercept editor-level keybindings
+                    if self.is_terminal_intercepted_key(ke) {
+                        self.handle_terminal_meta_key(ke.clone());
+                        return;
+                    }
+                    // Forward to PTY
+                    self.forward_key_to_pty(ke);
+                }
+                Event::Paste(ref text) => {
+                    self.forward_paste_to_pty(text);
+                }
+                Event::Mouse(_) | Event::None => {}
+            }
+            return;
+        }
+
         // Clear message on any event, but only when no prompt is active
         if self.prompt.is_none() && !matches!(&event, Event::None) {
             self.message = None;
@@ -343,6 +627,56 @@ impl Editor {
                 }
             }
             Event::None => {}
+        }
+    }
+
+    /// Check if a key event should be intercepted when in terminal mode.
+    fn is_terminal_intercepted_key(&self, ke: &KeyEvent) -> bool {
+        // Alt+Arrow: pane focus
+        if ke.alt && !ke.shift && matches!(ke.key, Key::Up | Key::Down | Key::Left | Key::Right) {
+            return true;
+        }
+        // Alt+Shift+Arrow: pane resize
+        if ke.alt && ke.shift && matches!(ke.key, Key::Up | Key::Down | Key::Left | Key::Right) {
+            return true;
+        }
+        // Ctrl+`: toggle terminal
+        if ke.ctrl && ke.key == Key::Char('`') {
+            return true;
+        }
+        // Ctrl+Shift+T: new terminal
+        if ke.ctrl && ke.key == Key::Char('T') {
+            return true;
+        }
+        // Ctrl+Shift+W: close pane
+        if ke.ctrl && ke.key == Key::Char('W') {
+            return true;
+        }
+        // Ctrl+P: command palette
+        if ke.ctrl && ke.key == Key::Char('p') {
+            return true;
+        }
+        false
+    }
+
+    /// Handle intercepted keys when in terminal mode.
+    fn handle_terminal_meta_key(&mut self, ke: KeyEvent) {
+        match (&ke.key, ke.ctrl, ke.alt) {
+            (Key::Left, false, true) if !ke.shift => self.focus_pane(Direction::Left),
+            (Key::Right, false, true) if !ke.shift => self.focus_pane(Direction::Right),
+            (Key::Up, false, true) if !ke.shift => self.focus_pane(Direction::Up),
+            (Key::Down, false, true) if !ke.shift => self.focus_pane(Direction::Down),
+            (Key::Left, false, true) if ke.shift => self.resize_active_pane(-2),
+            (Key::Right, false, true) if ke.shift => self.resize_active_pane(2),
+            (Key::Up, false, true) if ke.shift => self.resize_active_pane_vertical(-2),
+            (Key::Down, false, true) if ke.shift => self.resize_active_pane_vertical(2),
+            (Key::Char('`'), true, _) => self.toggle_terminal_panel(),
+            (Key::Char('T'), true, _) => self.new_terminal(),
+            (Key::Char('W'), true, _) => self.close_active_pane(),
+            (Key::Char('p'), true, _) => {
+                self.palette = Some(palette::Palette::new());
+            }
+            _ => {}
         }
     }
 
@@ -631,6 +965,16 @@ impl Editor {
                 self.toggle_filetree();
             }
 
+            // -- Integrated Terminal (Ctrl+`) --
+            (Key::Char('`'), true, false) => {
+                self.toggle_terminal_panel();
+            }
+
+            // -- New Terminal (Ctrl+Shift+T) --
+            (Key::Char('T'), true, false) => {
+                self.new_terminal();
+            }
+
             // -- Word Wrap toggle (Alt+Z) --
             (Key::Char('z'), false, true) => {
                 self.toggle_word_wrap();
@@ -720,6 +1064,10 @@ impl Editor {
             self.set_message("Only one pane", MessageType::Warning);
             return;
         }
+        // Track if we're closing the terminal panel
+        if self.terminal_panel_pane == Some(self.active_pane) {
+            self.terminal_panel_pane = None;
+        }
         // Find a neighbor to move focus to before closing
         let next = self
             .layout
@@ -733,7 +1081,9 @@ impl Editor {
             .unwrap_or(self.layout.first_pane());
         self.layout.close_pane(self.active_pane);
         self.active_pane = next;
-        self.active_buffer = self.active_buffer_index();
+        if !self.active_pane_is_terminal() {
+            self.active_buffer = self.active_buffer_index();
+        }
         self.resolve_layout();
         self.set_message("Pane closed", MessageType::Info);
     }
@@ -741,7 +1091,9 @@ impl Editor {
     fn focus_pane(&mut self, dir: Direction) {
         if let Some(target) = self.layout.adjacent_pane(self.active_pane, dir) {
             self.active_pane = target;
-            self.active_buffer = self.active_buffer_index();
+            if !self.active_pane_is_terminal() {
+                self.active_buffer = self.active_buffer_index();
+            }
         }
     }
 
@@ -941,8 +1293,9 @@ impl Editor {
     fn recompute_all_wrap_maps(&mut self) {
         let panes: Vec<_> = self.layout.panes().to_vec();
         for pane_info in &panes {
-            let bi = pane_info.buffer_index;
-            if bi < self.buffers.len() {
+            if let crate::layout::PaneContent::Buffer(bi) = pane_info.content
+                && bi < self.buffers.len()
+            {
                 let bs = &mut self.buffers[bi];
                 if let Some(ref mut wm) = bs.wrap_map {
                     let pane_w = pane_info.rect.width as usize;
@@ -951,5 +1304,98 @@ impl Editor {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Key-to-bytes encoding for PTY forwarding
+// ---------------------------------------------------------------------------
+
+fn key_event_to_bytes(ke: &KeyEvent) -> Vec<u8> {
+    match &ke.key {
+        Key::Char(ch) => {
+            if ke.ctrl {
+                // Ctrl+A..Z → 0x01..0x1A
+                if ch.is_ascii_lowercase() {
+                    return vec![*ch as u8 - b'a' + 1];
+                }
+                if ch.is_ascii_uppercase() {
+                    return vec![ch.to_ascii_lowercase() as u8 - b'a' + 1];
+                }
+                // Ctrl+space
+                if *ch == ' ' {
+                    return vec![0x00];
+                }
+            }
+            if ke.alt {
+                let mut bytes = vec![0x1b];
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                return bytes;
+            }
+            let mut buf = [0u8; 4];
+            ch.encode_utf8(&mut buf).as_bytes().to_vec()
+        }
+        Key::Enter => vec![b'\r'],
+        Key::Tab => vec![b'\t'],
+        Key::BackTab => b"\x1b[Z".to_vec(),
+        Key::Backspace => vec![0x7f],
+        Key::Delete => b"\x1b[3~".to_vec(),
+        Key::Escape => vec![0x1b],
+        Key::Up => {
+            if ke.ctrl {
+                b"\x1b[1;5A".to_vec()
+            } else if ke.shift {
+                b"\x1b[1;2A".to_vec()
+            } else {
+                b"\x1b[A".to_vec()
+            }
+        }
+        Key::Down => {
+            if ke.ctrl {
+                b"\x1b[1;5B".to_vec()
+            } else if ke.shift {
+                b"\x1b[1;2B".to_vec()
+            } else {
+                b"\x1b[B".to_vec()
+            }
+        }
+        Key::Right => {
+            if ke.ctrl {
+                b"\x1b[1;5C".to_vec()
+            } else if ke.shift {
+                b"\x1b[1;2C".to_vec()
+            } else {
+                b"\x1b[C".to_vec()
+            }
+        }
+        Key::Left => {
+            if ke.ctrl {
+                b"\x1b[1;5D".to_vec()
+            } else if ke.shift {
+                b"\x1b[1;2D".to_vec()
+            } else {
+                b"\x1b[D".to_vec()
+            }
+        }
+        Key::Home => b"\x1b[H".to_vec(),
+        Key::End => b"\x1b[F".to_vec(),
+        Key::PageUp => b"\x1b[5~".to_vec(),
+        Key::PageDown => b"\x1b[6~".to_vec(),
+        Key::F(n) => match n {
+            1 => b"\x1bOP".to_vec(),
+            2 => b"\x1bOQ".to_vec(),
+            3 => b"\x1bOR".to_vec(),
+            4 => b"\x1bOS".to_vec(),
+            5 => b"\x1b[15~".to_vec(),
+            6 => b"\x1b[17~".to_vec(),
+            7 => b"\x1b[18~".to_vec(),
+            8 => b"\x1b[19~".to_vec(),
+            9 => b"\x1b[20~".to_vec(),
+            10 => b"\x1b[21~".to_vec(),
+            11 => b"\x1b[23~".to_vec(),
+            12 => b"\x1b[24~".to_vec(),
+            _ => Vec::new(),
+        },
     }
 }

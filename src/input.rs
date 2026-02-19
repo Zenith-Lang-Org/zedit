@@ -116,8 +116,11 @@ pub fn read_event(term: &Terminal) -> Event {
             Event::Key(KeyEvent::ctrl(Key::Char(ch)))
         }
 
+        // Ctrl+` (backtick) — mapped from 0x1e
+        0x1e => Event::Key(KeyEvent::ctrl(Key::Char('`'))),
+
         // Other control chars we don't map
-        0x1c..=0x1f => Event::None,
+        0x1c | 0x1d | 0x1f => Event::None,
 
         // Backspace
         0x7f => Event::Key(KeyEvent::plain(Key::Backspace)),

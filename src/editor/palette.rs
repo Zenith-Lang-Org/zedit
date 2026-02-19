@@ -54,6 +54,9 @@ pub(super) enum PaletteAction {
     ToggleFileTree,
     FocusFileTree,
     CommandPalette,
+    // Terminal
+    ToggleTerminal,
+    NewTerminal,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +282,17 @@ impl Palette {
                 label: "View: Command Palette",
                 shortcut: "Ctrl+Shift+P",
                 action: PaletteAction::CommandPalette,
+            },
+            // Terminal
+            PaletteEntry {
+                label: "Terminal: Toggle Terminal",
+                shortcut: "Ctrl+`",
+                action: PaletteAction::ToggleTerminal,
+            },
+            PaletteEntry {
+                label: "Terminal: New Terminal",
+                shortcut: "Ctrl+Shift+T",
+                action: PaletteAction::NewTerminal,
             },
         ];
         let filtered: Vec<usize> = (0..entries.len()).collect();
@@ -562,6 +576,8 @@ impl Editor {
                 // Re-open palette (already closed by taking it)
                 self.palette = Some(Palette::new());
             }
+            ToggleTerminal => self.toggle_terminal_panel(),
+            NewTerminal => self.new_terminal(),
         }
     }
 }

@@ -6,11 +6,13 @@ mod filetree;
 mod git;
 mod input;
 mod layout;
+mod pty;
 mod render;
 mod syntax;
 mod terminal;
 mod undo;
 pub mod unicode;
+mod vterm;
 
 use std::env;
 use std::path::Path;

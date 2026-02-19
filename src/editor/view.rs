@@ -160,20 +160,26 @@ impl Editor {
         // Render each pane
         let panes: Vec<_> = self.layout.panes().to_vec();
         for pane_info in &panes {
-            // Update gutter width for this pane's buffer
-            let bi = pane_info.buffer_index;
-            if bi < self.buffers.len() {
-                let has_git = self.buffers[bi].git_info.is_some();
-                self.buffers[bi].gutter_width = if self.config.line_numbers {
-                    let base = compute_gutter_width(self.buffers[bi].buffer.line_count());
-                    if has_git { base + 2 } else { base }
-                } else if has_git {
-                    2
-                } else {
-                    0
-                };
+            match pane_info.content {
+                crate::layout::PaneContent::Buffer(bi) => {
+                    // Update gutter width for this pane's buffer
+                    if bi < self.buffers.len() {
+                        let has_git = self.buffers[bi].git_info.is_some();
+                        self.buffers[bi].gutter_width = if self.config.line_numbers {
+                            let base = compute_gutter_width(self.buffers[bi].buffer.line_count());
+                            if has_git { base + 2 } else { base }
+                        } else if has_git {
+                            2
+                        } else {
+                            0
+                        };
+                    }
+                    self.render_editor_pane(pane_info.rect, bi, pane_info.id);
+                }
+                crate::layout::PaneContent::Terminal(ti) => {
+                    self.render_terminal_pane(pane_info.rect, ti, pane_info.id);
+                }
             }
-            self.render_editor_pane(pane_info.rect, pane_info.buffer_index, pane_info.id);
         }
 
         // Draw pane borders
@@ -353,6 +359,19 @@ impl Editor {
                 + crate::unicode::str_width(&prompt.input[..prompt.cursor_pos]);
             let msg_row_1based = (h + 1 + 1) as u16; // h+1 is msg_row, +1 for 1-based
             terminal::move_cursor(msg_row_1based, (prompt_cursor_col + 1) as u16);
+        } else if let Some(crate::layout::PaneContent::Terminal(ti)) =
+            self.layout.pane_content(self.active_pane)
+        {
+            // Terminal pane cursor
+            if let Some(rect) = self.layout.pane_rect(self.active_pane)
+                && ti < self.vterms.len()
+                && self.vterms[ti].cursor_visible()
+            {
+                let (vt_row, vt_col) = self.vterms[ti].cursor_pos();
+                let screen_row = rect.y as usize + vt_row as usize;
+                let screen_col = rect.x as usize + vt_col as usize;
+                terminal::move_cursor((screen_row + 1) as u16, (screen_col + 1) as u16);
+            }
         } else if let Some(rect) = self.layout.pane_rect(self.active_pane) {
             let b = self.buf();
             if b.wrap_map.is_some() {
@@ -1295,6 +1314,74 @@ impl Editor {
         );
     }
 
+    /// Render a terminal pane within the given rectangle.
+    fn render_terminal_pane(&mut self, rect: Rect, term_idx: usize, _pane_id: PaneId) {
+        let pane_x = rect.x as usize;
+        let pane_y = rect.y as usize;
+        let pane_w = rect.width as usize;
+        let pane_h = rect.height as usize;
+
+        if term_idx >= self.vterms.len() {
+            // Terminal not found — fill with blank
+            for local_row in 0..pane_h {
+                for col in 0..pane_w {
+                    self.screen.put_char(
+                        pane_y + local_row,
+                        pane_x + col,
+                        ' ',
+                        Color::Default,
+                        Color::Default,
+                        false,
+                    );
+                }
+            }
+            return;
+        }
+
+        let vt = &self.vterms[term_idx];
+        let vt_cols = vt.cols() as usize;
+        let vt_rows = vt.rows() as usize;
+
+        for local_row in 0..pane_h {
+            for local_col in 0..pane_w {
+                let screen_row = pane_y + local_row;
+                let screen_col = pane_x + local_col;
+
+                if local_row < vt_rows && local_col < vt_cols {
+                    let cell = &vt.cells()[local_row * vt_cols + local_col];
+                    let style = crate::render::CellStyle {
+                        fg: cell.fg,
+                        bg: cell.bg,
+                        bold: cell.bold,
+                        underline: cell.underline,
+                        inverse: cell.inverse,
+                        italic: cell.italic,
+                    };
+                    self.screen
+                        .put_cell_styled(screen_row, screen_col, cell.ch, style);
+                } else {
+                    self.screen.put_char(
+                        screen_row,
+                        screen_col,
+                        ' ',
+                        Color::Default,
+                        Color::Default,
+                        false,
+                    );
+                }
+            }
+        }
+
+        // Show "[Process exited]" if PTY is dead
+        if term_idx < self.ptys.len() && self.ptys[term_idx].is_dead() {
+            let msg = "[Process exited]";
+            let msg_row = pane_y + pane_h / 2;
+            let msg_col = pane_x + pane_w.saturating_sub(msg.len()) / 2;
+            self.screen
+                .put_str(msg_row, msg_col, msg, Color::Ansi(3), Color::Default, true);
+        }
+    }
+
     /// Convert screen coordinates to buffer (line, byte_col).
     /// Also returns the pane id that was hit. Returns None if out of any text area.
     pub(super) fn screen_to_buffer(&self, col: u16, row: u16) -> Option<(usize, usize)> {
@@ -1314,18 +1401,22 @@ impl Editor {
             if !r.contains(col, row) {
                 continue;
             }
-            if pane_info.buffer_index >= self.buffers.len() {
+            let bi = match pane_info.content {
+                crate::layout::PaneContent::Buffer(bi) => bi,
+                crate::layout::PaneContent::Terminal(_) => continue,
+            };
+            if bi >= self.buffers.len() {
                 continue;
             }
 
             let local_row = (row - r.y) as usize;
             let local_col = (col - r.x) as usize;
 
-            let bs = &self.buffers[pane_info.buffer_index];
+            let bs = &self.buffers[bi];
 
             if bs.wrap_map.is_some() {
                 return self
-                    .screen_to_buffer_wrapped(local_row, local_col, pane_info.buffer_index)
+                    .screen_to_buffer_wrapped(local_row, local_col, bi)
                     .map(|(line, byte_col)| (line, byte_col, pane_info.id));
             }
 

@@ -22,6 +22,9 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
+    pub underline: bool,
+    pub inverse: bool,
+    pub italic: bool,
     /// True for the second column of a double-width character.
     pub wide_cont: bool,
 }
@@ -33,9 +36,23 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            underline: false,
+            inverse: false,
+            italic: false,
             wide_cont: false,
         }
     }
+}
+
+/// Style attributes for a cell (used by put_cell_styled).
+#[derive(Clone, Copy, Debug)]
+pub struct CellStyle {
+    pub fg: Color,
+    pub bg: Color,
+    pub bold: bool,
+    pub underline: bool,
+    pub inverse: bool,
+    pub italic: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +119,9 @@ impl Screen {
                         fg,
                         bg,
                         bold,
+                        underline: false,
+                        inverse: false,
+                        italic: false,
                         wide_cont: false,
                     },
                 );
@@ -113,6 +133,9 @@ impl Screen {
                         fg,
                         bg,
                         bold,
+                        underline: false,
+                        inverse: false,
+                        italic: false,
                         wide_cont: true,
                     },
                 );
@@ -126,6 +149,9 @@ impl Screen {
                         fg,
                         bg,
                         bold,
+                        underline: false,
+                        inverse: false,
+                        italic: false,
                         wide_cont: false,
                     },
                 );
@@ -139,6 +165,75 @@ impl Screen {
                     fg,
                     bg,
                     bold,
+                    underline: false,
+                    inverse: false,
+                    italic: false,
+                    wide_cont: false,
+                },
+            );
+        }
+    }
+
+    pub fn put_cell_styled(&mut self, row: usize, col: usize, ch: char, style: CellStyle) {
+        let w = crate::unicode::char_width(ch);
+        if w == 2 {
+            if col + 1 < self.width {
+                self.put_cell(
+                    row,
+                    col,
+                    Cell {
+                        ch,
+                        fg: style.fg,
+                        bg: style.bg,
+                        bold: style.bold,
+                        underline: style.underline,
+                        inverse: style.inverse,
+                        italic: style.italic,
+                        wide_cont: false,
+                    },
+                );
+                self.put_cell(
+                    row,
+                    col + 1,
+                    Cell {
+                        ch: ' ',
+                        fg: style.fg,
+                        bg: style.bg,
+                        bold: style.bold,
+                        underline: style.underline,
+                        inverse: style.inverse,
+                        italic: style.italic,
+                        wide_cont: true,
+                    },
+                );
+            } else {
+                self.put_cell(
+                    row,
+                    col,
+                    Cell {
+                        ch: ' ',
+                        fg: style.fg,
+                        bg: style.bg,
+                        bold: style.bold,
+                        underline: style.underline,
+                        inverse: style.inverse,
+                        italic: style.italic,
+                        wide_cont: false,
+                    },
+                );
+            }
+        } else {
+            self.put_cell(
+                row,
+                col,
+                Cell {
+                    ch,
+                    fg: style.fg,
+                    bg: style.bg,
+                    bold: style.bold,
+                    underline: style.underline,
+                    inverse: style.inverse,
+                    italic: style.italic,
                     wide_cont: false,
                 },
             );
@@ -201,6 +296,9 @@ impl Screen {
         let mut cur_fg = Color::Default;
         let mut cur_bg = Color::Default;
         let mut cur_bold = false;
+        let mut cur_underline = false;
+        let mut cur_inverse = false;
+        let mut cur_italic = false;
         let full_redraw = self.first_frame;
 
         for row in 0..self.height {
@@ -233,6 +331,30 @@ impl Screen {
                         buf.extend_from_slice(b"\x1b[22m");
                     }
                     cur_bold = cell.bold;
+                }
+                if cell.italic != cur_italic {
+                    if cell.italic {
+                        buf.extend_from_slice(b"\x1b[3m");
+                    } else {
+                        buf.extend_from_slice(b"\x1b[23m");
+                    }
+                    cur_italic = cell.italic;
+                }
+                if cell.underline != cur_underline {
+                    if cell.underline {
+                        buf.extend_from_slice(b"\x1b[4m");
+                    } else {
+                        buf.extend_from_slice(b"\x1b[24m");
+                    }
+                    cur_underline = cell.underline;
+                }
+                if cell.inverse != cur_inverse {
+                    if cell.inverse {
+                        buf.extend_from_slice(b"\x1b[7m");
+                    } else {
+                        buf.extend_from_slice(b"\x1b[27m");
+                    }
+                    cur_inverse = cell.inverse;
                 }
                 if cell.fg != cur_fg {
                     write_fg_color(&mut buf, cell.fg, color_mode);
@@ -618,6 +740,9 @@ mod tests {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            underline: false,
+            inverse: false,
+            italic: false,
             wide_cont: false,
         };
         assert_eq!(a, b);

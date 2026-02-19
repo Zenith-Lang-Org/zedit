@@ -102,6 +102,8 @@ pub struct Config {
     pub languages: Vec<LanguageDef>,
     pub filetree_width: u16,
     pub filetree_ignored: Vec<String>,
+    pub terminal_shell: String,
+    pub terminal_scrollback: usize,
 }
 
 impl Default for Config {
@@ -116,6 +118,8 @@ impl Default for Config {
             languages: builtin_languages(),
             filetree_width: 30,
             filetree_ignored: Vec::new(),
+            terminal_shell: String::new(),
+            terminal_scrollback: 1000,
         }
     }
 }
@@ -171,6 +175,12 @@ impl Config {
                 .iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
+        }
+        if let Some(s) = val.get("terminal_shell").and_then(|v| v.as_str()) {
+            config.terminal_shell = s.to_string();
+        }
+        if let Some(n) = val.get("terminal_scrollback").and_then(|v| v.as_f64()) {
+            config.terminal_scrollback = (n as usize).clamp(100, 100_000);
         }
         // config.json overrides take highest priority
         if let Some(user_langs) = parse_languages_from_config(&val) {
