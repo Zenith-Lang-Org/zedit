@@ -562,8 +562,8 @@ impl Editor {
                 self.resize_active_pane_vertical(2);
             }
 
-            // -- Command Palette --
-            (Key::Char('P'), true, false) => {
+            // -- Command Palette (Ctrl+P / Ctrl+Shift+P) --
+            (Key::Char('p'), true, false) if !ke.shift => {
                 self.palette = Some(palette::Palette::new());
             }
 
