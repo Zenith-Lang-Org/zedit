@@ -12,7 +12,7 @@ mod wrap;
 #[cfg(test)]
 mod tests;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::input::{self, Event, Key, KeyEvent};
@@ -20,6 +20,8 @@ use crate::keybindings::EditorAction;
 use crate::layout::{Direction, LayoutState, PaneContent, PaneId, Rect, SplitDir};
 use crate::pty::{self, POLLIN, PollFd, Pty};
 use crate::render::Screen;
+use crate::session;
+use crate::swap;
 use crate::terminal::{self, ColorMode, Terminal};
 use crate::undo::CursorState;
 use crate::vterm::VTerm;
@@ -136,6 +138,18 @@ pub struct Editor {
     terminal_panel_pane: Option<PaneId>,
     terminal_idx: Option<usize>,
 
+    // Swap file timer
+    swap_timer: std::time::Instant,
+    swap_interval_ms: u64,
+
+    // Stable counter for untitled buffer IDs (NewBuffer01, NewBuffer02, ...)
+    next_untitled_id: usize,
+
+    // Tab bar
+    tab_bar_height: usize,
+    tab_regions: Vec<(usize, usize, usize)>, // (start_col, end_col, buf_idx)
+    tab_scroll_offset: usize,
+
     running: bool,
 }
 
@@ -147,10 +161,12 @@ impl Editor {
         let (w, h) = terminal.size();
 
         let line_numbers = config.line_numbers;
+        let mut initial_buf = BufferState::new_empty(line_numbers);
+        initial_buf.untitled_id = Some(1);
         let layout = LayoutState::new(0);
         let active_pane = layout.first_pane();
         Ok(Editor {
-            buffers: vec![BufferState::new_empty(line_numbers)],
+            buffers: vec![initial_buf],
             active_buffer: 0,
             screen: Screen::new(w as usize, h as usize),
             terminal,
@@ -173,6 +189,12 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            swap_timer: std::time::Instant::now(),
+            swap_interval_ms: 2000,
+            next_untitled_id: 2,
+            tab_bar_height: 1,
+            tab_regions: Vec::new(),
+            tab_scroll_offset: 0,
             running: true,
         })
     }
@@ -212,8 +234,206 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            swap_timer: std::time::Instant::now(),
+            swap_interval_ms: 2000,
+            next_untitled_id: 1,
+            tab_bar_height: 1,
+            tab_regions: Vec::new(),
+            tab_scroll_offset: 0,
             running: true,
         })
+    }
+
+    /// Restore editor from a saved session.
+    pub fn restore_session(sess: session::Session, config: Config) -> Result<Self, String> {
+        let color_mode = terminal::detect_color_mode();
+        let mut terminal = Terminal::new()?;
+        let (w, h) = terminal.size();
+
+        let line_numbers = config.line_numbers;
+        let mut buffers = Vec::new();
+        let mut recovery_msgs = Vec::new();
+
+        for bs in &sess.buffers {
+            if let Some(ref file_path) = bs.file_path {
+                let path = Path::new(file_path);
+                if path.exists() {
+                    // Check for orphaned swap
+                    let swap_status = swap::check_swap(path);
+                    if swap_status == swap::SwapStatus::Orphaned {
+                        // Recover from swap
+                        let swp = swap::swap_path(path);
+                        if let Ok((_header, content)) = swap::read_swap(&swp) {
+                            let mut buf_state = BufferState::from_file(
+                                path,
+                                line_numbers,
+                                &config.theme,
+                                &config.languages,
+                            )
+                            .unwrap_or_else(|_| BufferState::new_empty(line_numbers));
+                            // Replace buffer content with recovered content
+                            let current_len = buf_state.buffer.len();
+                            if current_len > 0 {
+                                buf_state.buffer.delete(0, current_len);
+                            }
+                            buf_state.buffer.insert(0, &content);
+                            // Restore cursor position from session
+                            buf_state.cursors[buf_state.primary].cursor.set_position(
+                                bs.cursor_line,
+                                bs.cursor_col,
+                                &buf_state.buffer,
+                            );
+                            buf_state.scroll_row = bs.scroll_row;
+                            recovery_msgs.push(format!("Recovered: {}", file_path));
+                            swap::remove_swap(path);
+                            buffers.push(buf_state);
+                            continue;
+                        }
+                    }
+                    // Normal file open
+                    match BufferState::from_file(
+                        path,
+                        line_numbers,
+                        &config.theme,
+                        &config.languages,
+                    ) {
+                        Ok(mut buf_state) => {
+                            buf_state.cursors[buf_state.primary].cursor.set_position(
+                                bs.cursor_line,
+                                bs.cursor_col,
+                                &buf_state.buffer,
+                            );
+                            buf_state.scroll_row = bs.scroll_row;
+                            // Clean up any swap that belongs to us
+                            if swap_status == swap::SwapStatus::OwnedByUs {
+                                swap::remove_swap(path);
+                            }
+                            buffers.push(buf_state);
+                        }
+                        Err(_) => {
+                            // File no longer exists or unreadable, skip
+                        }
+                    }
+                }
+            } else {
+                // Untitled buffer — only restore if swap file exists
+                if let Some(idx) = bs.untitled_index {
+                    let swp = swap::swap_path_untitled(idx);
+                    if swp.exists()
+                        && let Ok((_header, content)) = swap::read_swap(&swp)
+                    {
+                        let mut buf_state = BufferState::new_empty(line_numbers);
+                        buf_state.buffer.insert(0, &content);
+                        buf_state.untitled_id = Some(idx);
+                        buf_state.cursors[buf_state.primary].cursor.set_position(
+                            bs.cursor_line,
+                            bs.cursor_col,
+                            &buf_state.buffer,
+                        );
+                        buf_state.scroll_row = bs.scroll_row;
+                        recovery_msgs.push(format!("Recovered NewBuffer{:02}", idx));
+                        swap::remove_swap_untitled(idx);
+                        buffers.push(buf_state);
+                    }
+                    // No swap → buffer was closed properly, don't recreate
+                }
+            }
+        }
+
+        // Also scan for orphaned untitled swap files not tracked by the session
+        let known_ids: Vec<usize> = buffers.iter().filter_map(|bs| bs.untitled_id).collect();
+        for (id, swp_path) in swap::scan_orphaned_untitled() {
+            if known_ids.contains(&id) {
+                continue; // Already recovered from session data
+            }
+            if let Ok((_header, content)) = swap::read_swap(&swp_path) {
+                let mut buf_state = BufferState::new_empty(line_numbers);
+                buf_state.buffer.insert(0, &content);
+                buf_state.untitled_id = Some(id);
+                recovery_msgs.push(format!("Recovered NewBuffer{:02}", id));
+                swap::remove_swap_untitled(id);
+                buffers.push(buf_state);
+            }
+        }
+
+        if buffers.is_empty() {
+            let mut bs = BufferState::new_empty(line_numbers);
+            bs.untitled_id = Some(1);
+            buffers.push(bs);
+        }
+
+        // Compute next untitled ID from restored buffers
+        let max_untitled = buffers
+            .iter()
+            .filter_map(|bs| bs.untitled_id)
+            .max()
+            .unwrap_or(0);
+
+        let active = sess.active_buffer.min(buffers.len().saturating_sub(1));
+        let layout = LayoutState::new(active);
+        let active_pane = layout.first_pane();
+
+        let startup_message = if recovery_msgs.is_empty() {
+            "Session restored".to_string()
+        } else {
+            recovery_msgs.join(", ")
+        };
+
+        Ok(Editor {
+            buffers,
+            active_buffer: active,
+            screen: Screen::new(w as usize, h as usize),
+            terminal,
+            color_mode,
+            config,
+            status_height: 2,
+            layout,
+            active_pane,
+            message: Some(startup_message),
+            message_type: MessageType::Info,
+            quit_confirm: false,
+            clipboard: Clipboard::new(),
+            prompt: None,
+            mouse_dragging: false,
+            help_visible: false,
+            palette: None,
+            filetree: None,
+            filetree_focused: false,
+            vterms: Vec::new(),
+            ptys: Vec::new(),
+            terminal_panel_pane: None,
+            terminal_idx: None,
+            swap_timer: std::time::Instant::now(),
+            swap_interval_ms: 2000,
+            next_untitled_id: max_untitled + 1,
+            tab_bar_height: 1,
+            tab_regions: Vec::new(),
+            tab_scroll_offset: 0,
+            running: true,
+        })
+    }
+
+    /// Check for orphaned swap when opening a single file from CLI.
+    pub fn check_swap_on_open(&mut self, path: &Path) {
+        let status = swap::check_swap(path);
+        if status == swap::SwapStatus::Orphaned {
+            let swp = swap::swap_path(path);
+            if let Ok((_header, content)) = swap::read_swap(&swp) {
+                // Replace buffer content with recovered content
+                let b = self.buf_mut();
+                let current_len = b.buffer.len();
+                if current_len > 0 {
+                    b.buffer.delete(0, current_len);
+                }
+                b.buffer.insert(0, &content);
+                b.cursors[b.primary].cursor.set_position(0, 0, &b.buffer);
+                swap::remove_swap(path);
+                self.set_message("Recovered from swap file!", MessageType::Warning);
+            }
+        } else if status == swap::SwapStatus::Corrupt {
+            // Remove corrupt swap
+            swap::remove_swap(path);
+        }
     }
 
     // -- Active buffer accessors --
@@ -245,6 +465,18 @@ impl Editor {
         &self.config
     }
 
+    /// Get the display name for a buffer (file path or NewBufferNN).
+    fn buffer_display_name(&self, buf_idx: usize) -> String {
+        let bs = &self.buffers[buf_idx];
+        if let Some(path) = bs.buffer.file_path() {
+            shorten_path(path)
+        } else if let Some(id) = bs.untitled_id {
+            format!("[NewBuffer{:02}]", id)
+        } else {
+            "[No Name]".to_string()
+        }
+    }
+
     /// Width of the file tree sidebar (0 if not visible).
     fn sidebar_width(&self) -> u16 {
         self.filetree.as_ref().map_or(0, |ft| ft.width)
@@ -254,11 +486,12 @@ impl Editor {
     fn resolve_layout(&mut self) {
         let (w, h) = self.terminal.size();
         let sidebar_w = self.sidebar_width();
-        let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+        let pane_area_height =
+            (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
         let pane_area_width = w.saturating_sub(sidebar_w);
         self.layout.resolve(Rect {
             x: sidebar_w,
-            y: 0,
+            y: self.tab_bar_height as u16,
             width: pane_area_width,
             height: pane_area_height,
         });
@@ -270,6 +503,29 @@ impl Editor {
             self.layout.pane_content(self.active_pane),
             Some(PaneContent::Terminal(_))
         )
+    }
+
+    /// Ensure the active pane is an editor (buffer) pane, not a terminal.
+    /// If the active pane is a terminal, switch focus to the nearest editor pane.
+    /// Returns the pane ID suitable for opening files.
+    fn ensure_editor_pane(&mut self) -> PaneId {
+        if !self.active_pane_is_terminal() {
+            return self.active_pane;
+        }
+        // Find a buffer pane to switch to
+        let target = self
+            .layout
+            .adjacent_pane(self.active_pane, Direction::Up)
+            .or_else(|| self.layout.adjacent_pane(self.active_pane, Direction::Left))
+            .or_else(|| {
+                self.layout
+                    .adjacent_pane(self.active_pane, Direction::Right)
+            })
+            .or_else(|| self.layout.adjacent_pane(self.active_pane, Direction::Down))
+            .unwrap_or(self.layout.first_pane());
+        self.active_pane = target;
+        self.active_buffer = self.active_buffer_index();
+        target
     }
 
     /// Get the terminal index for the active pane, if it's a terminal.
@@ -322,7 +578,16 @@ impl Editor {
                     self.handle_event(event);
                 }
             }
+
+            // 8. Periodic swap file writes for modified buffers
+            if self.swap_timer.elapsed().as_millis() >= self.swap_interval_ms as u128 {
+                self.save_all_swaps();
+                self.swap_timer = std::time::Instant::now();
+            }
         }
+
+        // On exit: save session and final swap state
+        self.save_session();
 
         Ok(())
     }
@@ -465,10 +730,11 @@ impl Editor {
                 self.resolve_layout();
                 let (w, h) = self.terminal.size();
                 let sidebar_w = self.sidebar_width();
-                let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+                let pane_area_height =
+                    (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
                 let total = Rect {
                     x: sidebar_w,
-                    y: 0,
+                    y: self.tab_bar_height as u16,
                     width: w.saturating_sub(sidebar_w),
                     height: pane_area_height,
                 };
@@ -524,10 +790,11 @@ impl Editor {
             // Resize to get ~70/30 split
             let (w, h) = self.terminal.size();
             let sidebar_w = self.sidebar_width();
-            let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+            let pane_area_height =
+                (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
             let total = Rect {
                 x: sidebar_w,
-                y: 0,
+                y: self.tab_bar_height as u16,
                 width: w.saturating_sub(sidebar_w),
                 height: pane_area_height,
             };
@@ -667,6 +934,11 @@ impl Editor {
                 Event::Mouse(me) => {
                     // Left-click outside the terminal pane switches focus
                     if me.button == crate::input::MouseButton::Left && me.pressed && !me.motion {
+                        // Tab bar click
+                        if (me.row as usize) < self.tab_bar_height {
+                            self.handle_mouse(me);
+                            return;
+                        }
                         if let Some(clicked_pane) = self.pane_at_mouse(me.col, me.row)
                             && clicked_pane != self.active_pane
                         {
@@ -1035,6 +1307,80 @@ impl Editor {
     }
 
     // -----------------------------------------------------------------------
+    // Swap & Session
+    // -----------------------------------------------------------------------
+
+    /// Write swap files for all modified buffers.
+    fn save_all_swaps(&self) {
+        for bs in &self.buffers {
+            if bs.buffer.is_modified() {
+                let content = bs.buffer.text_bytes();
+                if let Some(path) = bs.buffer.file_path() {
+                    let _ = swap::write_swap(path, &content, true);
+                } else if let Some(id) = bs.untitled_id {
+                    let _ = swap::write_swap_untitled(id, &content, true);
+                }
+            }
+        }
+    }
+
+    /// Remove swap file for a specific buffer.
+    fn cleanup_swap(&self, buf_idx: usize) {
+        if buf_idx >= self.buffers.len() {
+            return;
+        }
+        let bs = &self.buffers[buf_idx];
+        if let Some(path) = bs.buffer.file_path() {
+            swap::remove_swap(path);
+        } else if let Some(id) = bs.untitled_id {
+            swap::remove_swap_untitled(id);
+        }
+    }
+
+    /// Save the current session to disk.
+    fn save_session(&self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let mut buf_sessions = Vec::new();
+        for bs in &self.buffers {
+            let file_path = bs
+                .buffer
+                .file_path()
+                .map(|p| p.to_string_lossy().into_owned());
+            let has_swap = bs.buffer.is_modified();
+
+            // Skip empty untitled buffers that were never modified
+            if file_path.is_none() && bs.buffer.is_empty() && !has_swap {
+                continue;
+            }
+
+            let untitled_index = if file_path.is_none() {
+                bs.untitled_id
+            } else {
+                None
+            };
+
+            buf_sessions.push(session::BufferSession {
+                file_path,
+                cursor_line: bs.cursor().line,
+                cursor_col: bs.cursor().col,
+                scroll_row: bs.scroll_row,
+                has_swap,
+                untitled_index,
+            });
+        }
+
+        let sess = session::Session {
+            version: 1,
+            working_dir: cwd,
+            buffers: buf_sessions,
+            active_buffer: self.active_buffer_index(),
+        };
+
+        let _ = session::save_session(&sess);
+    }
+
+    // -----------------------------------------------------------------------
     // Messages
     // -----------------------------------------------------------------------
 
@@ -1103,6 +1449,15 @@ impl Editor {
     }
 
     fn focus_pane(&mut self, dir: Direction) {
+        // Alt+Left with no adjacent pane: focus file tree if visible
+        if dir == Direction::Left
+            && self.layout.adjacent_pane(self.active_pane, dir).is_none()
+            && self.filetree.is_some()
+        {
+            self.filetree_focused = true;
+            return;
+        }
+
         if let Some(target) = self.layout.adjacent_pane(self.active_pane, dir) {
             self.active_pane = target;
             if !self.active_pane_is_terminal() {
@@ -1114,10 +1469,11 @@ impl Editor {
     fn resize_active_pane(&mut self, delta: i16) {
         let (w, h) = self.terminal.size();
         let sidebar_w = self.sidebar_width();
-        let pane_area_height = (h as usize).saturating_sub(self.status_height) as u16;
+        let pane_area_height =
+            (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
         let total = Rect {
             x: sidebar_w,
-            y: 0,
+            y: self.tab_bar_height as u16,
             width: w.saturating_sub(sidebar_w),
             height: pane_area_height,
         };

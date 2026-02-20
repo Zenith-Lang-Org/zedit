@@ -199,6 +199,8 @@ impl Editor {
                     &self.config.languages,
                 ) {
                     Ok(bs) => {
+                        // Ensure we open in an editor pane, not the terminal
+                        self.ensure_editor_pane();
                         let display_name = shorten_path(path);
                         let buf_idx = self.active_buffer_index();
                         // Open in current slot if current buffer is empty, else new buffer
@@ -288,6 +290,8 @@ impl Editor {
                                     Highlighter::new(grammar, theme).with_lang(&lang)
                                 })
                             });
+                        // Remove swap file after successful save
+                        self.cleanup_swap(buf_idx);
                         self.set_message(&format!("Saved: {}", display_name), MessageType::Info);
                     }
                     Err(e) => {

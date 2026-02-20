@@ -77,6 +77,113 @@ impl JsonValue {
             _ => None,
         }
     }
+
+    /// Serialize to compact JSON string.
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        self.write_json(&mut out, None, 0);
+        out
+    }
+
+    /// Serialize to pretty-printed JSON string.
+    pub fn to_json_pretty(&self, indent: usize) -> String {
+        let mut out = String::new();
+        self.write_json(&mut out, Some(indent), 0);
+        out
+    }
+
+    fn write_json(&self, out: &mut String, indent: Option<usize>, depth: usize) {
+        match self {
+            JsonValue::Null => out.push_str("null"),
+            JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            JsonValue::Number(n) => {
+                if *n == (*n as i64) as f64 && n.is_finite() {
+                    // Write integers without decimal point
+                    out.push_str(&(*n as i64).to_string());
+                } else {
+                    out.push_str(&n.to_string());
+                }
+            }
+            JsonValue::String(s) => {
+                out.push('"');
+                escape_json_string(s, out);
+                out.push('"');
+            }
+            JsonValue::Array(items) => {
+                out.push('[');
+                if items.is_empty() {
+                    out.push(']');
+                    return;
+                }
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    if let Some(ind) = indent {
+                        out.push('\n');
+                        push_indent(out, ind, depth + 1);
+                    }
+                    item.write_json(out, indent, depth + 1);
+                }
+                if let Some(ind) = indent {
+                    out.push('\n');
+                    push_indent(out, ind, depth);
+                }
+                out.push(']');
+            }
+            JsonValue::Object(pairs) => {
+                out.push('{');
+                if pairs.is_empty() {
+                    out.push('}');
+                    return;
+                }
+                for (i, (key, val)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    if let Some(ind) = indent {
+                        out.push('\n');
+                        push_indent(out, ind, depth + 1);
+                    }
+                    out.push('"');
+                    escape_json_string(key, out);
+                    out.push('"');
+                    out.push(':');
+                    if indent.is_some() {
+                        out.push(' ');
+                    }
+                    val.write_json(out, indent, depth + 1);
+                }
+                if let Some(ind) = indent {
+                    out.push('\n');
+                    push_indent(out, ind, depth);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+fn escape_json_string(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+}
+
+fn push_indent(out: &mut String, indent: usize, depth: usize) {
+    for _ in 0..indent * depth {
+        out.push(' ');
+    }
 }
 
 struct Parser<'a> {
@@ -576,5 +683,45 @@ mod tests {
         assert_eq!(inner.len(), 1);
         let repo = val.get("repository").unwrap();
         assert!(repo.get("comments").is_some());
+    }
+
+    #[test]
+    fn test_to_json_roundtrip() {
+        let original = r#"{"name":"test","count":42,"active":true,"items":[1,2,3],"nothing":null}"#;
+        let val = JsonValue::parse(original).unwrap();
+        let output = val.to_json();
+        let reparsed = JsonValue::parse(&output).unwrap();
+        assert_eq!(val, reparsed);
+    }
+
+    #[test]
+    fn test_to_json_pretty() {
+        let val = JsonValue::Object(vec![
+            ("key".into(), JsonValue::String("value".into())),
+            ("num".into(), JsonValue::Number(42.0)),
+        ]);
+        let pretty = val.to_json_pretty(2);
+        assert!(pretty.contains('\n'));
+        assert!(pretty.contains("  \"key\""));
+        let reparsed = JsonValue::parse(&pretty).unwrap();
+        assert_eq!(val, reparsed);
+    }
+
+    #[test]
+    fn test_to_json_escapes() {
+        let val = JsonValue::String("line1\nline2\ttab\\quote\"end".into());
+        let json = val.to_json();
+        assert_eq!(json, r#""line1\nline2\ttab\\quote\"end""#);
+        let reparsed = JsonValue::parse(&json).unwrap();
+        assert_eq!(val, reparsed);
+    }
+
+    #[test]
+    fn test_to_json_empty_collections() {
+        let arr = JsonValue::Array(vec![]);
+        assert_eq!(arr.to_json(), "[]");
+
+        let obj = JsonValue::Object(vec![]);
+        assert_eq!(obj.to_json(), "{}");
     }
 }

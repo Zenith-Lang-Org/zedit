@@ -559,7 +559,13 @@ impl FileTree {
     // Rendering
     // -----------------------------------------------------------------------
 
-    pub fn render(&mut self, screen: &mut Screen, height: usize, is_focused: bool) {
+    pub fn render(
+        &mut self,
+        screen: &mut Screen,
+        height: usize,
+        is_focused: bool,
+        y_offset: usize,
+    ) {
         let w = self.width as usize;
         if w == 0 || height == 0 {
             return;
@@ -581,12 +587,19 @@ impl FileTree {
         // Row 0: title bar
         let title = &self.root.name;
         for col in 0..w.saturating_sub(1) {
-            screen.put_char(0, col, ' ', title_fg, title_bg, false);
+            screen.put_char(y_offset, col, ' ', title_fg, title_bg, false);
         }
         let display_title: String = title.chars().take(w.saturating_sub(2)).collect();
-        screen.put_str(0, 1, &display_title, title_fg, title_bg, true);
+        screen.put_str(y_offset, 1, &display_title, title_fg, title_bg, true);
         // Right border
-        screen.put_char(0, w - 1, '\u{2502}', border_fg, Color::Default, false);
+        screen.put_char(
+            y_offset,
+            w - 1,
+            '\u{2502}',
+            border_fg,
+            Color::Default,
+            false,
+        );
 
         // Determine which items to render based on mode
         let items: Vec<usize> = if self.mode == TreeMode::Filter {
@@ -596,7 +609,7 @@ impl FileTree {
         };
 
         // Calculate available rows for tree content
-        let tree_start_row = 1;
+        let tree_start_row = y_offset + 1;
         let prompt_rows = match self.mode {
             TreeMode::Filter
             | TreeMode::PromptNewFile
@@ -605,7 +618,7 @@ impl FileTree {
             | TreeMode::ConfirmDelete => 1,
             _ => 0,
         };
-        let tree_height = height.saturating_sub(tree_start_row + prompt_rows);
+        let tree_height = height.saturating_sub(1 + prompt_rows);
 
         // Adjust scroll
         if !items.is_empty() {
@@ -763,7 +776,7 @@ impl FileTree {
 
         // Fill remaining rows (if sidebar is taller)
         let used_rows = tree_start_row + tree_height + prompt_rows;
-        for row in used_rows..height {
+        for row in used_rows..(y_offset + height) {
             for col in 0..w.saturating_sub(1) {
                 screen.put_char(row, col, ' ', file_fg, tree_bg, false);
             }

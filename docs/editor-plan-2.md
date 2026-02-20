@@ -18,7 +18,7 @@ Phases reordered by dependency graph and complexity (quick wins first, heavy pha
 | 6  | 16    | Soft Word Wrap       | 600    | —                 | DONE   |
 | 7  | 11    | File Tree Sidebar    | 750    | Phase 8           | DONE   |
 | 8  | 9     | Integrated Terminal  | 1,450  | Phase 8           | DONE   |
-| 9  | 14    | Session + Swap Files | 650    | Phase 8           |        |
+| 9  | 14    | Session + Swap Files | 650    | Phase 8           | DONE   |
 | 10 | 17    | LSP Client           | 1,650  | Phase 9           |        |
 | 11 | 19    | Diff / Merge View    | 650    | Phase 8 + 13      |        |
 | 12 | 20    | Minimap              | 330    | Phase 8           |        |
@@ -1082,6 +1082,25 @@ No new keybindings needed — this phase adds visual representation to existing 
 | Mouse click handling | ~60   |
 | Editor integration   | ~40   |
 
+### Implementation Notes (DONE)
+
+Tab bar implemented inline in `src/editor/view.rs` (`render_tab_bar()`) and `src/editor/editing.rs` (mouse click handling) rather than in a separate `src/editor/tabs.rs` file.
+
+**Deviations from plan:**
+- No separate `TabBar` or `TabInfo` structs — tab state is computed on-the-fly from `buffers` during rendering. `tab_bar_height` and `tab_regions` fields on `Editor` track the tab bar layout.
+- Modified indicator uses ` [+] ` suffix instead of `●` dot.
+- No middle-click to close (not implemented).
+- Overflow scroll uses `" < "` / `" > "` arrow labels (3 cols each) instead of `◀` / `▶`.
+- `tab_scroll_offset: usize` field on `Editor` tracks the first visible tab index (default 0).
+- Auto-scroll: before rendering, the active buffer is guaranteed visible by adjusting `tab_scroll_offset`.
+- Arrow click regions use sentinel values in `tab_regions`: `usize::MAX` for left arrow, `usize::MAX - 1` for right arrow.
+- Separator between tabs uses `" │ "` (3 cols) with dim color.
+
+**Files changed:**
+- `src/editor/mod.rs` — `tab_bar_height`, `tab_regions`, `tab_scroll_offset` fields in `Editor` struct, initialized in all 3 constructors.
+- `src/editor/view.rs` — `render_tab_bar()` with scroll support, pre-computes labels/widths, renders arrows when tabs overflow.
+- `src/editor/editing.rs` — Tab bar mouse click handler with sentinel detection for scroll arrows.
+
 ---
 
 ## Phase 11: File Tree Sidebar
@@ -1717,6 +1736,30 @@ Reading and writing is straightforward with `std::io::Read/Write` — no externa
 | `session.rs` path hashing| ~30   |
 | Recovery dialog UI       | ~50   |
 | Editor integration       | ~50   |
+
+### Implementation Notes (DONE)
+
+Implemented in `src/swap.rs` (357 lines) and `src/session.rs` (246 lines), totalling ~603 lines. Integration spread across `src/editor/mod.rs` (3 constructors, `run()` loop, `save_all_swaps()`, `cleanup_swap()`, `save_session()`, `check_swap_on_open()`).
+
+**Deviations from plan:**
+- `SwapStatus` uses `OwnedByUs` instead of `OwnedByPid(u32)` and `Orphaned` without carrying the full header. Simpler enum since the recovery flow doesn't need the PID externally.
+- `Session` struct omits `LayoutSession` and `TerminalSession` — layout/terminal state is not persisted in this iteration (only buffer metadata: file paths, cursor positions, scroll offsets, untitled IDs).
+- `BufferSession.file_path` is `Option<String>` rather than `Option<PathBuf>` to simplify JSON serialization.
+- `BufferSession.scroll_col` was dropped — only `scroll_row` is persisted.
+- Recovery is automatic on startup (no interactive Y/N/D dialog). Orphaned swaps are silently recovered and a message is shown (e.g. "Recovered: /path/to/file"). Corrupt swaps are deleted.
+- Quit behavior still confirms on unsaved changes (`Ctrl+Q` twice). The plan's Notepad++ "always hibernates" model was relaxed — swap files are written on quit as recovery data, but the user is still warned.
+- Untitled buffer swaps use `NewBufferNN.swp` naming (matching the editor's `NewBuffer01` display convention) instead of `untitled-N.swp`.
+- Swap file timer in the main loop writes every 2 seconds (`swap_interval_ms: 2000`) rather than tracking edit counts.
+- `json_parser.rs` gained `to_json_pretty()` for human-readable session JSON output.
+- `scan_orphaned_untitled()` added to discover orphaned untitled swaps not tracked by the session file (crash recovery).
+- libc bindings (`getpid`, `kill`, `time`) are declared in a local `mod libc` inside `swap.rs` — consistent with the zero-deps constraint.
+
+**Files changed:**
+- `src/swap.rs` (new) — `SwapHeader`, `SwapStatus`, `swap_path()`, `swap_path_untitled()`, `write_swap()`, `read_swap()`, `remove_swap()`, `check_swap()`, `scan_orphaned_untitled()`, PID/timestamp via libc FFI, 5 unit tests.
+- `src/session.rs` (new) — `Session`, `BufferSession`, `session_path()` (FNV-1a hash), `save_session()`, `load_session()`, `delete_session()`, JSON serialization via `JsonValue`, XDG state directory, 3 unit tests.
+- `src/syntax/json_parser.rs` — Added `to_json()` and `to_json_pretty()` methods to `JsonValue`.
+- `src/editor/mod.rs` — `swap_timer`, `swap_interval_ms` fields. `restore_session()` constructor with swap recovery. `save_all_swaps()`, `cleanup_swap()`, `save_session()`, `check_swap_on_open()`. Periodic swap writes in `run()` loop.
+- `src/main.rs` — Session restore on startup, `--restore` flag integration.
 
 ---
 

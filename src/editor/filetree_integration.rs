@@ -181,6 +181,11 @@ impl Editor {
                 self.filetree_focused = false;
                 true
             }
+            // Alt+Right / Alt+Left/Up/Down: leave file tree, focus editor pane
+            (Key::Right | Key::Left | Key::Up | Key::Down, false, true) => {
+                self.filetree_focused = false;
+                true
+            }
             _ => false,
         }
     }
@@ -300,6 +305,9 @@ impl Editor {
 
     /// Open a file from the tree in the active pane, reusing an existing buffer if possible.
     pub(super) fn open_file_from_tree(&mut self, path: &Path) {
+        // Ensure we open in an editor pane, not the terminal
+        self.ensure_editor_pane();
+
         // Canonicalize for comparison
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 

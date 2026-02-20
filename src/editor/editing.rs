@@ -372,6 +372,7 @@ impl Editor {
         match self.buf().buffer.save() {
             Ok(()) => {
                 let cs = self.cursor_state();
+                let buf_idx = self.active_buffer_index();
                 let b = self.buf_mut();
                 b.buffer.mark_saved();
                 b.undo_stack.mark_saved(cs);
@@ -381,6 +382,8 @@ impl Editor {
                 {
                     gi.reload_head(&path);
                 }
+                // Remove swap file after successful save
+                self.cleanup_swap(buf_idx);
                 self.set_message("Saved!", MessageType::Info);
             }
             Err(e) => {
@@ -400,6 +403,8 @@ impl Editor {
             );
             return;
         }
+        // Write final swap files for modified buffers before quitting
+        self.save_all_swaps();
         self.running = false;
     }
 
@@ -408,12 +413,15 @@ impl Editor {
     // -----------------------------------------------------------------------
 
     pub(super) fn new_buffer(&mut self) {
-        self.buffers
-            .push(BufferState::new_empty(self.config.line_numbers));
+        let mut bs = BufferState::new_empty(self.config.line_numbers);
+        let id = self.next_untitled_id;
+        self.next_untitled_id += 1;
+        bs.untitled_id = Some(id);
+        self.buffers.push(bs);
         let new_idx = self.buffers.len() - 1;
         self.layout.set_pane_buffer(self.active_pane, new_idx);
         self.active_buffer = new_idx;
-        self.set_message("New buffer", MessageType::Info);
+        self.set_message(&format!("NewBuffer{:02}", id), MessageType::Info);
     }
 
     pub(super) fn close_buffer(&mut self) {
@@ -428,9 +436,16 @@ impl Editor {
         }
         self.quit_confirm = false;
 
+        // Remove swap file for the closed buffer
+        self.cleanup_swap(buf_idx);
+
         if self.buffers.len() == 1 {
-            // Last buffer — just reset to empty
-            self.buffers[0] = BufferState::new_empty(self.config.line_numbers);
+            // Last buffer — just reset to empty with a new untitled ID
+            let mut bs = BufferState::new_empty(self.config.line_numbers);
+            let id = self.next_untitled_id;
+            self.next_untitled_id += 1;
+            bs.untitled_id = Some(id);
+            self.buffers[0] = bs;
             self.active_buffer = 0;
             self.layout.set_pane_buffer(self.active_pane, 0);
             self.set_message("Buffer closed", MessageType::Info);
@@ -451,12 +466,7 @@ impl Editor {
             let next = (current + 1) % self.buffers.len();
             self.layout.set_pane_buffer(self.active_pane, next);
             self.active_buffer = next;
-            let name = self
-                .buf()
-                .buffer
-                .file_path()
-                .map(shorten_path)
-                .unwrap_or_else(|| "[No Name]".to_string());
+            let name = self.buffer_display_name(next);
             self.set_message(&format!("Buffer: {}", name), MessageType::Info);
         }
     }
@@ -471,12 +481,7 @@ impl Editor {
             };
             self.layout.set_pane_buffer(self.active_pane, prev);
             self.active_buffer = prev;
-            let name = self
-                .buf()
-                .buffer
-                .file_path()
-                .map(shorten_path)
-                .unwrap_or_else(|| "[No Name]".to_string());
+            let name = self.buffer_display_name(prev);
             self.set_message(&format!("Buffer: {}", name), MessageType::Info);
         }
     }
@@ -486,6 +491,36 @@ impl Editor {
     // -----------------------------------------------------------------------
 
     pub(super) fn handle_mouse(&mut self, me: MouseEvent) {
+        // Tab bar click detection (row 0)
+        if (me.row as usize) < self.tab_bar_height
+            && me.button == MouseButton::Left
+            && me.pressed
+            && !me.motion
+        {
+            let click_col = me.col as usize;
+            for &(start, end, buf_idx) in &self.tab_regions {
+                if click_col >= start && click_col < end {
+                    if buf_idx == usize::MAX {
+                        // Left arrow: scroll tabs left
+                        self.tab_scroll_offset = self.tab_scroll_offset.saturating_sub(1);
+                        return;
+                    } else if buf_idx == usize::MAX - 1 {
+                        // Right arrow: scroll tabs right
+                        self.tab_scroll_offset =
+                            (self.tab_scroll_offset + 1).min(self.buffers.len().saturating_sub(1));
+                        return;
+                    } else if buf_idx < self.buffers.len() {
+                        // Ensure we switch in an editor pane (not a terminal pane)
+                        self.ensure_editor_pane();
+                        self.layout.set_pane_buffer(self.active_pane, buf_idx);
+                        self.active_buffer = buf_idx;
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+
         let sidebar_w = self.sidebar_width();
 
         // Handle mouse events in the sidebar area
@@ -493,10 +528,11 @@ impl Editor {
             match me.button {
                 MouseButton::Left if me.pressed && !me.motion => {
                     self.filetree_focused = true;
-                    // Row 0 is the title bar; tree content starts at row 1
-                    if me.row > 0 {
+                    // Title bar is at row tab_bar_height; tree content starts below
+                    let tree_content_start = (self.tab_bar_height + 1) as u16;
+                    if me.row >= tree_content_start {
                         let open_path = self.filetree.as_mut().and_then(|ft| {
-                            let content_row = (me.row - 1) as usize;
+                            let content_row = (me.row - tree_content_start) as usize;
                             if ft.select_by_row(content_row) {
                                 ft.enter()
                             } else {

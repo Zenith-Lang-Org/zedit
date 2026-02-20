@@ -9,6 +9,8 @@ mod keybindings;
 mod layout;
 mod pty;
 mod render;
+mod session;
+mod swap;
 mod syntax;
 mod terminal;
 mod undo;
@@ -16,7 +18,7 @@ pub mod unicode;
 mod vterm;
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const VERSION: &str = "0.1.0";
 
@@ -65,15 +67,60 @@ fn main() {
 
     let config = config::Config::load();
 
-    let mut editor = if args.len() > 1 {
-        editor::Editor::open(Path::new(&args[1]), config)
+    let has_file_arg = args.len() > 1;
+
+    let mut editor = if has_file_arg {
+        let path = Path::new(&args[1]);
+        let mut ed = editor::Editor::open(path, config).unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        });
+        // Check for orphaned swap on the opened file
+        ed.check_swap_on_open(path);
+        ed
     } else {
-        editor::Editor::new(config)
-    }
-    .unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    });
+        // Try to restore session
+        let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        match session::load_session(&cwd) {
+            Some(sess) => editor::Editor::restore_session(sess, config).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }),
+            None => {
+                // No session, but check for orphaned untitled swap files
+                let orphans = swap::scan_orphaned_untitled();
+                if !orphans.is_empty() {
+                    // Build a minimal session to trigger recovery
+                    let mut buf_sessions = Vec::new();
+                    for (id, _) in &orphans {
+                        buf_sessions.push(session::BufferSession {
+                            file_path: None,
+                            cursor_line: 0,
+                            cursor_col: 0,
+                            scroll_row: 0,
+                            has_swap: true,
+                            untitled_index: Some(*id),
+                        });
+                    }
+                    let sess = session::Session {
+                        version: 1,
+                        working_dir: cwd,
+                        buffers: buf_sessions,
+                        active_buffer: 0,
+                    };
+                    editor::Editor::restore_session(sess, config).unwrap_or_else(|e| {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    })
+                } else {
+                    editor::Editor::new(config).unwrap_or_else(|e| {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    })
+                }
+            }
+        }
+    };
 
     if let Err(e) = editor.run() {
         eprintln!("Error: {}", e);

@@ -281,7 +281,7 @@ impl Buffer {
         }
     }
 
-    fn text_bytes(&self) -> Vec<u8> {
+    pub fn text_bytes(&self) -> Vec<u8> {
         let total = self.len();
         let mut result = Vec::with_capacity(total);
         result.extend_from_slice(&self.data[..self.gap_start]);

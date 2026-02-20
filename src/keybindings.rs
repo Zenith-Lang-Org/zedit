@@ -634,7 +634,6 @@ mod tests {
         assert_eq!(km.lookup(&ke), Some(EditorAction::Save));
     }
 
-
     #[test]
     fn test_default_keymap_toggle_terminal() {
         let km = KeyMap::defaults();

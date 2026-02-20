@@ -151,10 +151,19 @@ impl Editor {
         let screen_width = self.screen.width();
         let screen_height = self.screen.height();
 
+        // Render tab bar at row 0
+        self.render_tab_bar(screen_width);
+
         // Render file tree sidebar if visible
         if let Some(ref mut ft) = self.filetree {
-            let sidebar_height = screen_height.saturating_sub(self.status_height);
-            ft.render(&mut self.screen, sidebar_height, self.filetree_focused);
+            let sidebar_height =
+                screen_height.saturating_sub(self.status_height + self.tab_bar_height);
+            ft.render(
+                &mut self.screen,
+                sidebar_height,
+                self.filetree_focused,
+                self.tab_bar_height,
+            );
         }
 
         // Render each pane
@@ -193,12 +202,9 @@ impl Editor {
             let status_bg = Color::Ansi(7); // white
 
             // Build status text from active pane's buffer
+            let buf_idx = self.active_buffer_index();
+            let filename = self.buffer_display_name(buf_idx);
             let b = self.buf();
-            let filename = b
-                .buffer
-                .file_path()
-                .map(shorten_path)
-                .unwrap_or_else(|| "[No Name]".to_string());
             let modified_marker = if b.buffer.is_modified() { " [+]" } else { "" };
             let color_str = match self.color_mode {
                 ColorMode::TrueColor => "TrueColor",
@@ -417,6 +423,172 @@ impl Editor {
             }
         }
         terminal::flush();
+    }
+
+    /// Render the tab bar at row 0 with scroll arrow support.
+    fn render_tab_bar(&mut self, screen_width: usize) {
+        let tab_bg = Color::Color256(236);
+        let active_fg = Color::Ansi(0); // black
+        let active_bg = Color::Ansi(7); // white
+        let inactive_fg = Color::Color256(250); // dim
+        let arrow_fg = Color::Ansi(6); // cyan for arrows
+        let separator = " \u{2502} "; // " │ "
+
+        // Fill row 0 with background
+        for col in 0..screen_width {
+            self.screen
+                .put_char(0, col, ' ', inactive_fg, tab_bg, false);
+        }
+
+        let active_buf = self.active_buffer_index();
+        let buf_count = self.buffers.len();
+
+        // Pre-compute all tab labels and widths
+        let mut tab_labels: Vec<(String, usize, usize)> = Vec::with_capacity(buf_count);
+        for i in 0..buf_count {
+            let name = self.buffer_display_name(i);
+            let modified = self.buffers[i].buffer.is_modified();
+            let label = if modified {
+                format!(" {} [+] ", name)
+            } else {
+                format!(" {} ", name)
+            };
+            let width = crate::unicode::str_width(&label);
+            tab_labels.push((label, width, i));
+        }
+
+        // Auto-scroll to ensure active buffer is visible
+        if active_buf < self.tab_scroll_offset {
+            self.tab_scroll_offset = active_buf;
+        }
+
+        // Clamp scroll offset
+        if self.tab_scroll_offset >= buf_count {
+            self.tab_scroll_offset = buf_count.saturating_sub(1);
+        }
+
+        // Try rendering; if active tab doesn't fit, increment offset and retry
+        loop {
+            let has_left_arrow = self.tab_scroll_offset > 0;
+            let left_arrow_width: usize = if has_left_arrow { 3 } else { 0 };
+
+            let mut col = left_arrow_width;
+            let mut active_rendered = false;
+
+            // Check if tabs starting from tab_scroll_offset fit the active tab
+            for (i, &(_, tw, _)) in tab_labels.iter().enumerate().skip(self.tab_scroll_offset) {
+                if i > self.tab_scroll_offset {
+                    col += 3; // separator
+                }
+                // Reserve space for right arrow if there are more tabs after this
+                let remaining_tabs = i + 1 < buf_count;
+                let right_reserve = if remaining_tabs { 3 } else { 0 };
+
+                if col + tw + right_reserve > screen_width && remaining_tabs {
+                    // This tab doesn't fit and there are more
+                    break;
+                }
+                if col + tw > screen_width {
+                    break;
+                }
+                col += tw;
+                if i == active_buf {
+                    active_rendered = true;
+                }
+            }
+
+            if active_rendered || self.tab_scroll_offset >= active_buf {
+                break;
+            }
+            // Active tab wasn't rendered, scroll right
+            self.tab_scroll_offset += 1;
+        }
+
+        let has_left_arrow = self.tab_scroll_offset > 0;
+
+        let mut col = 0;
+        let mut regions = Vec::new();
+
+        // Render left arrow if scrolled
+        if has_left_arrow {
+            self.screen.put_str(0, 0, " < ", arrow_fg, tab_bg, true);
+            regions.push((0, 3, usize::MAX)); // sentinel for left arrow
+            col = 3;
+        }
+
+        let mut has_right_arrow = false;
+
+        for (i, (label, label_width, buf_idx)) in
+            tab_labels.iter().enumerate().skip(self.tab_scroll_offset)
+        {
+            let label_width = *label_width;
+            let buf_idx = *buf_idx;
+            // Add separator between tabs
+            if i > self.tab_scroll_offset {
+                if col + 3 <= screen_width {
+                    self.screen
+                        .put_str(0, col, separator, Color::Color256(240), tab_bg, false);
+                    col += 3;
+                } else {
+                    break;
+                }
+            }
+
+            // Check if this tab fits; if not and there are more tabs, show right arrow
+            let remaining_tabs = i + 1 < buf_count;
+            if col + label_width > screen_width.saturating_sub(if remaining_tabs { 3 } else { 0 })
+                && remaining_tabs
+            {
+                // Doesn't fit, render right arrow
+                has_right_arrow = true;
+                break;
+            }
+
+            if col + label_width > screen_width {
+                // Last tab, truncate what fits
+                let available = screen_width.saturating_sub(col);
+                if available == 0 {
+                    break;
+                }
+                let truncated: String = label.chars().take(available).collect();
+                let start_col = col;
+                if buf_idx == active_buf {
+                    self.screen
+                        .put_str(0, col, &truncated, active_fg, active_bg, true);
+                } else {
+                    self.screen
+                        .put_str(0, col, &truncated, inactive_fg, tab_bg, false);
+                }
+                col += available;
+                regions.push((start_col, col, buf_idx));
+                break;
+            }
+
+            let start_col = col;
+            if buf_idx == active_buf {
+                self.screen
+                    .put_str(0, col, label, active_fg, active_bg, true);
+            } else {
+                self.screen
+                    .put_str(0, col, label, inactive_fg, tab_bg, false);
+            }
+            col += label_width;
+            regions.push((start_col, col, buf_idx));
+        }
+
+        // Render right arrow if there are more tabs
+        if has_right_arrow {
+            let arrow_start = screen_width.saturating_sub(3);
+            // Clear any partial tab content under the arrow
+            for c in arrow_start..screen_width {
+                self.screen.put_char(0, c, ' ', arrow_fg, tab_bg, false);
+            }
+            self.screen
+                .put_str(0, arrow_start, " > ", arrow_fg, tab_bg, true);
+            regions.push((arrow_start, screen_width, usize::MAX - 1)); // sentinel for right arrow
+        }
+
+        self.tab_regions = regions;
     }
 
     /// Render a single editor pane within the given rectangle.
@@ -998,6 +1170,38 @@ impl Editor {
                         border_bg,
                         false,
                     );
+                }
+            }
+
+            // Check if there's a pane below (sharing a border row)
+            let bottom_border_row = (r.y + r.height) as usize;
+            let has_bottom_neighbor = panes
+                .iter()
+                .any(|other| other.id != pane.id && other.rect.y as usize == bottom_border_row + 1);
+
+            if has_bottom_neighbor {
+                // Draw horizontal border ─ on the row below this pane
+                let start_col = r.x as usize;
+                let end_col = (r.x + r.width) as usize;
+                for col in start_col..end_col {
+                    // Check if a vertical border already exists here → draw ┼
+                    let has_vertical = panes.iter().any(|other| {
+                        let rc = other.rect;
+                        let right_col = (rc.x + rc.width) as usize;
+                        right_col == col
+                            && panes.iter().any(|adj| {
+                                adj.id != other.id && adj.rect.x as usize == right_col + 1
+                            })
+                            && (rc.y as usize) <= bottom_border_row
+                            && ((rc.y + rc.height) as usize) > bottom_border_row
+                    });
+                    let ch = if has_vertical {
+                        '\u{253C}' // ┼
+                    } else {
+                        '\u{2500}' // ─
+                    };
+                    self.screen
+                        .put_char(bottom_border_row, col, ch, fg, border_bg, false);
                 }
             }
         }

@@ -46,6 +46,9 @@ pub(super) struct BufferState {
     pub(super) wrap_map: Option<super::wrap::WrapMap>,
     /// Visual row offset within the first visible line when wrapping.
     pub(super) scroll_visual_offset: usize,
+    /// Stable ID for untitled buffers (None for file-backed buffers).
+    /// Used for swap file naming: NewBuffer01.swp, NewBuffer02.swp, etc.
+    pub(super) untitled_id: Option<usize>,
 }
 
 impl BufferState {
@@ -72,6 +75,7 @@ impl BufferState {
             git_info: None,
             wrap_map: None,
             scroll_visual_offset: 0,
+            untitled_id: None,
         }
     }
 
@@ -110,6 +114,7 @@ impl BufferState {
             git_info,
             wrap_map: None,
             scroll_visual_offset: 0,
+            untitled_id: None,
         })
     }
 
