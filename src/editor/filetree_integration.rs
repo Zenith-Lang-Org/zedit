@@ -350,6 +350,9 @@ impl Editor {
                 }
                 self.filetree_focused = false;
                 self.set_message(&format!("Opened: {}", display), MessageType::Info);
+                // Notify LSP about newly opened file
+                let notify_idx = self.active_buffer_index();
+                self.lsp_notify_open(notify_idx);
             }
             Err(e) => {
                 self.set_message(&format!("Error: {}", e), MessageType::Error);

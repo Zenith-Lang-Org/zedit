@@ -105,6 +105,7 @@ pub struct Config {
     pub terminal_shell: String,
     pub terminal_scrollback: usize,
     pub keybindings: crate::keybindings::KeyMap,
+    pub lsp_servers: Vec<(String, crate::lsp::LspServerConfig)>,
 }
 
 impl Default for Config {
@@ -122,6 +123,7 @@ impl Default for Config {
             terminal_shell: String::new(),
             terminal_scrollback: 1000,
             keybindings: crate::keybindings::KeyMap::defaults(),
+            lsp_servers: Vec::new(),
         }
     }
 }
@@ -187,6 +189,30 @@ impl Config {
         // Keybinding overrides
         let keybindings_val = val.get("keybindings");
         config.keybindings = crate::keybindings::KeyMap::new(keybindings_val);
+
+        // LSP server configuration
+        if let Some(lsp_obj) = val.get("lsp").and_then(|v| v.as_object()) {
+            for (lang, server_val) in lsp_obj {
+                if let Some(command) = server_val.get("command").and_then(|v| v.as_str()) {
+                    let args = server_val
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    config.lsp_servers.push((
+                        lang.clone(),
+                        crate::lsp::LspServerConfig {
+                            command: command.to_string(),
+                            args,
+                        },
+                    ));
+                }
+            }
+        }
 
         // config.json overrides take highest priority
         if let Some(user_langs) = parse_languages_from_config(&val) {

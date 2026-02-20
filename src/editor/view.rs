@@ -260,15 +260,36 @@ impl Editor {
                 ""
             };
 
+            // LSP diagnostic count
+            let diag_indicator = {
+                let bs = &self.buffers[buf_idx];
+                let errors = bs
+                    .diagnostics
+                    .iter()
+                    .filter(|(_, s, _)| *s == crate::lsp::protocol::DiagnosticSeverity::Error)
+                    .count();
+                let warnings = bs
+                    .diagnostics
+                    .iter()
+                    .filter(|(_, s, _)| *s == crate::lsp::protocol::DiagnosticSeverity::Warning)
+                    .count();
+                if errors > 0 || warnings > 0 {
+                    format!(" E:{} W:{}", errors, warnings)
+                } else {
+                    String::new()
+                }
+            };
+
             let left = format!(
-                " {}{}{}{}{}{}{}",
+                " {}{}{}{}{}{}{}{}",
                 tree_indicator,
                 pane_indicator,
                 buf_indicator,
                 filename,
                 modified_marker,
                 regex_indicator,
-                multi_cursor_indicator
+                multi_cursor_indicator,
+                diag_indicator
             );
             let right = format!("{} | {} ", position, color_str);
 
@@ -746,6 +767,36 @@ impl Editor {
                     })
                 };
 
+                // Collect diagnostic severity for this line
+                let line_diag_severity = self.buffers[buffer_idx]
+                    .diagnostics
+                    .iter()
+                    .filter(|(r, _, _)| {
+                        r.start.line as usize <= file_line && r.end.line as usize >= file_line
+                    })
+                    .map(|(_, sev, _)| *sev)
+                    .min_by_key(|s| *s as u8); // Error < Warning < Info < Hint
+
+                // Override gutter indicator if there's a diagnostic on this line
+                if let Some(sev) = line_diag_severity {
+                    let (marker, marker_fg) = match sev {
+                        crate::lsp::protocol::DiagnosticSeverity::Error => ('E', Color::Ansi(1)),
+                        crate::lsp::protocol::DiagnosticSeverity::Warning => ('W', Color::Ansi(3)),
+                        _ => ('I', Color::Ansi(6)),
+                    };
+                    // Put diagnostic marker at the leftmost gutter position
+                    if gutter_width > 0 {
+                        self.screen.put_char(
+                            screen_row,
+                            pane_x,
+                            marker,
+                            marker_fg,
+                            Color::Default,
+                            true,
+                        );
+                    }
+                }
+
                 let mut display_col: usize = 0;
                 let mut byte_offset_in_line: usize = 0;
                 for ch in line_text.chars() {
@@ -784,8 +835,45 @@ impl Editor {
                                 None => (Color::Default, Color::Default, false),
                             }
                         };
-                        self.screen
-                            .put_char(screen_row, screen_col, ch, fg, bg, bold);
+
+                        // Check if this character is within a diagnostic range
+                        let diag_underline = self.buffers[buffer_idx]
+                            .diagnostics
+                            .iter()
+                            .find(|(r, _, _)| {
+                                let in_start = file_line > r.start.line as usize
+                                    || (file_line == r.start.line as usize
+                                        && byte_offset_in_line >= r.start.character as usize);
+                                let in_end = file_line < r.end.line as usize
+                                    || (file_line == r.end.line as usize
+                                        && byte_offset_in_line < r.end.character as usize);
+                                in_start && in_end
+                            })
+                            .map(|(_, sev, _)| *sev);
+
+                        if let Some(sev) = diag_underline {
+                            let underline_fg = match sev {
+                                crate::lsp::protocol::DiagnosticSeverity::Error => Color::Ansi(1),
+                                crate::lsp::protocol::DiagnosticSeverity::Warning => Color::Ansi(3),
+                                _ => fg,
+                            };
+                            self.screen.put_cell_styled(
+                                screen_row,
+                                screen_col,
+                                ch,
+                                crate::render::CellStyle {
+                                    fg: if is_selected { fg } else { underline_fg },
+                                    bg,
+                                    bold,
+                                    underline: true,
+                                    inverse: false,
+                                    italic: false,
+                                },
+                            );
+                        } else {
+                            self.screen
+                                .put_char(screen_row, screen_col, ch, fg, bg, bold);
+                        }
                     }
                     byte_offset_in_line += ch.len_utf8();
                     display_col += cw;

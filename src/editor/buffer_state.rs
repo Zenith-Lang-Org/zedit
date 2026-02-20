@@ -49,6 +49,18 @@ pub(super) struct BufferState {
     /// Stable ID for untitled buffers (None for file-backed buffers).
     /// Used for swap file naming: NewBuffer01.swp, NewBuffer02.swp, etc.
     pub(super) untitled_id: Option<usize>,
+    /// LSP diagnostics for this buffer (range, severity, message).
+    pub(super) diagnostics: Vec<(
+        crate::lsp::protocol::Range,
+        crate::lsp::protocol::DiagnosticSeverity,
+        String,
+    )>,
+    /// Language ID for LSP (e.g. "rust", "python").
+    pub(super) lsp_language: Option<String>,
+    /// Document version for LSP sync.
+    pub(super) lsp_version: i32,
+    /// Whether the buffer has been modified since last LSP didChange.
+    pub(super) lsp_dirty: bool,
 }
 
 impl BufferState {
@@ -76,6 +88,10 @@ impl BufferState {
             wrap_map: None,
             scroll_visual_offset: 0,
             untitled_id: None,
+            diagnostics: Vec::new(),
+            lsp_language: None,
+            lsp_version: 0,
+            lsp_dirty: false,
         }
     }
 
@@ -115,6 +131,10 @@ impl BufferState {
             wrap_map: None,
             scroll_visual_offset: 0,
             untitled_id: None,
+            diagnostics: Vec::new(),
+            lsp_language: None,
+            lsp_version: 0,
+            lsp_dirty: false,
         })
     }
 

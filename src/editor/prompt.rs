@@ -216,6 +216,9 @@ impl Editor {
                             self.active_buffer = new_idx;
                         }
                         self.set_message(&format!("Opened: {}", display_name), MessageType::Info);
+                        // Notify LSP about newly opened file
+                        let notify_idx = self.active_buffer_index();
+                        self.lsp_notify_open(notify_idx);
                     }
                     Err(e) => {
                         // Keep prompt open so user can fix the path

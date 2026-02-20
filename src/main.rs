@@ -7,6 +7,7 @@ mod git;
 mod input;
 mod keybindings;
 mod layout;
+mod lsp;
 mod pty;
 mod render;
 mod session;

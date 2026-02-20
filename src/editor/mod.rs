@@ -31,6 +31,8 @@ use helpers::*;
 use prompt::*;
 use search::*;
 
+use crate::lsp;
+
 // ---------------------------------------------------------------------------
 // Message types
 // ---------------------------------------------------------------------------
@@ -138,6 +140,9 @@ pub struct Editor {
     terminal_panel_pane: Option<PaneId>,
     terminal_idx: Option<usize>,
 
+    // LSP support
+    lsp_manager: Option<lsp::LspManager>,
+
     // Swap file timer
     swap_timer: std::time::Instant,
     swap_interval_ms: u64,
@@ -154,6 +159,29 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// Build an LspManager from config (if any LSP servers are configured).
+    fn build_lsp_manager(config: &Config) -> Option<lsp::LspManager> {
+        if config.lsp_servers.is_empty() {
+            return None;
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let root_dir = cwd.to_string_lossy().to_string();
+        let lsp_config: Vec<(String, lsp::LspServerConfig)> = config
+            .lsp_servers
+            .iter()
+            .map(|(lang, cfg)| {
+                (
+                    lang.clone(),
+                    lsp::LspServerConfig {
+                        command: cfg.command.clone(),
+                        args: cfg.args.clone(),
+                    },
+                )
+            })
+            .collect();
+        Some(lsp::LspManager::new(lsp_config, &root_dir))
+    }
+
     /// Create a new editor with an empty buffer.
     pub fn new(config: Config) -> Result<Self, String> {
         let color_mode = terminal::detect_color_mode();
@@ -161,6 +189,7 @@ impl Editor {
         let (w, h) = terminal.size();
 
         let line_numbers = config.line_numbers;
+        let lsp_manager = Self::build_lsp_manager(&config);
         let mut initial_buf = BufferState::new_empty(line_numbers);
         initial_buf.untitled_id = Some(1);
         let layout = LayoutState::new(0);
@@ -189,6 +218,7 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            lsp_manager,
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: 2,
@@ -208,6 +238,7 @@ impl Editor {
         let bs =
             BufferState::from_file(path, config.line_numbers, &config.theme, &config.languages)?;
 
+        let lsp_manager = Self::build_lsp_manager(&config);
         let layout = LayoutState::new(0);
         let active_pane = layout.first_pane();
         Ok(Editor {
@@ -234,6 +265,7 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            lsp_manager,
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: 1,
@@ -379,6 +411,8 @@ impl Editor {
             recovery_msgs.join(", ")
         };
 
+        let lsp_manager = Self::build_lsp_manager(&config);
+
         Ok(Editor {
             buffers,
             active_buffer: active,
@@ -403,6 +437,7 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            lsp_manager,
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: max_untitled + 1,
@@ -539,6 +574,12 @@ impl Editor {
     /// Run the main editor loop.
     pub fn run(&mut self) -> Result<(), String> {
         self.resolve_layout();
+        // Notify LSP for all initially opened buffers
+        if self.lsp_manager.is_some() {
+            for i in 0..self.buffers.len() {
+                self.lsp_notify_open(i);
+            }
+        }
         while self.running {
             // 1. Check for resize
             if self.terminal.check_resize() {
@@ -554,6 +595,9 @@ impl Editor {
 
             // 2. Drain PTY output
             self.drain_all_ptys();
+
+            // 2b. Drain LSP messages and sync diagnostics
+            self.drain_lsp_messages();
 
             // 3. Reap dead children
             for pty in &mut self.ptys {
@@ -584,9 +628,15 @@ impl Editor {
                 self.save_all_swaps();
                 self.swap_timer = std::time::Instant::now();
             }
+
+            // 9. Send LSP didChange for dirty buffers
+            self.flush_lsp_changes();
         }
 
-        // On exit: save session and final swap state
+        // On exit: shutdown LSP servers, save session and final swap state
+        if let Some(ref mut mgr) = self.lsp_manager {
+            mgr.shutdown_all();
+        }
         self.save_session();
 
         Ok(())
@@ -595,7 +645,12 @@ impl Editor {
     /// Poll stdin and all PTY master fds.
     /// Returns (stdin_ready, vec_of_pty_indices_with_data).
     fn poll_fds(&self, timeout_ms: i32) -> (bool, Vec<usize>) {
-        let mut fds = Vec::with_capacity(1 + self.ptys.len());
+        let lsp_fds = self
+            .lsp_manager
+            .as_ref()
+            .map(|m| m.stdout_fds())
+            .unwrap_or_default();
+        let mut fds = Vec::with_capacity(1 + self.ptys.len() + lsp_fds.len());
 
         // stdin
         fds.push(PollFd {
@@ -613,6 +668,15 @@ impl Editor {
                     revents: 0,
                 });
             }
+        }
+
+        // LSP stdout fds
+        for fd in &lsp_fds {
+            fds.push(PollFd {
+                fd: *fd,
+                events: POLLIN,
+                revents: 0,
+            });
         }
 
         let _result = pty::poll_fds(&mut fds, timeout_ms);
@@ -663,6 +727,148 @@ impl Editor {
                 self.ptys[idx].write_bytes(&resp);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // LSP integration
+    // -----------------------------------------------------------------------
+
+    /// Drain LSP messages from all clients and sync diagnostics to buffers.
+    fn drain_lsp_messages(&mut self) {
+        let mgr = match self.lsp_manager.as_mut() {
+            Some(m) => m,
+            None => return,
+        };
+
+        mgr.drain_all();
+
+        // Sync diagnostics from LSP clients to matching buffer states
+        // We iterate over all buffers and check if there are diagnostics for their URI
+        for bs in &mut self.buffers {
+            if let Some(ref lang) = bs.lsp_language {
+                if let Some(path) = bs.buffer.file_path() {
+                    let path_str = path.to_string_lossy();
+                    let uri = lsp::protocol::path_to_uri(&path_str);
+                    if let Some(client) = mgr.client_mut(lang) {
+                        let diags = client.diagnostics_for(&uri);
+                        bs.diagnostics = diags
+                            .iter()
+                            .map(|d| (d.range.clone(), d.severity, d.message.clone()))
+                            .collect();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Notify LSP that a buffer was opened.
+    fn lsp_notify_open(&mut self, buf_idx: usize) {
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+
+        // Detect language from file extension
+        let lang = match self.detect_lsp_language(&path) {
+            Some(l) => l,
+            None => return,
+        };
+
+        self.buffers[buf_idx].lsp_language = Some(lang.clone());
+        self.buffers[buf_idx].lsp_version = 1;
+
+        let uri = lsp::protocol::path_to_uri(&path);
+        let text = self.buffers[buf_idx].buffer.text();
+
+        if let Some(ref mut mgr) = self.lsp_manager {
+            if let Some(client) = mgr.ensure_client(&lang) {
+                client.did_open(&uri, &text);
+            }
+        }
+    }
+
+    /// Notify LSP that a buffer changed (full document sync).
+    fn lsp_notify_change(&mut self, buf_idx: usize) {
+        let lang = match self.buffers[buf_idx].lsp_language.clone() {
+            Some(l) => l,
+            None => return,
+        };
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+        let uri = lsp::protocol::path_to_uri(&path);
+        let text = self.buffers[buf_idx].buffer.text();
+
+        if let Some(ref mut mgr) = self.lsp_manager {
+            if let Some(client) = mgr.client_mut(&lang) {
+                client.did_change(&uri, &text);
+            }
+        }
+    }
+
+    /// Notify LSP that a buffer was saved.
+    fn lsp_notify_save(&mut self, buf_idx: usize) {
+        let lang = match self.buffers[buf_idx].lsp_language.clone() {
+            Some(l) => l,
+            None => return,
+        };
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+        let uri = lsp::protocol::path_to_uri(&path);
+
+        if let Some(ref mut mgr) = self.lsp_manager {
+            if let Some(client) = mgr.client_mut(&lang) {
+                client.did_save(&uri);
+            }
+        }
+    }
+
+    /// Notify LSP that a buffer was closed.
+    fn lsp_notify_close(&mut self, buf_idx: usize) {
+        let lang = match self.buffers[buf_idx].lsp_language.clone() {
+            Some(l) => l,
+            None => return,
+        };
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+        let uri = lsp::protocol::path_to_uri(&path);
+
+        if let Some(ref mut mgr) = self.lsp_manager {
+            if let Some(client) = mgr.client_mut(&lang) {
+                client.did_close(&uri);
+            }
+        }
+    }
+
+    /// Send didChange for all buffers marked dirty.
+    fn flush_lsp_changes(&mut self) {
+        if self.lsp_manager.is_none() {
+            return;
+        }
+        for i in 0..self.buffers.len() {
+            if self.buffers[i].lsp_dirty && self.buffers[i].lsp_language.is_some() {
+                self.buffers[i].lsp_dirty = false;
+                self.lsp_notify_change(i);
+            }
+        }
+    }
+
+    /// Detect LSP language ID from file path using config's language definitions.
+    fn detect_lsp_language(&self, path: &str) -> Option<String> {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())?;
+        for lang_def in &self.config.languages {
+            if lang_def.extensions.iter().any(|e| e == ext) {
+                return Some(lang_def.name.clone());
+            }
+        }
+        None
     }
 
     /// Sync PTY/VTerm sizes to match their pane rects.

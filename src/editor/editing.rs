@@ -385,6 +385,8 @@ impl Editor {
                 // Remove swap file after successful save
                 self.cleanup_swap(buf_idx);
                 self.set_message("Saved!", MessageType::Info);
+                // Notify LSP about save
+                self.lsp_notify_save(buf_idx);
             }
             Err(e) => {
                 self.set_message(&format!("Save failed: {}", e), MessageType::Error);
@@ -435,6 +437,9 @@ impl Editor {
             return;
         }
         self.quit_confirm = false;
+
+        // Notify LSP about closing buffer
+        self.lsp_notify_close(buf_idx);
 
         // Remove swap file for the closed buffer
         self.cleanup_swap(buf_idx);
@@ -789,9 +794,11 @@ impl Editor {
 
     pub(super) fn invalidate_highlight(&mut self) {
         let cursor_line = self.buf().cursor().line;
-        if let Some(h) = &mut self.buf_mut().highlighter {
+        let b = self.buf_mut();
+        if let Some(h) = &mut b.highlighter {
             h.invalidate_from(cursor_line);
         }
+        b.lsp_dirty = true;
         self.invalidate_wrap();
     }
 
