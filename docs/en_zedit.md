@@ -25,8 +25,12 @@
 17. [Custom Keybindings](#17-custom-keybindings)
 18. [Syntax Highlighting and Themes](#18-syntax-highlighting-and-themes)
 19. [Plugin System](#19-plugin-system)
-20. [Troubleshooting](#20-troubleshooting)
-21. [License](#21-license)
+20. [Extension System](#20-extension-system)
+21. [Task Runner](#21-task-runner)
+22. [Problem Panel](#22-problem-panel)
+23. [REPL Integration](#23-repl-integration)
+24. [Troubleshooting](#24-troubleshooting)
+25. [License](#25-license)
 
 ---
 
@@ -318,7 +322,31 @@ All default keybindings are listed below. Every binding can be remapped in the c
 | `Ctrl+P` | Open the command palette (fuzzy search for all commands). |
 | `Ctrl+T` | Toggle the integrated terminal panel. |
 | `Ctrl+Shift+T` | Open a new terminal tab in the terminal panel. |
-| `Ctrl+Shift+M` | Toggle the minimap. |
+| `Alt+M` | Toggle the minimap. |
+
+### Task Runner
+
+| Key | Action |
+|-----|--------|
+| `F5` | Run the default task for the current language. |
+| `Ctrl+F5` | Build the project. |
+| `Shift+F5` | Run tests. |
+| `Alt+F5` | Stop the currently running task. |
+
+### Problem Panel
+
+| Key | Action |
+|-----|--------|
+| `F6` | Toggle the problem panel (build errors and warnings overlay). |
+| `Up` / `Down` | Navigate between problems (when panel is focused). |
+| `Enter` | Jump to the file and line of the selected problem. |
+| `Escape` | Close the problem panel. |
+
+### REPL Integration
+
+| Key | Action |
+|-----|--------|
+| `Alt+Enter` | Send the current selection (or current line) to the language REPL in the terminal. |
 
 ### LSP (Language Server Protocol)
 
@@ -649,7 +677,7 @@ The minimap is a scaled-down rendering of the entire file contents displayed in 
 
 ### Toggling the minimap
 
-Press `Ctrl+Shift+M` to show or hide the minimap. The editor area resizes to accommodate it.
+Press `Alt+M` to show or hide the minimap. The editor area resizes to accommodate it.
 
 The minimap highlights the region currently visible in the editor viewport, making it easy to see what fraction of the file you are viewing.
 
@@ -797,7 +825,9 @@ Key strings follow the format `[Ctrl+][Alt+][Shift+]<key>`. The modifiers are ca
     "save": "Ctrl+S",
     "diff_open_vs_head": "F7",
     "lsp_complete": "Ctrl+Space",
-    "toggle_minimap": "Ctrl+Shift+M",
+    "toggle_minimap": "Alt+M",
+    "toggle_problem_panel": "F6",
+    "task_run": "F5",
     "toggle_terminal": "F10"
   }
 }
@@ -856,7 +886,13 @@ Key strings follow the format `[Ctrl+][Alt+][Shift+]<key>`. The modifiers are ca
 | `diff_open_vs_head` | `F7` | Open diff view vs Git HEAD |
 | `diff_next_hunk` | `F8` | Next diff hunk |
 | `diff_prev_hunk` | `Shift+F8` | Previous diff hunk |
-| `toggle_minimap` | `Ctrl+Shift+M` | Toggle minimap |
+| `toggle_minimap` | `Alt+M` | Toggle minimap |
+| `task_run` | `F5` | Run default task |
+| `task_build` | `Ctrl+F5` | Build project |
+| `task_test` | `Shift+F5` | Run tests |
+| `task_stop` | `Alt+F5` | Stop running task |
+| `toggle_problem_panel` | `F6` | Toggle problem panel |
+| `send_to_repl` | `Alt+Enter` | Send selection/line to REPL |
 
 ---
 
@@ -899,9 +935,9 @@ The following languages are supported out of the box with embedded grammars:
 | HTML | `.html`, `.htm` |
 | CSS | `.css` |
 | XML | `.xml` |
-| Zenith | `.zn` |
-| Zymbol | `.zym` |
-| Minilux | `.mlx` |
+| Zenith | `.zl` |
+| Zymbol | `.zy` |
+| Minilux | `.mi` |
 
 ### Adding custom language grammars
 
@@ -924,8 +960,11 @@ To explicitly associate a grammar with specific extensions (or to override a bui
 
 ### Grammar search priority
 
+Grammars are loaded from disk at runtime in the following order:
+
 1. `~/.config/zedit/grammars/` — user-installed grammars (highest priority).
-2. Built-in grammars embedded in the binary at compile time.
+2. `/usr/share/zedit/grammars/` and `/usr/local/share/zedit/grammars/` — system-wide grammars.
+3. `grammars/` in the current working directory — development / source tree.
 
 ### Themes
 
@@ -1090,7 +1129,134 @@ Display a message in the status bar.
 
 ---
 
-## 20. Troubleshooting
+## 20. Extension System
+
+zedit includes a native extension system that lets you install, manage, and import language extensions without recompiling.
+
+### Installing extensions
+
+```sh
+zedit --ext list              # list all installed extensions
+zedit --ext install <name>    # install an extension
+zedit --ext remove  <name>    # uninstall an extension
+zedit --ext info    <name>    # show extension metadata
+```
+
+Extensions are stored in `~/.config/zedit/extensions/`. Each extension is a subdirectory containing at least a `manifest.json`, and optionally grammar files and theme files.
+
+### Importing VS Code extensions
+
+```sh
+zedit --import my-extension.vsix
+```
+
+zedit extracts the grammar (`.tmLanguage.json`) and theme (`.json`) assets from the `.vsix` archive and installs them into the user configuration directory. JavaScript code is ignored; only data files are imported.
+
+### Extension directory structure
+
+```
+~/.config/zedit/extensions/
+  my-language/
+    manifest.json
+    my-language.tmLanguage.json
+```
+
+The `manifest.json` mirrors the plugin manifest format (see Section 19) but extensions are pure data — they do not run code.
+
+---
+
+## 21. Task Runner
+
+zedit has a built-in task runner that can launch language-specific build, run, and test commands directly from the editor. Output is shown in the integrated terminal and errors are parsed into the Problem Panel.
+
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `F5` | Run the default task for the current file's language. |
+| `Ctrl+F5` | Build the project. |
+| `Shift+F5` | Run tests. |
+| `Alt+F5` | Stop the currently running task. |
+
+### Built-in task presets
+
+| Language | Run (`F5`) | Build (`Ctrl+F5`) | Test (`Shift+F5`) |
+|----------|-----------|-------------------|-------------------|
+| Rust | `cargo run` | `cargo build` | `cargo test` |
+| Zenith | `zenith run` | `zenith build` | `zenith test` |
+| Zymbol | `zymbol run` | `zymbol build` | `zymbol test` |
+| Python | `python3 <file>` | — | `pytest` |
+| Go | `go run .` | `go build .` | `go test ./...` |
+| JavaScript | `node <file>` | — | `npm test` |
+
+Task output streams into the integrated terminal. When a build or test task finishes, zedit also feeds the output to the Problem Panel to highlight errors.
+
+### Custom tasks
+
+You can override the default tasks in `config.json` (custom task configuration will be documented in a future release). For now, all task presets are language-driven and require no configuration.
+
+---
+
+## 22. Problem Panel
+
+The Problem Panel is a collapsible overlay at the bottom of the editor that aggregates errors and warnings produced by the task runner.
+
+### Opening and navigating
+
+| Key | Action |
+|-----|--------|
+| `F6` | Toggle the problem panel (show / hide). |
+| `Up` / `Down` | Move the selection through the problem list. |
+| `Enter` | Jump to the file and line of the selected problem. |
+| `Escape` | Close the problem panel. |
+
+### Parsed formats
+
+The panel automatically parses error output from:
+
+- **Rust/Cargo** — `error[E…]: message` / `  --> file:line:col`
+- **GCC / Clang** — `file:line:col: error: message`
+- **Python** — `File "file", line N` tracebacks
+- **Generic** — any line matching `file:line: …` or `file:line:col: …`
+
+### Problem indicators
+
+The status bar shows a combined count of LSP diagnostics and build errors:
+
+```
+● src/main.rs  E:2 W:1  Ln 42  Col 8
+```
+
+---
+
+## 23. REPL Integration
+
+zedit can send code directly to a live REPL session running in the integrated terminal, enabling an interactive development workflow for supported languages.
+
+### Sending code
+
+| Key | Action |
+|-----|--------|
+| `Alt+Enter` | Send the current selection to the REPL. If nothing is selected, sends the current line. |
+
+### Supported languages
+
+| Language | REPL command |
+|----------|-------------|
+| Zenith | `zenith --repl` |
+| Zymbol | `zymbol --repl` |
+
+When you press `Alt+Enter` in a Zenith or Zymbol file, zedit:
+
+1. Opens the integrated terminal if it is not already visible.
+2. Starts the appropriate REPL if one is not already running.
+3. Sends the selected text (or current line) followed by a newline.
+
+The REPL session persists for the lifetime of the editor session — subsequent `Alt+Enter` presses send to the same REPL process.
+
+---
+
+## 24. Troubleshooting
 
 ### zedit displays garbled characters or boxes
 
@@ -1128,7 +1294,7 @@ This means a previous session ended without cleaning up the swap file. If the co
 
 ### The binary is larger than 500 KB
 
-The binary embeds all grammar files at compile time. Running `strip target/release/zedit` removes debug symbols and reduces the binary to approximately 500 KB.
+Running `strip target/release/zedit` removes debug symbols and reduces the binary to approximately 500 KB. Grammar files are loaded from disk at runtime and are not embedded in the binary.
 
 ### Config changes are not taking effect
 
@@ -1140,7 +1306,7 @@ zedit handles `SIGWINCH` for resize notifications. If resize does not work insid
 
 ---
 
-## 21. License
+## 25. License
 
 zedit is released under the **GNU General Public License v3.0**.
 

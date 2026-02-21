@@ -26,8 +26,12 @@ Versión `0.1.0` | Licencia: GPL-3.0 | Parte del ecosistema Z (Zenith, Zymbol)
 17. [Atajos personalizados](#17-atajos-personalizados)
 18. [Resaltado de sintaxis y temas](#18-resaltado-de-sintaxis-y-temas)
 19. [Sistema de Plugins](#19-sistema-de-plugins)
-20. [Solucion de problemas](#20-solucion-de-problemas)
-21. [Licencia](#21-licencia)
+20. [Sistema de Extensiones](#20-sistema-de-extensiones)
+21. [Ejecutor de Tareas](#21-ejecutor-de-tareas)
+22. [Panel de Problemas](#22-panel-de-problemas)
+23. [Integracion REPL](#23-integracion-repl)
+24. [Solucion de problemas](#24-solucion-de-problemas)
+25. [Licencia](#25-licencia)
 
 ---
 
@@ -300,9 +304,33 @@ El panel lateral izquierdo (activado con `Ctrl+B`) muestra el arbol de archivos 
 | `Ctrl+P` | Abrir paleta de comandos (busqueda difusa de todos los comandos) |
 | `Ctrl+T` | Alternar panel de terminal integrado |
 | `Ctrl+Shift+T` | Abrir nueva pestana de terminal |
-| `Ctrl+Shift+M` | Alternar minimapa |
+| `Alt+M` | Alternar minimapa |
 
-### 5.8 LSP (Language Server Protocol)
+### 5.8 Ejecutor de tareas
+
+| Atajo | Accion |
+|-------|--------|
+| `F5` | Ejecutar la tarea predeterminada del lenguaje actual |
+| `Ctrl+F5` | Compilar el proyecto |
+| `Shift+F5` | Ejecutar pruebas |
+| `Alt+F5` | Detener la tarea en ejecucion |
+
+### 5.9 Panel de problemas
+
+| Atajo | Accion |
+|-------|--------|
+| `F6` | Alternar el panel de problemas (errores y advertencias del compilador) |
+| `Arriba` / `Abajo` | Navegar entre problemas (cuando el panel esta enfocado) |
+| `Enter` | Saltar al archivo y linea del problema seleccionado |
+| `Escape` | Cerrar el panel de problemas |
+
+### 5.10 Integracion REPL
+
+| Atajo | Accion |
+|-------|--------|
+| `Alt+Enter` | Enviar la seleccion actual (o la linea actual) al REPL del lenguaje |
+
+### 5.11 LSP (Language Server Protocol)
 
 | Atajo | Accion |
 |-------|--------|
@@ -312,7 +340,7 @@ El panel lateral izquierdo (activado con `Ctrl+B`) muestra el arbol de archivos 
 
 > En el menu de autocompletado: `Tab` o `Enter` para insertar la seleccion, `Escape` para cerrar. En el popup de hover: cualquier tecla lo cierra.
 
-### 5.9 Vista Diff (comparar vs HEAD de Git)
+### 5.12 Vista Diff (comparar vs HEAD de Git)
 
 | Atajo | Accion |
 |-------|--------|
@@ -323,7 +351,7 @@ El panel lateral izquierdo (activado con `Ctrl+B`) muestra el arbol de archivos 
 | `PgUp` / `PgDn` | Desplazar la vista diff por paginas |
 | `Escape` | Cerrar la vista diff y volver al editor |
 
-### 5.10 Raton
+### 5.13 Raton
 
 | Accion del raton | Efecto |
 |------------------|--------|
@@ -333,7 +361,7 @@ El panel lateral izquierdo (activado con `Ctrl+B`) muestra el arbol de archivos 
 | Rueda de desplazamiento | Hacer scroll por el documento |
 | `Alt+Clic` | Agregar un cursor adicional (multi-cursor) |
 
-### 5.11 Terminal integrado
+### 5.14 Terminal integrado
 
 | Atajo | Accion |
 |-------|--------|
@@ -682,7 +710,7 @@ El minimapa es una vista comprimida del archivo completo que aparece en el marge
 
 ### Activar y desactivar
 
-`Ctrl+Shift+M` alterna la visibilidad del minimapa.
+`Alt+M` alterna la visibilidad del minimapa.
 
 ### Interpretacion
 
@@ -772,7 +800,7 @@ El archivo de configuracion principal es `~/.config/zedit/config.json`. Si no ex
   ],
   "keybindings": {
     "save": "Ctrl+S",
-    "toggle_minimap": "Ctrl+Shift+M"
+    "toggle_minimap": "Alt+M"
   }
 }
 ```
@@ -859,7 +887,9 @@ Teclas reconocidas: letras y numeros (`A`–`Z`, `0`–`9`), `Enter`, `Tab`, `Ba
     "save": "Ctrl+S",
     "diff_open_vs_head": "F7",
     "lsp_complete": "Ctrl+Space",
-    "toggle_minimap": "Ctrl+Shift+M",
+    "toggle_minimap": "Alt+M",
+    "toggle_problem_panel": "F6",
+    "task_run": "F5",
     "toggle_terminal": "F10"
   }
 }
@@ -921,6 +951,12 @@ Teclas reconocidas: letras y numeros (`A`–`Z`, `0`–`9`), `Enter`, `Tab`, `Ba
 | `diff_next_hunk` | Siguiente hunk en la vista diff |
 | `diff_prev_hunk` | Hunk anterior en la vista diff |
 | `toggle_minimap` | Alternar minimapa |
+| `task_run` | Ejecutar tarea predeterminada |
+| `task_build` | Compilar proyecto |
+| `task_test` | Ejecutar pruebas |
+| `task_stop` | Detener tarea en ejecucion |
+| `toggle_problem_panel` | Alternar panel de problemas |
+| `send_to_repl` | Enviar seleccion/linea al REPL |
 
 ---
 
@@ -928,7 +964,7 @@ Teclas reconocidas: letras y numeros (`A`–`Z`, `0`–`9`), `Enter`, `Tab`, `Ba
 
 ### Gramaticas TextMate
 
-zedit usa gramaticas TextMate en formato `.tmLanguage.json` para el resaltado de sintaxis. Las gramaticas estan integradas en el binario en tiempo de compilacion mediante `include_str!`, por lo que no necesitas instalar nada adicional.
+zedit usa gramaticas TextMate en formato `.tmLanguage.json` para el resaltado de sintaxis. Las gramaticas se cargan desde el disco en tiempo de ejecucion, por lo que puedes agregar o reemplazar gramaticas sin recompilar el editor.
 
 #### Lenguajes incluidos de forma integrada
 
@@ -953,9 +989,9 @@ zedit usa gramaticas TextMate en formato `.tmLanguage.json` para el resaltado de
 | HTML | `.html`, `.htm` |
 | CSS | `.css` |
 | XML | `.xml` |
-| Zenith | `.zen` |
-| Zymbol | `.zym` |
-| Minilux | `.mlx` |
+| Zenith | `.zl` |
+| Zymbol | `.zy` |
+| Minilux | `.mi` |
 
 #### Gramaticas de usuario
 
@@ -965,7 +1001,11 @@ Puedes agregar tus propias gramaticas copiando el archivo `.tmLanguage.json` a:
 ~/.config/zedit/grammars/
 ```
 
-zedit las descubre automaticamente al arrancar y les da prioridad sobre las integradas si tienen el mismo nombre de archivo.
+zedit busca las gramaticas en el siguiente orden de prioridad:
+
+1. `~/.config/zedit/grammars/` — gramaticas del usuario (maxima prioridad).
+2. `/usr/share/zedit/grammars/` y `/usr/local/share/zedit/grammars/` — gramaticas del sistema.
+3. `grammars/` en el directorio de trabajo actual — modo desarrollo / arbol de fuentes.
 
 Tambien puedes registrar gramaticas de usuario a traves de la clave `languages` en la configuracion.
 
@@ -1173,7 +1213,130 @@ loop:
 
 ---
 
-## 20. Solucion de problemas
+## 20. Sistema de Extensiones
+
+zedit incluye un sistema de extensiones nativo que permite instalar, gestionar e importar extensiones de lenguaje sin necesidad de recompilar.
+
+### Gestionar extensiones
+
+```sh
+zedit --ext list              # listar todas las extensiones instaladas
+zedit --ext install <nombre>  # instalar una extension
+zedit --ext remove  <nombre>  # desinstalar una extension
+zedit --ext info    <nombre>  # mostrar metadatos de una extension
+```
+
+Las extensiones se almacenan en `~/.config/zedit/extensions/`. Cada extension es un subdirectorio que contiene al menos un `manifest.json`, y opcionalmente archivos de gramatica y tema.
+
+### Importar extensiones de VS Code
+
+```sh
+zedit --import mi-extension.vsix
+```
+
+zedit extrae los archivos de gramatica (`.tmLanguage.json`) y tema (`.json`) del paquete `.vsix` y los instala en el directorio de configuracion del usuario. El codigo JavaScript se ignora; solo se importan archivos de datos.
+
+### Estructura del directorio de extensiones
+
+```
+~/.config/zedit/extensions/
+  mi-lenguaje/
+    manifest.json
+    mi-lenguaje.tmLanguage.json
+```
+
+El `manifest.json` sigue el mismo formato que el de los plugins (ver Seccion 19), pero las extensiones son datos puros — no ejecutan codigo.
+
+---
+
+## 21. Ejecutor de Tareas
+
+zedit dispone de un ejecutor de tareas integrado capaz de lanzar comandos de compilacion, ejecucion y pruebas especificos del lenguaje directamente desde el editor. La salida se muestra en el terminal integrado y los errores se procesan en el Panel de Problemas.
+
+### Atajos de teclado
+
+| Atajo | Accion |
+|-------|--------|
+| `F5` | Ejecutar la tarea predeterminada del lenguaje actual |
+| `Ctrl+F5` | Compilar el proyecto |
+| `Shift+F5` | Ejecutar pruebas |
+| `Alt+F5` | Detener la tarea en ejecucion |
+
+### Preajustes de tareas integrados
+
+| Lenguaje | Ejecutar (`F5`) | Compilar (`Ctrl+F5`) | Pruebas (`Shift+F5`) |
+|----------|----------------|---------------------|---------------------|
+| Rust | `cargo run` | `cargo build` | `cargo test` |
+| Zenith | `zenith run` | `zenith build` | `zenith test` |
+| Zymbol | `zymbol run` | `zymbol build` | `zymbol test` |
+| Python | `python3 <archivo>` | — | `pytest` |
+| Go | `go run .` | `go build .` | `go test ./...` |
+| JavaScript | `node <archivo>` | — | `npm test` |
+
+La salida de las tareas se transmite al terminal integrado. Cuando una tarea de compilacion o prueba finaliza, zedit alimenta la salida al Panel de Problemas para resaltar los errores.
+
+---
+
+## 22. Panel de Problemas
+
+El Panel de Problemas es un overlay colapsable en la parte inferior del editor que agrupa los errores y advertencias producidos por el ejecutor de tareas.
+
+### Abrir y navegar
+
+| Atajo | Accion |
+|-------|--------|
+| `F6` | Alternar el panel de problemas (mostrar / ocultar) |
+| `Arriba` / `Abajo` | Mover la seleccion por la lista de problemas |
+| `Enter` | Saltar al archivo y linea del problema seleccionado |
+| `Escape` | Cerrar el panel de problemas |
+
+### Formatos reconocidos
+
+El panel analiza automaticamente la salida de errores de:
+
+- **Rust/Cargo** — `error[E…]: mensaje` / `  --> archivo:linea:col`
+- **GCC / Clang** — `archivo:linea:col: error: mensaje`
+- **Python** — trazas de pila `File "archivo", line N`
+- **Generico** — cualquier linea con el patron `archivo:linea: …` o `archivo:linea:col: …`
+
+### Indicadores en la barra de estado
+
+La barra de estado muestra un recuento combinado de diagnosticos LSP y errores de compilacion:
+
+```
+● src/main.rs  E:2 W:1  Lin 42  Col 8
+```
+
+---
+
+## 23. Integracion REPL
+
+zedit puede enviar codigo directamente a una sesion REPL activa en el terminal integrado, lo que permite un flujo de desarrollo interactivo para los lenguajes compatibles.
+
+### Enviar codigo
+
+| Atajo | Accion |
+|-------|--------|
+| `Alt+Enter` | Enviar la seleccion actual al REPL. Si no hay seleccion, envia la linea actual. |
+
+### Lenguajes compatibles
+
+| Lenguaje | Comando REPL |
+|----------|-------------|
+| Zenith | `zenith --repl` |
+| Zymbol | `zymbol --repl` |
+
+Al pulsar `Alt+Enter` en un archivo Zenith o Zymbol, zedit:
+
+1. Abre el terminal integrado si no esta ya visible.
+2. Inicia el REPL correspondiente si no hay uno en ejecucion.
+3. Envia el texto seleccionado (o la linea actual) seguido de un salto de linea.
+
+La sesion REPL persiste durante toda la sesion del editor: las pulsaciones posteriores de `Alt+Enter` envian al mismo proceso REPL.
+
+---
+
+## 24. Solucion de problemas
 
 ### El resaltado de sintaxis no funciona
 
@@ -1240,7 +1403,7 @@ loop:
 
 ---
 
-## 21. Licencia
+## 25. Licencia
 
 zedit esta licenciado bajo la **GNU General Public License version 3.0 (GPL-3.0)**.
 
@@ -1266,6 +1429,7 @@ https://www.gnu.org/licenses/gpl-3.0.html
 | `~/.config/zedit/config.json` | Configuracion principal del editor |
 | `~/.config/zedit/grammars/` | Gramaticas TextMate del usuario (`.tmLanguage.json`) |
 | `~/.config/zedit/themes/` | Temas de color compatibles con VS Code (`.json`) |
+| `~/.config/zedit/extensions/` | Directorio de extensiones nativas (gestionado con `--ext`) |
 | `~/.config/zedit/plugins/` | Directorio de plugins (subdirectorios con `manifest.json`) |
 | `~/.local/state/zedit/sessions/` | Archivos de sesion por directorio de proyecto |
 | `~/.local/state/zedit/swap/` | Archivos swap de buffers sin nombre |

@@ -1357,6 +1357,12 @@ impl Editor {
             "  Alt+K    Hover doc F8/\u{21e7}F8  Next/Prev hunk  ",
             "  F12      Go to def Escape  Close diff      ",
             "                                              ",
+            "  TASKS              REPL / PROBLEMS         ",
+            "  F5       Run       F6    Problem panel     ",
+            "  Ctrl+F5  Build     Alt+\u{21b5} Send to REPL  ",
+            "  \u{21e7}F5      Test task                        ",
+            "  Alt+F5   Stop task                         ",
+            "                                              ",
             "       Press Esc or F1 to close              ",
         ];
 

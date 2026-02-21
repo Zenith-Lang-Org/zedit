@@ -10,6 +10,14 @@ zedit \- modern console text editor
 .br
 .B zedit
 .B \-\-version
+.br
+.B zedit
+.B \-\-ext
+.RI { list | install | remove | info }
+.br
+.B zedit
+.B \-\-import
+.I file.vsix
 .SH DESCRIPTION
 .B Zedit
 is a modern console text editor written in pure Rust
@@ -30,6 +38,26 @@ Print a usage summary and exit.
 .TP
 .BR \-V ", " \-\-version
 Print the version number and exit.
+.TP
+.BR \-\-ext " " { list | install | remove | info }
+Manage native extensions installed in
+.IR ~/.config/zedit/extensions/ .
+.B list
+shows all installed extensions.
+.B install
+.I <name>
+installs an extension by name.
+.B remove
+.I <name>
+uninstalls it.
+.B info
+.I <name>
+shows its metadata.
+.TP
+.BR \-\-import " " \fIfile.vsix\fR
+Import a VS Code extension package (.vsix) and install its grammar and theme
+assets into the user configuration directory. Only grammar and theme files are
+extracted; JavaScript code is ignored.
 .SH KEYBINDINGS
 .SS File
 .TP
@@ -230,6 +258,48 @@ Scroll the diff view.
 .TP
 .B Escape
 Close the diff view.
+.SS Task Runner
+.TP
+.B F5
+Run the default task for the current file's language (e.g.
+.B zenith run
+for Zenith,
+.B cargo run
+for Rust). Output is displayed in the integrated terminal.
+.TP
+.B Ctrl+F5
+Build the project (e.g.
+.B cargo build
+for Rust).
+.TP
+.B Shift+F5
+Run tests (e.g.
+.B cargo test
+for Rust).
+.TP
+.B Alt+F5
+Stop the currently running task.
+.SS Problem Panel
+.TP
+.B F6
+Toggle the problem panel \(em a bottom overlay that aggregates errors and
+warnings parsed from build output (Rust/Cargo, GCC, Clang, Python traceback,
+and generic patterns). Use
+.B Up
+/
+.B Down
+to navigate the list and
+.B Enter
+to jump to the corresponding file and line.
+.SS REPL Integration
+.TP
+.B Alt+Enter
+Send the current selection (or the current line if nothing is selected) to the
+language REPL running in the integrated terminal. Supported languages: Zenith
+.RB ( zenith\ \-\-repl )
+and Zymbol
+.RB ( zymbol\ \-\-repl ).
+A REPL session is started automatically if one is not already running.
 .SS Mouse
 .TP
 .B Click
@@ -353,6 +423,19 @@ via pip). Configure them in
 Diagnostics appear as colored underlines in the text and are counted in the
 status bar (e.g. "E:2 W:1"). LSP completion, hover, and go\-to\-definition
 require a running server.
+.PP
+.B Z ecosystem auto\-detection:
+If
+.B zenith\-lsp
+or
+.B zymbol\-lsp
+are found on
+.BR $PATH ,
+zedit automatically registers them for the
+.B zenith
+and
+.B zymbol
+languages without any manual configuration.
 .SH SYNTAX HIGHLIGHTING
 .B Zedit
 uses TextMate grammar files
@@ -361,9 +444,20 @@ for syntax highlighting. Built\-in grammars:
 Rust, C, C++, Go, Java, JavaScript, TypeScript, Python, PHP, Julia, R,
 JSON, TOML, YAML, Markdown, Shell/Bash, HTML, CSS, XML, Zenith, Zymbol, Minilux.
 .PP
-User\-provided grammars can be placed in
-.IR ~/.config/zedit/grammars/ .
-The grammar filename must match the
+Grammar files are loaded from disk at runtime in the following search order:
+.IP 1. 4
+.IR ~/.config/zedit/grammars/ " (user\-provided, highest priority)"
+.IP 2. 4
+.IR /usr/share/zedit/grammars/ " and " /usr/local/share/zedit/grammars/ " (system\-wide)"
+.IP 3. 4
+.IR grammars/ " in the current working directory (development / source tree)"
+.PP
+Place any VS Code\-compatible
+.I .tmLanguage.json
+file in
+.I ~/.config/zedit/grammars/
+to add or override a grammar without recompiling. The grammar filename must
+match the
 .B grammar
 field in the language definition.
 .PP
@@ -425,6 +519,10 @@ User\-provided TextMate grammar files (.tmLanguage.json).
 .TP
 .I ~/.config/zedit/themes/
 User\-provided VS Code\-compatible color theme files.
+.TP
+.I ~/.config/zedit/extensions/
+Native extension directories (managed by
+.BR \-\-ext ).
 .TP
 .I ~/.config/zedit/plugins/
 Plugin directories (one subdirectory per plugin).
