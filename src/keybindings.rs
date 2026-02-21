@@ -60,6 +60,11 @@ pub enum EditorAction {
     DiffNextHunk,
     DiffPrevHunk,
     ToggleMinimap,
+    // Task runner
+    TaskRun,
+    TaskBuild,
+    TaskTest,
+    TaskStop,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +375,10 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "diff_next_hunk" => Some(EditorAction::DiffNextHunk),
         "diff_prev_hunk" => Some(EditorAction::DiffPrevHunk),
         "toggle_minimap" => Some(EditorAction::ToggleMinimap),
+        "task_run" => Some(EditorAction::TaskRun),
+        "task_build" => Some(EditorAction::TaskBuild),
+        "task_test" => Some(EditorAction::TaskTest),
+        "task_stop" => Some(EditorAction::TaskStop),
         _ => None,
     }
 }
@@ -448,6 +457,11 @@ impl KeyMap {
             ("Shift+F8", EditorAction::DiffPrevHunk),
             // Minimap — Alt+M (Ctrl+Shift+M = 0x0D = Enter in all standard terminals)
             ("Alt+M", EditorAction::ToggleMinimap),
+            // Task runner
+            ("F5", EditorAction::TaskRun),
+            ("Ctrl+F5", EditorAction::TaskBuild),
+            ("Shift+F5", EditorAction::TaskTest),
+            ("Alt+F5", EditorAction::TaskStop),
         ];
 
         let mut bindings = HashMap::new();

@@ -123,7 +123,7 @@ Available template variables: `{file}`, `{dir}`, `{workspace}`, `{stem}` (filena
 | 1 | 7δ-A | Runtime Grammar Loading | 350 | — | DONE |
 | 2 | 7δ-B | Native Extension System | 600 | 7δ-A | DONE |
 | 3 | 7δ-C | VS Code .vsix Importer | 450 | 7δ-B | DONE |
-| 4 | 21 | Task Runner (F5) | 500 | 7δ-B | TODO |
+| 4 | 21 | Task Runner (F5) | 500 | 7δ-B | DONE |
 | 5 | 22 | Problem Panel | 650 | Phase 21 | TODO |
 | 6 | 23 | Zenith + Zymbol Integration | 400 | 7δ-B | TODO |
 

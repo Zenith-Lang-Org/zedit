@@ -10,6 +10,7 @@ mod palette;
 mod prompt;
 mod search;
 mod selection;
+pub mod tasks;
 mod view;
 mod wrap;
 
@@ -173,6 +174,10 @@ pub struct Editor {
     tab_scroll_offset: usize,
 
     running: bool,
+
+    // Task runner state
+    last_task: Option<String>,      // last command sent (for re-run)
+    task_language: Option<String>,  // language of last task
 }
 
 impl Editor {
@@ -259,6 +264,8 @@ impl Editor {
             tab_regions: Vec::new(),
             tab_scroll_offset: 0,
             running: true,
+            last_task: None,
+            task_language: None,
         })
     }
 
@@ -311,6 +318,8 @@ impl Editor {
             tab_regions: Vec::new(),
             tab_scroll_offset: 0,
             running: true,
+            last_task: None,
+            task_language: None,
         })
     }
 
@@ -488,6 +497,8 @@ impl Editor {
             tab_regions: Vec::new(),
             tab_scroll_offset: 0,
             running: true,
+            last_task: None,
+            task_language: None,
         })
     }
 
@@ -1315,6 +1326,109 @@ impl Editor {
     }
 
     /// Toggle the integrated terminal panel (bottom split).
+    // -----------------------------------------------------------------------
+    // Task runner
+    // -----------------------------------------------------------------------
+
+    /// Detect the language name for a file path using the config language table.
+    fn detect_language_by_ext(&self, file_path: &str) -> Option<String> {
+        let ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())?;
+        self.config
+            .languages
+            .iter()
+            .find(|l| l.extensions.iter().any(|e| e == ext))
+            .map(|l| l.name.clone())
+    }
+
+    /// Ensure the terminal panel is open; opens one if needed.
+    fn ensure_terminal_panel(&mut self) {
+        if self.terminal_panel_pane.is_none() {
+            self.restore_or_new_terminal_panel();
+        }
+    }
+
+    /// Write text directly to the main terminal panel PTY.
+    fn send_to_terminal_panel(&mut self, text: &str) {
+        let idx = match self.terminal_idx {
+            Some(i) => i,
+            None => return,
+        };
+        if idx < self.ptys.len() && !self.ptys[idx].is_dead() {
+            self.ptys[idx].write_bytes(text.as_bytes());
+        }
+    }
+
+    /// Run a task (run/build/test) for the active buffer's language.
+    fn run_task(&mut self, kind: tasks::TaskKind) {
+        let buf_idx = self.active_buffer_index();
+        let file_path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => {
+                self.set_message(
+                    "Save the file first before running",
+                    MessageType::Warning,
+                );
+                return;
+            }
+        };
+
+        let lang = match self.detect_language_by_ext(&file_path) {
+            Some(l) => l,
+            None => {
+                self.set_message("Unknown file type — no task available", MessageType::Warning);
+                return;
+            }
+        };
+
+        let workspace = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let cmd_template = match tasks::TaskRunner::resolve(
+            &lang,
+            kind,
+            &self.config.extensions,
+            &self.config,
+        ) {
+            Some(c) => c,
+            None => {
+                self.set_message(
+                    &format!(
+                        "No {} task configured for '{}'",
+                        kind.as_str(),
+                        lang
+                    ),
+                    MessageType::Warning,
+                );
+                return;
+            }
+        };
+
+        let cmd = tasks::TaskRunner::expand(&cmd_template, &file_path, &workspace);
+        self.last_task = Some(cmd.clone());
+        self.task_language = Some(lang);
+
+        self.ensure_terminal_panel();
+        self.send_to_terminal_panel(&format!("{}\n", cmd));
+        self.set_message(&format!("▶ {}", cmd), MessageType::Info);
+    }
+
+    /// Send Ctrl+C to the terminal panel to stop a running task.
+    fn stop_task(&mut self) {
+        match self.terminal_idx {
+            Some(idx) if idx < self.ptys.len() && !self.ptys[idx].is_dead() => {
+                self.ptys[idx].write_bytes(&[0x03]); // Ctrl+C
+                self.set_message("Sent Ctrl+C to terminal", MessageType::Info);
+            }
+            _ => {
+                self.set_message("No terminal open", MessageType::Warning);
+            }
+        }
+    }
+
     fn toggle_terminal_panel(&mut self) {
         if let Some(pane_id) = self.terminal_panel_pane {
             // Hide terminal panel — keep PTY/VTerm alive via terminal_idx
@@ -1772,6 +1886,10 @@ impl Editor {
             EditorAction::ToggleMinimap => {
                 self.minimap.visible = !self.minimap.visible;
             }
+            EditorAction::TaskRun => self.run_task(tasks::TaskKind::Run),
+            EditorAction::TaskBuild => self.run_task(tasks::TaskKind::Build),
+            EditorAction::TaskTest => self.run_task(tasks::TaskKind::Test),
+            EditorAction::TaskStop => self.stop_task(),
         }
     }
 
