@@ -2,10 +2,11 @@
 // LSP Protocol types and JSON-RPC message builders
 // ---------------------------------------------------------------------------
 //
-// Minimal subset of the Language Server Protocol needed for Phase 17A:
+// Minimal subset of the Language Server Protocol needed for Phase 17A/17B:
 // - Initialize handshake
 // - Document sync (didOpen, didChange, didSave, didClose)
 // - publishDiagnostics notification (server → client)
+// - textDocument/completion, hover, definition (Phase 17B)
 //
 // Uses the existing JsonValue type from src/syntax/json_parser.rs.
 
@@ -41,6 +42,27 @@ pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
     pub message: String,
     pub source: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 17B types
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct CompletionItem {
+    pub label: String,
+    /// LSP kind: 1=Text, 3=Function, 6=Variable, 7=Class, 9=Module…
+    pub kind: Option<u32>,
+    /// Short type hint shown right-aligned in the menu.
+    pub detail: Option<String>,
+    /// Text to insert; falls back to `label` when absent.
+    pub insert_text: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Location {
+    pub uri: String,
+    pub range: Range,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +188,47 @@ pub fn did_close_notification(uri: &str) -> JsonValue {
     )
 }
 
+/// Build a textDocument/completion request.
+pub fn completion_request(id: i64, uri: &str, line: u32, character: u32) -> JsonValue {
+    text_document_position_request(id, "textDocument/completion", uri, line, character)
+}
+
+/// Build a textDocument/hover request.
+pub fn hover_request(id: i64, uri: &str, line: u32, character: u32) -> JsonValue {
+    text_document_position_request(id, "textDocument/hover", uri, line, character)
+}
+
+/// Build a textDocument/definition request.
+pub fn definition_request(id: i64, uri: &str, line: u32, character: u32) -> JsonValue {
+    text_document_position_request(id, "textDocument/definition", uri, line, character)
+}
+
+fn text_document_position_request(
+    id: i64,
+    method: &str,
+    uri: &str,
+    line: u32,
+    character: u32,
+) -> JsonValue {
+    json_rpc_request(
+        id,
+        method,
+        JsonValue::Object(vec![
+            (
+                "textDocument".into(),
+                JsonValue::Object(vec![("uri".into(), JsonValue::String(uri.into()))]),
+            ),
+            (
+                "position".into(),
+                JsonValue::Object(vec![
+                    ("line".into(), JsonValue::Number(line as f64)),
+                    ("character".into(), JsonValue::Number(character as f64)),
+                ]),
+            ),
+        ]),
+    )
+}
+
 /// Build a shutdown request.
 pub fn shutdown_request(id: i64) -> JsonValue {
     json_rpc_request(id, "shutdown", JsonValue::Null)
@@ -243,6 +306,105 @@ pub fn parse_initialize_result(result: &JsonValue) -> ServerCapabilities {
         }
     }
     caps
+}
+
+/// Parse a textDocument/completion result.
+/// Handles both `CompletionList { items }` and a plain array.
+pub fn parse_completion_result(result: &JsonValue) -> Vec<CompletionItem> {
+    let items_val = if let Some(items) = result.get("items") {
+        items
+    } else {
+        result
+    };
+    match items_val.as_array() {
+        Some(arr) => arr.iter().filter_map(parse_one_completion_item).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn parse_one_completion_item(val: &JsonValue) -> Option<CompletionItem> {
+    let label = val.get("label")?.as_str()?.to_string();
+    let kind = val.get("kind").and_then(|v| v.as_f64()).map(|n| n as u32);
+    let detail = val
+        .get("detail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let insert_text = val
+        .get("insertText")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(CompletionItem {
+        label,
+        kind,
+        detail,
+        insert_text,
+    })
+}
+
+/// Parse a textDocument/hover result.
+/// Flattens MarkupContent / MarkedString / array → plain String.
+pub fn parse_hover_result(result: &JsonValue) -> Option<String> {
+    let contents = result.get("contents")?;
+    flatten_hover_contents(contents)
+}
+
+fn flatten_hover_contents(val: &JsonValue) -> Option<String> {
+    match val {
+        JsonValue::String(s) => {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        }
+        JsonValue::Object(_) => {
+            // MarkupContent: { kind, value } or MarkedString: { language, value }
+            if let Some(value) = val.get("value").and_then(|v| v.as_str()) {
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
+            } else {
+                None
+            }
+        }
+        JsonValue::Array(arr) => {
+            let parts: Vec<String> = arr.iter().filter_map(flatten_hover_contents).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Parse a textDocument/definition result.
+/// Handles `Location`, `Location[]`, and `LocationLink[]`.
+pub fn parse_definition_result(result: &JsonValue) -> Vec<Location> {
+    match result {
+        JsonValue::Array(arr) => arr.iter().filter_map(parse_one_location_or_link).collect(),
+        JsonValue::Null => Vec::new(),
+        _ => parse_one_location_or_link(result).into_iter().collect(),
+    }
+}
+
+fn parse_one_location_or_link(val: &JsonValue) -> Option<Location> {
+    // LocationLink has targetUri
+    if let Some(target_uri) = val.get("targetUri") {
+        let uri = target_uri.as_str()?.to_string();
+        let range = val
+            .get("targetSelectionRange")
+            .or_else(|| val.get("targetRange"))
+            .and_then(parse_range)?;
+        return Some(Location { uri, range });
+    }
+    // Plain Location { uri, range }
+    let uri = val.get("uri")?.as_str()?.to_string();
+    let range = parse_range(val.get("range")?)?;
+    Some(Location { uri, range })
 }
 
 // ---------------------------------------------------------------------------
@@ -406,5 +568,117 @@ mod tests {
 
         let exit = exit_notification();
         assert_eq!(exit.get("method").unwrap().as_str(), Some("exit"));
+    }
+
+    #[test]
+    fn test_completion_request_structure() {
+        let req = completion_request(5, "file:///test.rs", 10, 4);
+        assert_eq!(
+            req.get("method").unwrap().as_str(),
+            Some("textDocument/completion")
+        );
+        assert_eq!(req.get("id").unwrap().as_f64(), Some(5.0));
+        let params = req.get("params").unwrap();
+        assert_eq!(
+            params
+                .get("textDocument")
+                .unwrap()
+                .get("uri")
+                .unwrap()
+                .as_str(),
+            Some("file:///test.rs")
+        );
+        assert_eq!(
+            params
+                .get("position")
+                .unwrap()
+                .get("line")
+                .unwrap()
+                .as_f64(),
+            Some(10.0)
+        );
+        assert_eq!(
+            params
+                .get("position")
+                .unwrap()
+                .get("character")
+                .unwrap()
+                .as_f64(),
+            Some(4.0)
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_result_array() {
+        let json = r#"[
+            {"label": "println", "kind": 3, "insertText": "println!(${1:})"},
+            {"label": "print", "kind": 3}
+        ]"#;
+        let val = JsonValue::parse(json).unwrap();
+        let items = parse_completion_result(&val);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, "println");
+        assert_eq!(items[0].kind, Some(3));
+        assert_eq!(items[0].insert_text.as_deref(), Some("println!(${1:})"));
+        assert_eq!(items[1].label, "print");
+        assert_eq!(items[1].insert_text, None);
+    }
+
+    #[test]
+    fn test_parse_completion_result_list() {
+        let json = r#"{"isIncomplete": false, "items": [{"label": "foo", "kind": 6}]}"#;
+        let val = JsonValue::parse(json).unwrap();
+        let items = parse_completion_result(&val);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "foo");
+    }
+
+    #[test]
+    fn test_parse_hover_markup_content() {
+        let json = r#"{"contents": {"kind": "markdown", "value": "type `HashMap<K, V>`"}}"#;
+        let val = JsonValue::parse(json).unwrap();
+        let text = parse_hover_result(&val);
+        assert_eq!(text.as_deref(), Some("type `HashMap<K, V>`"));
+    }
+
+    #[test]
+    fn test_parse_hover_string() {
+        let json = r#"{"contents": "fn foo() -> i32"}"#;
+        let val = JsonValue::parse(json).unwrap();
+        let text = parse_hover_result(&val);
+        assert_eq!(text.as_deref(), Some("fn foo() -> i32"));
+    }
+
+    #[test]
+    fn test_parse_definition_location() {
+        let json = r#"{"uri": "file:///src/lib.rs", "range": {"start": {"line": 5, "character": 0}, "end": {"line": 5, "character": 10}}}"#;
+        let val = JsonValue::parse(json).unwrap();
+        let locs = parse_definition_result(&val);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, "file:///src/lib.rs");
+        assert_eq!(locs[0].range.start.line, 5);
+    }
+
+    #[test]
+    fn test_parse_definition_array() {
+        let json = r#"[
+            {"uri": "file:///a.rs", "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}}},
+            {"uri": "file:///b.rs", "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}}
+        ]"#;
+        let val = JsonValue::parse(json).unwrap();
+        let locs = parse_definition_result(&val);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0].uri, "file:///a.rs");
+        assert_eq!(locs[1].uri, "file:///b.rs");
+    }
+
+    #[test]
+    fn test_parse_definition_location_link() {
+        let json = r#"[{"targetUri": "file:///main.rs", "targetRange": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 4}}, "targetSelectionRange": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 4}}}]"#;
+        let val = JsonValue::parse(json).unwrap();
+        let locs = parse_definition_result(&val);
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, "file:///main.rs");
+        assert_eq!(locs[0].range.start.line, 3);
     }
 }

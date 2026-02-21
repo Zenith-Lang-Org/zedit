@@ -4,7 +4,7 @@
 
 use crate::syntax::json_parser::JsonValue;
 
-use super::protocol::{self, Diagnostic};
+use super::protocol::{self, CompletionItem, Diagnostic, Location};
 use super::transport::LspTransport;
 
 // ---------------------------------------------------------------------------
@@ -15,6 +15,9 @@ use super::transport::LspTransport;
 enum PendingKind {
     Initialize,
     Shutdown,
+    Completion,
+    Hover,
+    Definition,
 }
 
 struct PendingRequest {
@@ -39,6 +42,12 @@ pub struct LspClient {
     pending: Vec<(i64, PendingRequest)>,
     /// True after shutdown request sent
     shutting_down: bool,
+    /// Pending completion result (set by handle_response, consumed by drain_lsp_messages).
+    pub completion_result: Option<Vec<CompletionItem>>,
+    /// Pending hover result.
+    pub hover_result: Option<String>,
+    /// Pending definition result.
+    pub definition_result: Option<Vec<Location>>,
 }
 
 impl LspClient {
@@ -53,6 +62,9 @@ impl LspClient {
             diagnostics: Vec::new(),
             pending: Vec::new(),
             shutting_down: false,
+            completion_result: None,
+            hover_result: None,
+            definition_result: None,
         }
     }
 
@@ -109,6 +121,54 @@ impl LspClient {
         let _ = self.transport.send(&msg);
         // Remove version tracking
         self.doc_versions.retain(|(u, _)| u != uri);
+    }
+
+    /// Request completion at the given document position.
+    pub fn request_completion(&mut self, uri: &str, line: u32, character: u32) {
+        if !self.initialized {
+            return;
+        }
+        let id = self.next_id();
+        let req = protocol::completion_request(id, uri, line, character);
+        let _ = self.transport.send(&req);
+        self.pending.push((
+            id,
+            PendingRequest {
+                kind: PendingKind::Completion,
+            },
+        ));
+    }
+
+    /// Request hover information at the given document position.
+    pub fn request_hover(&mut self, uri: &str, line: u32, character: u32) {
+        if !self.initialized {
+            return;
+        }
+        let id = self.next_id();
+        let req = protocol::hover_request(id, uri, line, character);
+        let _ = self.transport.send(&req);
+        self.pending.push((
+            id,
+            PendingRequest {
+                kind: PendingKind::Hover,
+            },
+        ));
+    }
+
+    /// Request go-to-definition at the given document position.
+    pub fn request_definition(&mut self, uri: &str, line: u32, character: u32) {
+        if !self.initialized {
+            return;
+        }
+        let id = self.next_id();
+        let req = protocol::definition_request(id, uri, line, character);
+        let _ = self.transport.send(&req);
+        self.pending.push((
+            id,
+            PendingRequest {
+                kind: PendingKind::Definition,
+            },
+        ));
     }
 
     /// Drain all pending messages from the server.
@@ -236,6 +296,21 @@ impl LspClient {
             }
             PendingKind::Shutdown => {
                 // Server acknowledged shutdown — we already sent exit
+            }
+            PendingKind::Completion => {
+                if let Some(result) = msg.get("result") {
+                    self.completion_result = Some(protocol::parse_completion_result(result));
+                }
+            }
+            PendingKind::Hover => {
+                if let Some(result) = msg.get("result") {
+                    self.hover_result = protocol::parse_hover_result(result);
+                }
+            }
+            PendingKind::Definition => {
+                if let Some(result) = msg.get("result") {
+                    self.definition_result = Some(protocol::parse_definition_result(result));
+                }
             }
         }
     }

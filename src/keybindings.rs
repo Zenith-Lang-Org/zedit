@@ -53,6 +53,9 @@ pub enum EditorAction {
     CommandPalette,
     ToggleTerminal,
     NewTerminal,
+    LspComplete,
+    LspHover,
+    LspGoToDef,
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +359,9 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "command_palette" => Some(EditorAction::CommandPalette),
         "toggle_terminal" => Some(EditorAction::ToggleTerminal),
         "new_terminal" => Some(EditorAction::NewTerminal),
+        "lsp_complete" => Some(EditorAction::LspComplete),
+        "lsp_hover" => Some(EditorAction::LspHover),
+        "lsp_go_to_def" => Some(EditorAction::LspGoToDef),
         _ => None,
     }
 }
@@ -424,6 +430,10 @@ impl KeyMap {
             // Terminal — NEW default: Ctrl+T instead of Ctrl+`
             ("Ctrl+T", EditorAction::ToggleTerminal),
             ("Ctrl+Shift+T", EditorAction::NewTerminal),
+            // LSP interactive
+            ("Ctrl+Space", EditorAction::LspComplete),
+            ("Alt+K", EditorAction::LspHover),
+            ("F12", EditorAction::LspGoToDef),
         ];
 
         let mut bindings = HashMap::new();

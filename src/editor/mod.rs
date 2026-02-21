@@ -1,7 +1,9 @@
 mod buffer_state;
+mod completion;
 mod editing;
 mod filetree_integration;
 mod helpers;
+mod hover;
 mod palette;
 mod prompt;
 mod search;
@@ -142,6 +144,8 @@ pub struct Editor {
 
     // LSP support
     lsp_manager: Option<lsp::LspManager>,
+    completion_menu: Option<completion::CompletionMenu>,
+    hover_popup: Option<hover::HoverPopup>,
 
     // Swap file timer
     swap_timer: std::time::Instant,
@@ -219,6 +223,8 @@ impl Editor {
             terminal_panel_pane: None,
             terminal_idx: None,
             lsp_manager,
+            completion_menu: None,
+            hover_popup: None,
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: 2,
@@ -266,6 +272,8 @@ impl Editor {
             terminal_panel_pane: None,
             terminal_idx: None,
             lsp_manager,
+            completion_menu: None,
+            hover_popup: None,
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: 1,
@@ -438,6 +446,8 @@ impl Editor {
             terminal_panel_pane: None,
             terminal_idx: None,
             lsp_manager,
+            completion_menu: None,
+            hover_popup: None,
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: max_untitled + 1,
@@ -735,15 +745,14 @@ impl Editor {
 
     /// Drain LSP messages from all clients and sync diagnostics to buffers.
     fn drain_lsp_messages(&mut self) {
-        let mgr = match self.lsp_manager.as_mut() {
-            Some(m) => m,
-            None => return,
-        };
+        if self.lsp_manager.is_none() {
+            return;
+        }
 
+        let mgr = self.lsp_manager.as_mut().unwrap();
         mgr.drain_all();
 
         // Sync diagnostics from LSP clients to matching buffer states
-        // We iterate over all buffers and check if there are diagnostics for their URI
         for bs in &mut self.buffers {
             if let Some(ref lang) = bs.lsp_language {
                 if let Some(path) = bs.buffer.file_path() {
@@ -758,6 +767,26 @@ impl Editor {
                     }
                 }
             }
+        }
+
+        // Collect interactive LSP results (NLL ends mgr borrow after last use)
+        let new_completion = mgr.take_completion_result();
+        let new_hover = mgr.take_hover_result();
+        let new_definition = mgr.take_definition_result();
+
+        // Apply results — mgr borrow is fully released at this point
+        if let Some(items) = new_completion {
+            let (row, col) = self.cursor_screen_pos_for_lsp();
+            self.completion_menu = Some(completion::CompletionMenu::new(items, row, col));
+        }
+        if let Some(text) = new_hover {
+            let (row, col) = self.cursor_screen_pos_for_lsp();
+            self.hover_popup = Some(hover::HoverPopup::new(&text, row, col, 60));
+        }
+        if let Some(locs) = new_definition
+            && let Some(loc) = locs.into_iter().next()
+        {
+            self.lsp_navigate_to(loc);
         }
     }
 
@@ -805,6 +834,12 @@ impl Editor {
                 client.did_change(&uri, &text);
             }
         }
+    }
+
+    /// Close any open LSP overlays (completion menu, hover popup).
+    fn dismiss_lsp_overlays(&mut self) {
+        self.completion_menu = None;
+        self.hover_popup = None;
     }
 
     /// Notify LSP that a buffer was saved.
@@ -869,6 +904,182 @@ impl Editor {
             }
         }
         None
+    }
+
+    /// Return the (screen_row, screen_col) of the cursor in the active buffer.
+    fn cursor_screen_pos_for_lsp(&self) -> (usize, usize) {
+        if let Some(rect) = self.layout.pane_rect(self.active_pane) {
+            let b = self.buf();
+            let cursor_line = b.cursor().line;
+            let scroll_row = b.scroll_row;
+            let row = rect.y as usize + cursor_line.saturating_sub(scroll_row);
+            let display_col = self.cursor_display_col();
+            let scroll_col = b.scroll_col;
+            let col = rect.x as usize + b.gutter_width + display_col.saturating_sub(scroll_col);
+            (row, col)
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Trigger LSP completion at the current cursor position.
+    fn lsp_trigger_completion(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        let lang = match self.buffers[buf_idx].lsp_language.clone() {
+            Some(l) => l,
+            None => return,
+        };
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+        let uri = lsp::protocol::path_to_uri(&path);
+        let line = self.buffers[buf_idx].cursor().line as u32;
+        let character = self.buffers[buf_idx].cursor().col as u32;
+        if let Some(ref mut mgr) = self.lsp_manager {
+            mgr.request_completion(&lang, &uri, line, character);
+        }
+    }
+
+    /// Trigger LSP hover at the current cursor position.
+    fn lsp_trigger_hover(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        let lang = match self.buffers[buf_idx].lsp_language.clone() {
+            Some(l) => l,
+            None => return,
+        };
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+        let uri = lsp::protocol::path_to_uri(&path);
+        let line = self.buffers[buf_idx].cursor().line as u32;
+        let character = self.buffers[buf_idx].cursor().col as u32;
+        if let Some(ref mut mgr) = self.lsp_manager {
+            mgr.request_hover(&lang, &uri, line, character);
+        }
+    }
+
+    /// Trigger LSP go-to-definition at the current cursor position.
+    fn lsp_trigger_goto_def(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        let lang = match self.buffers[buf_idx].lsp_language.clone() {
+            Some(l) => l,
+            None => return,
+        };
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+        let uri = lsp::protocol::path_to_uri(&path);
+        let line = self.buffers[buf_idx].cursor().line as u32;
+        let character = self.buffers[buf_idx].cursor().col as u32;
+        if let Some(ref mut mgr) = self.lsp_manager {
+            mgr.request_definition(&lang, &uri, line, character);
+        }
+    }
+
+    /// Handle a key event while the completion menu is open.
+    /// Returns true if the key was consumed (menu acted on it).
+    fn handle_completion_key(&mut self, ke: KeyEvent) -> bool {
+        match &ke.key {
+            Key::Tab | Key::Enter => {
+                let text = self
+                    .completion_menu
+                    .as_ref()
+                    .map(|m| m.selected_insert_text().to_string())
+                    .unwrap_or_default();
+                self.completion_menu = None;
+                if !text.is_empty() {
+                    self.lsp_apply_completion(&text);
+                }
+                true
+            }
+            Key::Up => {
+                if let Some(ref mut menu) = self.completion_menu {
+                    menu.select_prev();
+                }
+                true
+            }
+            Key::Down => {
+                if let Some(ref mut menu) = self.completion_menu {
+                    menu.select_next();
+                }
+                true
+            }
+            Key::Escape => {
+                self.completion_menu = None;
+                true
+            }
+            _ => {
+                // Any other key: close the menu but let the key pass through
+                self.completion_menu = None;
+                false
+            }
+        }
+    }
+
+    /// Insert completion text at the current cursor position.
+    fn lsp_apply_completion(&mut self, text: &str) {
+        self.delete_selection();
+        self.handle_paste(text);
+    }
+
+    /// Navigate to an LSP Location (same file or open new buffer).
+    fn lsp_navigate_to(&mut self, loc: lsp::Location) {
+        let path = match lsp::protocol::uri_to_path(&loc.uri) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let target_line = loc.range.start.line as usize;
+        let target_col = loc.range.start.character as usize;
+
+        // Check if any existing buffer has this path
+        let existing = self.buffers.iter().position(|bs| {
+            bs.buffer
+                .file_path()
+                .map(|p| p.to_string_lossy() == path.as_str())
+                .unwrap_or(false)
+        });
+
+        if let Some(buf_idx) = existing {
+            // Switch to that buffer
+            self.layout.set_pane_buffer(self.active_pane, buf_idx);
+            self.active_buffer = buf_idx;
+            let b = &mut self.buffers[buf_idx];
+            b.cursors[b.primary]
+                .cursor
+                .set_position(target_line, target_col, &b.buffer);
+            b.scroll_row = target_line.saturating_sub(5);
+        } else {
+            // Open new buffer
+            let file_path = std::path::Path::new(&path);
+            if !file_path.exists() {
+                return;
+            }
+            if let Ok(mut new_buf) = BufferState::from_file(
+                file_path,
+                self.config.line_numbers,
+                &self.config.theme,
+                &self.config.languages,
+            ) {
+                new_buf.cursors[new_buf.primary].cursor.set_position(
+                    target_line,
+                    target_col,
+                    &new_buf.buffer,
+                );
+                new_buf.scroll_row = target_line.saturating_sub(5);
+                self.buffers.push(new_buf);
+                let new_idx = self.buffers.len() - 1;
+                self.layout.set_pane_buffer(self.active_pane, new_idx);
+                self.active_buffer = new_idx;
+                self.lsp_notify_open(new_idx);
+            }
+        }
+
+        self.dismiss_lsp_overlays();
+        self.adjust_viewport();
     }
 
     /// Sync PTY/VTerm sizes to match their pane rects.
@@ -1177,6 +1388,21 @@ impl Editor {
             return;
         }
 
+        // Completion menu: consumes navigation + accept/dismiss keys
+        if self.completion_menu.is_some()
+            && let Event::Key(ref ke) = event
+        {
+            let ke_copy = ke.clone();
+            if self.handle_completion_key(ke_copy) {
+                return;
+            }
+        }
+
+        // Hover popup: any key or mouse event dismisses it (processing continues)
+        if self.hover_popup.is_some() && matches!(&event, Event::Key(_) | Event::Mouse(_)) {
+            self.hover_popup = None;
+        }
+
         // Clear message on any event, but only when no prompt is active
         if self.prompt.is_none() && !matches!(&event, Event::None) {
             self.message = None;
@@ -1303,6 +1529,9 @@ impl Editor {
             }
             EditorAction::ToggleTerminal => self.toggle_terminal_panel(),
             EditorAction::NewTerminal => self.new_terminal(),
+            EditorAction::LspComplete => self.lsp_trigger_completion(),
+            EditorAction::LspHover => self.lsp_trigger_hover(),
+            EditorAction::LspGoToDef => self.lsp_trigger_goto_def(),
         }
     }
 

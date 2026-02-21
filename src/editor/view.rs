@@ -365,6 +365,14 @@ impl Editor {
             self.render_palette();
         }
 
+        // LSP overlays
+        if self.completion_menu.is_some() {
+            self.render_completion_menu();
+        }
+        if self.hover_popup.is_some() {
+            self.render_hover_popup();
+        }
+
         // Flush the screen
         self.screen.flush(&self.color_mode);
 
@@ -1820,5 +1828,307 @@ impl Editor {
             }
         }
         None
+    }
+
+    // -----------------------------------------------------------------------
+    // LSP overlay renderers
+    // -----------------------------------------------------------------------
+
+    pub(super) fn render_completion_menu(&mut self) {
+        // Extract the data we need from the menu before drawing (releases borrow).
+        let (items_data, selected, scroll_offset, anchor_row, anchor_col) = {
+            let menu = match self.completion_menu.as_ref() {
+                Some(m) => m,
+                None => return,
+            };
+            let data: Vec<(String, &'static str)> = menu
+                .items
+                .iter()
+                .map(|i| (i.label.clone(), i.kind_str))
+                .collect();
+            (
+                data,
+                menu.selected,
+                menu.scroll_offset,
+                menu.anchor_screen_row,
+                menu.anchor_screen_col,
+            )
+        };
+
+        if items_data.is_empty() {
+            return;
+        }
+
+        let screen_h = self.screen.height();
+        let screen_w = self.screen.width();
+        // Reserve status bar rows
+        let usable_h = screen_h.saturating_sub(self.status_height);
+
+        const MAX_VISIBLE: usize = 10;
+        let visible_count = items_data.len().min(MAX_VISIBLE);
+
+        // Compute menu width
+        let max_label = items_data.iter().map(|(l, _)| l.len()).max().unwrap_or(4);
+        let max_label = max_label.max(4);
+        let kind_w = 3;
+        let inner_w = max_label + 1 + kind_w; // label + space + kind
+        let total_w = (inner_w + 2).min(screen_w); // +2 for borders
+        let total_h = visible_count + 2; // +2 for borders
+
+        // Position: below cursor by default
+        let mut start_row = anchor_row + 1;
+        let mut start_col = anchor_col;
+
+        // Clamp: flip above if menu doesn't fit below
+        if start_row + total_h > usable_h {
+            start_row = anchor_row.saturating_sub(total_h);
+        }
+        // Clamp right
+        if start_col + total_w > screen_w {
+            start_col = screen_w.saturating_sub(total_w);
+        }
+
+        let border_fg = Color::Ansi(6); // cyan
+        let bg = Color::Color256(235); // dark
+        let selected_bg = Color::Ansi(4); // blue
+        let selected_fg = Color::Ansi(7); // white
+        let normal_fg = Color::Ansi(7);
+        let kind_fg = Color::Color256(240); // dim grey
+
+        // Top border
+        if start_row < screen_h {
+            self.screen
+                .put_char(start_row, start_col, '\u{256d}', border_fg, bg, false);
+            for c in 1..total_w.saturating_sub(1) {
+                self.screen
+                    .put_char(start_row, start_col + c, '\u{2500}', border_fg, bg, false);
+            }
+            self.screen.put_char(
+                start_row,
+                start_col + total_w - 1,
+                '\u{256e}',
+                border_fg,
+                bg,
+                false,
+            );
+        }
+
+        // Items
+        for i in 0..visible_count {
+            let idx = scroll_offset + i;
+            if idx >= items_data.len() {
+                break;
+            }
+            let row = start_row + 1 + i;
+            if row >= usable_h {
+                break;
+            }
+
+            let (ref label, kind_str) = items_data[idx];
+            let is_selected = idx == selected;
+            let item_bg = if is_selected { selected_bg } else { bg };
+            let item_fg = if is_selected { selected_fg } else { normal_fg };
+
+            // Fill the row
+            for c in 0..total_w {
+                self.screen
+                    .put_char(row, start_col + c, ' ', item_fg, item_bg, false);
+            }
+
+            // Left border
+            self.screen
+                .put_char(row, start_col, '\u{2502}', border_fg, bg, false);
+
+            // Label (truncated to fit)
+            let avail = total_w.saturating_sub(2 + 1 + kind_w); // inner - separator - kind
+            let label_truncated = if label.len() > avail {
+                &label[..avail]
+            } else {
+                label.as_str()
+            };
+            self.screen
+                .put_str(row, start_col + 1, label_truncated, item_fg, item_bg, false);
+
+            // Kind hint right-aligned (before right border)
+            let kind_col = start_col + total_w - 1 - kind_str.len();
+            self.screen
+                .put_str(row, kind_col, kind_str, kind_fg, item_bg, false);
+
+            // Right border
+            self.screen.put_char(
+                row,
+                start_col + total_w - 1,
+                '\u{2502}',
+                border_fg,
+                bg,
+                false,
+            );
+        }
+
+        // Scroll indicators
+        if scroll_offset > 0 && start_row + 1 < usable_h {
+            self.screen.put_char(
+                start_row + 1,
+                start_col + total_w - 1,
+                '\u{25b4}', // ▴
+                border_fg,
+                bg,
+                false,
+            );
+        }
+        if scroll_offset + visible_count < items_data.len() {
+            let last_item_row = start_row + visible_count;
+            if last_item_row < usable_h {
+                self.screen.put_char(
+                    last_item_row,
+                    start_col + total_w - 1,
+                    '\u{25be}', // ▾
+                    border_fg,
+                    bg,
+                    false,
+                );
+            }
+        }
+
+        // Bottom border
+        let bot_row = start_row + visible_count + 1;
+        if bot_row < screen_h {
+            self.screen
+                .put_char(bot_row, start_col, '\u{2570}', border_fg, bg, false);
+            for c in 1..total_w.saturating_sub(1) {
+                self.screen
+                    .put_char(bot_row, start_col + c, '\u{2500}', border_fg, bg, false);
+            }
+            self.screen.put_char(
+                bot_row,
+                start_col + total_w - 1,
+                '\u{256f}',
+                border_fg,
+                bg,
+                false,
+            );
+        }
+    }
+
+    pub(super) fn render_hover_popup(&mut self) {
+        let (lines, anchor_row, anchor_col) = {
+            let popup = match self.hover_popup.as_ref() {
+                Some(p) => p,
+                None => return,
+            };
+            (
+                popup.lines.clone(),
+                popup.anchor_screen_row,
+                popup.anchor_screen_col,
+            )
+        };
+
+        if lines.is_empty() {
+            return;
+        }
+
+        let screen_h = self.screen.height();
+        let screen_w = self.screen.width();
+        let usable_h = screen_h.saturating_sub(self.status_height);
+
+        let max_line_w = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+        // Header row adds " hover " label
+        let inner_w = max_line_w.max(7);
+        let total_w = (inner_w + 4).min(screen_w); // 4 = 2 border + 2 padding
+        let total_h = lines.len() + 2; // +2 for top/bottom border
+
+        // Position: above cursor by default
+        let mut start_row = anchor_row.saturating_sub(total_h);
+        // If no room above, place below
+        if anchor_row < total_h {
+            start_row = anchor_row + 1;
+        }
+
+        let mut start_col = anchor_col;
+        if start_col + total_w > screen_w {
+            start_col = screen_w.saturating_sub(total_w);
+        }
+
+        let border_fg = Color::Ansi(6); // cyan
+        let bg = Color::Color256(235); // dark
+        let text_fg = Color::Ansi(7); // white
+
+        // Top border: ╭─ hover ─────╮
+        if start_row < usable_h {
+            self.screen
+                .put_char(start_row, start_col, '\u{256d}', border_fg, bg, false);
+            let header = " hover ";
+            let dash_total = total_w.saturating_sub(2 + header.len());
+            let dash_left = dash_total / 2;
+            let dash_right = dash_total - dash_left;
+            let mut col = start_col + 1;
+            for _ in 0..dash_left {
+                self.screen
+                    .put_char(start_row, col, '\u{2500}', border_fg, bg, false);
+                col += 1;
+            }
+            self.screen
+                .put_str(start_row, col, header, border_fg, bg, false);
+            col += header.len();
+            for _ in 0..dash_right {
+                self.screen
+                    .put_char(start_row, col, '\u{2500}', border_fg, bg, false);
+                col += 1;
+            }
+            self.screen
+                .put_char(start_row, col, '\u{256e}', border_fg, bg, false);
+        }
+
+        // Content rows
+        for (i, line) in lines.iter().enumerate() {
+            let row = start_row + 1 + i;
+            if row >= usable_h {
+                break;
+            }
+            // Fill row
+            for c in 0..total_w {
+                self.screen
+                    .put_char(row, start_col + c, ' ', text_fg, bg, false);
+            }
+            // Borders
+            self.screen
+                .put_char(row, start_col, '\u{2502}', border_fg, bg, false);
+            self.screen.put_char(
+                row,
+                start_col + total_w - 1,
+                '\u{2502}',
+                border_fg,
+                bg,
+                false,
+            );
+            // Text (left-padded by 1)
+            let avail = total_w.saturating_sub(4);
+            let display = if line.len() > avail {
+                &line[..avail]
+            } else {
+                line.as_str()
+            };
+            self.screen
+                .put_str(row, start_col + 2, display, text_fg, bg, false);
+        }
+
+        // Bottom border
+        let bot_row = start_row + lines.len() + 1;
+        if bot_row < screen_h {
+            self.screen
+                .put_char(bot_row, start_col, '\u{2570}', border_fg, bg, false);
+            for c in 1..total_w.saturating_sub(1) {
+                self.screen
+                    .put_char(bot_row, start_col + c, '\u{2500}', border_fg, bg, false);
+            }
+            self.screen.put_char(
+                bot_row,
+                start_col + total_w - 1,
+                '\u{256f}',
+                border_fg,
+                bg,
+                false,
+            );
+        }
     }
 }

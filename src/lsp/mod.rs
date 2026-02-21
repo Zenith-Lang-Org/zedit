@@ -7,6 +7,7 @@ pub mod protocol;
 pub mod transport;
 
 use client::LspClient;
+pub use protocol::{CompletionItem, Location};
 use transport::LspTransport;
 
 // ---------------------------------------------------------------------------
@@ -118,5 +119,56 @@ impl LspManager {
     /// Check if any LSP server is configured.
     pub fn has_config(&self) -> bool {
         !self.config.is_empty()
+    }
+
+    /// Send a completion request for the given language.
+    pub fn request_completion(&mut self, lang: &str, uri: &str, line: u32, character: u32) {
+        if let Some(client) = self.client_mut(lang) {
+            client.request_completion(uri, line, character);
+        }
+    }
+
+    /// Send a hover request for the given language.
+    pub fn request_hover(&mut self, lang: &str, uri: &str, line: u32, character: u32) {
+        if let Some(client) = self.client_mut(lang) {
+            client.request_hover(uri, line, character);
+        }
+    }
+
+    /// Send a definition request for the given language.
+    pub fn request_definition(&mut self, lang: &str, uri: &str, line: u32, character: u32) {
+        if let Some(client) = self.client_mut(lang) {
+            client.request_definition(uri, line, character);
+        }
+    }
+
+    /// Take any pending completion result from any client.
+    pub fn take_completion_result(&mut self) -> Option<Vec<CompletionItem>> {
+        for (_, client) in &mut self.clients {
+            if let Some(r) = client.completion_result.take() {
+                return Some(r);
+            }
+        }
+        None
+    }
+
+    /// Take any pending hover result from any client.
+    pub fn take_hover_result(&mut self) -> Option<String> {
+        for (_, client) in &mut self.clients {
+            if let Some(r) = client.hover_result.take() {
+                return Some(r);
+            }
+        }
+        None
+    }
+
+    /// Take any pending definition result from any client.
+    pub fn take_definition_result(&mut self) -> Option<Vec<Location>> {
+        for (_, client) in &mut self.clients {
+            if let Some(r) = client.definition_result.take() {
+                return Some(r);
+            }
+        }
+        None
     }
 }
