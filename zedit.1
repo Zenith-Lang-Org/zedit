@@ -1,4 +1,4 @@
-.TH ZEDIT 1 "2026-02-17" "zedit 0.1.0" "User Commands"
+.TH ZEDIT 1 "2026-02-21" "zedit 0.1.0" "User Commands"
 .SH NAME
 zedit \- modern console text editor
 .SH SYNOPSIS
@@ -15,12 +15,14 @@ zedit \- modern console text editor
 is a modern console text editor written in pure Rust
 with zero external dependencies. It features UTF\-8 native text handling,
 modern desktop\-style keybindings (Ctrl+C/V/X/S/Z), syntax highlighting
-via TextMate grammars, and diff\-based rendering for smooth performance.
-Part of the Z ecosystem (Zenith, Zymbol).
+via TextMate grammars, diff\-based rendering, multi\-cursor editing,
+split panes, an integrated terminal, LSP client, git gutter, diff view,
+minimap, and a plugin system. Part of the Z ecosystem (Zenith, Zymbol).
 .PP
 If
 .I file
-is given, it is opened for editing. Otherwise a new empty buffer is created.
+is given, it is opened for editing. Otherwise the previous session is
+restored (if one exists), or a new empty buffer is created.
 .SH OPTIONS
 .TP
 .BR \-h ", " \-\-help
@@ -42,6 +44,18 @@ Open file \(em prompts for a file path.
 .TP
 .B Ctrl+Q
 Quit. If there are unsaved changes, press again to confirm.
+.TP
+.B Ctrl+N
+Open a new empty buffer.
+.TP
+.B Ctrl+W
+Close the current buffer (confirms if unsaved).
+.TP
+.B Ctrl+Page Down
+Switch to the next buffer.
+.TP
+.B Ctrl+Page Up
+Switch to the previous buffer.
 .SS Edit
 .TP
 .B Ctrl+Z
@@ -51,7 +65,7 @@ Undo.
 Redo.
 .TP
 .B Ctrl+C
-Copy selection (or current line if no selection).
+Copy selection (or current line if no selection). Line\-mode paste inserts above.
 .TP
 .B Ctrl+X
 Cut selection (or current line if no selection).
@@ -59,16 +73,14 @@ Cut selection (or current line if no selection).
 .B Ctrl+V
 Paste from clipboard.
 .TP
-.B Ctrl+D
+.B Ctrl+Shift+D
 Duplicate current line.
 .TP
 .B Ctrl+Shift+K
 Delete current line.
 .TP
 .B Tab
-Insert indentation (spaces or tab character, depending on
-.IR use_spaces
-config option).
+Indent current line or selected lines.
 .TP
 .B Shift+Tab
 Unindent current line or selected lines.
@@ -93,13 +105,16 @@ Move to start/end of file.
 Scroll one page up/down.
 .TP
 .B Ctrl+G
-Go to line number.
+Go to line number \(em prompts for a line number.
+.SS Search
 .TP
 .B Ctrl+F
-Find (incremental search, case\-insensitive). Press Ctrl+R to toggle regex mode.
+Find (incremental search, highlights all matches). Press
+.B Ctrl+R
+inside the search prompt to toggle regular expression mode.
 .TP
 .B Ctrl+H
-Find and replace.
+Find and replace \(em prompts for search and replacement strings.
 .TP
 .B F3 / Shift+F3
 Jump to next/previous search match.
@@ -108,7 +123,7 @@ Jump to next/previous search match.
 .B Shift+Arrow keys
 Extend selection character by character or line by line.
 .TP
-.B Ctrl+Shift+Left/Right
+.B Ctrl+Shift+Left / Ctrl+Shift+Right
 Extend selection word by word.
 .TP
 .B Ctrl+A
@@ -116,33 +131,124 @@ Select all.
 .TP
 .B Ctrl+L
 Select current line.
-.SS Multi\-buffer
+.SS Multi\-Cursor
 .TP
-.B Ctrl+N
-Open a new empty buffer.
+.B Ctrl+D
+Add cursor at the next occurrence of the current selection (or select word
+under cursor). Repeat to add more cursors. All cursors edit simultaneously.
 .TP
-.B Ctrl+W
-Close current buffer (confirms if unsaved).
+.B Ctrl+Shift+L
+Select all occurrences of the current selection at once.
 .TP
-.B Ctrl+Page Down
-Switch to next buffer.
+.B Alt+Click
+Add a cursor at the clicked position.
 .TP
-.B Ctrl+Page Up
-Switch to previous buffer.
+.B Escape
+Collapse all cursors to a single primary cursor.
+.SS Panes
+.TP
+.B Ctrl+Backslash
+Split the active pane horizontally (side\-by\-side).
+.TP
+.B Ctrl+Shift+Backslash
+Split the active pane vertically (top/bottom).
+.TP
+.B Ctrl+Shift+W
+Close the active pane.
+.TP
+.B Alt+Left / Alt+Right / Alt+Up / Alt+Down
+Move focus to the adjacent pane in that direction.
+.TP
+.B Alt+Shift+Left / Alt+Shift+Right
+Resize the active pane horizontally.
+.TP
+.B Alt+Shift+Up / Alt+Shift+Down
+Resize the active pane vertically.
+.SS View
+.TP
+.B F1
+Toggle the in\-editor help overlay.
+.TP
+.B Alt+Z
+Toggle soft word wrap.
+.TP
+.B Ctrl+B
+Toggle the file tree sidebar.
+.TP
+.B Ctrl+P
+Open the command palette (fuzzy\-searchable list of all editor actions and
+plugin commands).
+.TP
+.B Alt+M
+Toggle the minimap (braille code overview on the right edge of the pane).
+.SS Terminal
+.TP
+.B Ctrl+T
+Toggle the integrated terminal panel (persistent PTY).
+.TP
+.B Ctrl+Shift+T
+Open a new terminal tab.
+.TP
+.B Shift+Page Up / Shift+Page Down
+Scroll the terminal scrollback history.
+.SS LSP (Language Server Protocol)
+.TP
+.B Ctrl+Space
+Request LSP completions. A floating menu appears; use
+.B Up/Down
+to navigate,
+.B Tab
+or
+.B Enter
+to insert,
+.B Escape
+to dismiss.
+.TP
+.B Alt+K
+Show hover documentation for the symbol under the cursor. Any key dismisses.
+.TP
+.B F12
+Go to the definition of the symbol under the cursor.
+If the definition is in another file, that file is opened in the active pane.
+.PP
+LSP diagnostics (errors and warnings) are shown with colored underlines in the
+text and counted in the status bar. The language server is configured in
+.IR ~/.config/zedit/config.json .
+.SS Diff View
+.TP
+.B F7
+Open a side\-by\-side diff of the current buffer versus its HEAD version in git.
+.TP
+.B F8
+Jump to the next changed hunk.
+.TP
+.B Shift+F8
+Jump to the previous changed hunk.
+.TP
+.B Up / Down / Page Up / Page Down
+Scroll the diff view.
+.TP
+.B Escape
+Close the diff view.
 .SS Mouse
 .TP
 .B Click
 Position cursor.
+.TP
+.B Double\-click
+Select word under cursor.
 .TP
 .B Drag
 Select text.
 .TP
 .B Scroll wheel
 Scroll viewport up/down.
-.SS Help
 .TP
-.B F1
-Toggle the in\-editor help overlay.
+.B Alt+Click
+Add a multi\-cursor at the clicked position.
+.TP
+.B Click on tab bar
+Switch to that buffer.
 .SH CONFIGURATION
 .B Zedit
 reads its configuration from
@@ -158,6 +264,13 @@ Example:
     "line_numbers": true,
     "auto_indent": true,
     "word_wrap": false,
+    "lsp": {
+        "rust": { "command": "rust\-analyzer" },
+        "python": { "command": "pylsp" }
+    },
+    "keybindings": {
+        "toggle_minimap": "Alt+M"
+    },
     "languages": [
         {
             "name": "ruby",
@@ -174,7 +287,7 @@ Example:
 Number of spaces per indentation level (1\(en16, default 4).
 .TP
 .B use_spaces
-If true (default), Tab inserts spaces. If false, inserts a literal tab character.
+If true (default), Tab inserts spaces. If false, inserts a literal tab.
 .TP
 .B theme
 Color theme name. Built\-in themes:
@@ -191,20 +304,62 @@ Preserve indentation on Enter (default true).
 .B word_wrap
 Wrap long lines visually (default false).
 .TP
+.B lsp
+Object mapping language IDs to LSP server configurations. Each entry has a
+.B command
+field (executable name or path) and an optional
+.B args
+array. The language ID must match the
+.B name
+field of a language definition (e.g. "rust", "python", "typescript").
+.TP
+.B keybindings
+Object mapping action names to key strings (e.g. "Ctrl+Shift+M").
+Valid modifiers: Ctrl, Alt, Shift. Key names: single characters,
+Enter, Tab, Backspace, Delete, Escape, Up, Down, Left, Right, Home, End,
+PageUp, PageDown, F1\(enF12, Space, Backtick, Backslash, Slash.
+.TP
 .B languages
 Array of language definitions. Each entry has:
 .BR name " (language identifier),"
 .BR extensions " (file extension list),"
 .BR grammar " (TextMate grammar filename),"
 .BR comment " (line comment prefix, optional)."
-User entries override built\-in languages by name; new names are appended.
+User entries override built\-in languages by name.
+.SH LSP CONFIGURATION
+Zedit starts language servers on demand when a file of a matching language is
+opened. Servers must be installed separately (e.g.
+.B rust\-analyzer
+from the Rust toolchain,
+.B pylsp
+via pip). Configure them in
+.IR ~/.config/zedit/config.json :
+.PP
+.RS
+.nf
+{
+    "lsp": {
+        "rust":       { "command": "rust\-analyzer" },
+        "python":     { "command": "pylsp" },
+        "typescript": { "command": "typescript\-language\-server",
+                        "args": [\-\-stdio"] },
+        "go":         { "command": "gopls" },
+        "c":          { "command": "clangd" }
+    }
+}
+.fi
+.RE
+.PP
+Diagnostics appear as colored underlines in the text and are counted in the
+status bar (e.g. "E:2 W:1"). LSP completion, hover, and go\-to\-definition
+require a running server.
 .SH SYNTAX HIGHLIGHTING
 .B Zedit
 uses TextMate grammar files
 .RB ( .tmLanguage.json )
-for syntax highlighting. Built\-in grammars are provided for:
-Rust, C, C++, Python, JavaScript, TypeScript, PHP, Shell, HTML, CSS,
-JSON, TOML, Markdown, Zenith, and Zymbol.
+for syntax highlighting. Built\-in grammars:
+Rust, C, C++, Go, Java, JavaScript, TypeScript, Python, PHP, Julia, R,
+JSON, TOML, YAML, Markdown, Shell/Bash, HTML, CSS, XML, Zenith, Zymbol, Minilux.
 .PP
 User\-provided grammars can be placed in
 .IR ~/.config/zedit/grammars/ .
@@ -214,28 +369,93 @@ field in the language definition.
 .PP
 Themes follow the VS Code color theme format. Color output adapts automatically
 to the terminal's capabilities (24\-bit, 256\-color, or 16\-color).
+.SH GIT GUTTER
+When a file is inside a git repository, zedit shows change markers in the
+left gutter next to the line numbers:
+.TP
+.B +
+(green) \(em line added since HEAD
+.TP
+.B ~
+(yellow) \(em line modified since HEAD
+.TP
+.B \-
+(red) \(em lines deleted (shown on the adjacent line)
+.PP
+The gutter updates automatically as you edit.
+.SH SESSION AND SWAP
+Zedit saves the current session (open files, cursor positions, scroll offsets)
+automatically on exit. Running
+.B zedit
+without arguments restores the previous session.
+.PP
+Swap files are written every 2 seconds while editing. If zedit crashes,
+the next launch detects orphaned swap files and offers to recover them.
+.SH PLUGINS
+Plugins are external processes that communicate with zedit over newline\-delimited
+JSON on stdin/stdout. Currently the Minilux runtime is supported.
+.PP
+Place each plugin in its own subdirectory of
+.IR ~/.config/zedit/plugins/ ,
+with a
+.B manifest.json
+describing it:
+.PP
+.RS
+.nf
+{
+    "name": "myplugin",
+    "version": "1.0.0",
+    "description": "Does something useful",
+    "main": "main.mlx"
+}
+.fi
+.RE
+.PP
+Plugins can register palette commands, subscribe to editor events
+.RB ( buffer_open ", " buffer_save ", " buffer_close ", " cursor_move ", " text_change ),
+read and insert buffer text, and show status bar messages.
 .SH FILES
 .TP
 .I ~/.config/zedit/config.json
 Editor configuration file.
 .TP
 .I ~/.config/zedit/grammars/
-User\-provided TextMate grammar files.
+User\-provided TextMate grammar files (.tmLanguage.json).
 .TP
 .I ~/.config/zedit/themes/
-User\-provided color theme files.
+User\-provided VS Code\-compatible color theme files.
+.TP
+.I ~/.config/zedit/plugins/
+Plugin directories (one subdirectory per plugin).
+.TP
+.I ~/.local/share/zedit/sessions/
+Session persistence files (auto\-saved on exit).
+.TP
+.I ~/.local/share/zedit/swap/
+Swap files for crash recovery.
 .SH ENVIRONMENT
 .TP
 .B COLORTERM
 If set to
 .BR truecolor " or " 24bit ,
-enables 24\-bit color output.
+enables 24\-bit true color output.
 .TP
 .B TERM
 Used to detect 256\-color support (e.g.,
 .BR xterm\-256color ).
 Falls back to 16\-color mode otherwise.
+.TP
+.B HOME
+Used to locate
+.I ~/.config/zedit/
+and plugin directories.
 .SH AUTHORS
-Written as part of the Z ecosystem (Zenith, Zymbol).
+Written by the Z ecosystem team (Zenith, Zymbol, Minilux).
 .SH BUGS
-Report bugs at the project repository.
+Report bugs at
+.I https://github.com/Zenith-Lang-Org/zedit/issues
+.SH SEE ALSO
+.BR vim (1),
+.BR nano (1),
+.BR helix (1)

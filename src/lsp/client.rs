@@ -125,11 +125,17 @@ impl LspClient {
 
     /// Request completion at the given document position.
     pub fn request_completion(&mut self, uri: &str, line: u32, character: u32) {
+        crate::dlog!(
+            "[lsp_client] request_completion: initialized={} uri={}",
+            self.initialized, uri
+        );
         if !self.initialized {
+            crate::dlog!("[lsp_client] skipping: not initialized yet");
             return;
         }
         let id = self.next_id();
         let req = protocol::completion_request(id, uri, line, character);
+        crate::dlog!("[lsp_client] sending completion request id={}", id);
         let _ = self.transport.send(&req);
         self.pending.push((
             id,
@@ -173,11 +179,19 @@ impl LspClient {
 
     /// Drain all pending messages from the server.
     pub fn drain_messages(&mut self) {
+        let mut count = 0usize;
         loop {
             match self.transport.try_recv() {
-                Ok(Some(msg)) => self.handle_message(msg),
+                Ok(Some(msg)) => {
+                    count += 1;
+                    crate::dlog!("[lsp_client] drain_messages: got message #{}", count);
+                    self.handle_message(msg);
+                }
                 Ok(None) => break,
-                Err(_) => break,
+                Err(e) => {
+                    crate::dlog!("[lsp_client] drain_messages: try_recv error: {}", e);
+                    break;
+                }
             }
         }
     }
@@ -208,6 +222,11 @@ impl LspClient {
     /// Check if the transport is alive.
     pub fn is_alive(&self) -> bool {
         !self.transport.is_dead()
+    }
+
+    /// Reap the child process (non-blocking). Returns true if it died.
+    pub fn reap_transport(&mut self) -> bool {
+        self.transport.reap()
     }
 
     /// Whether initialization handshake is complete.
@@ -261,6 +280,11 @@ impl LspClient {
     }
 
     fn handle_message(&mut self, msg: JsonValue) {
+        crate::dlog!(
+            "[lsp_client] handle_message: id={:?} method={:?}",
+            msg.get("id").and_then(|v| v.as_f64()),
+            msg.get("method").and_then(|v| v.as_str())
+        );
         // Check if it's a response (has "id" and "result" or "error")
         if let Some(id_val) = msg.get("id") {
             if let Some(id) = id_val.as_f64() {
@@ -298,8 +322,13 @@ impl LspClient {
                 // Server acknowledged shutdown — we already sent exit
             }
             PendingKind::Completion => {
+                crate::dlog!("[lsp_client] got completion response");
                 if let Some(result) = msg.get("result") {
-                    self.completion_result = Some(protocol::parse_completion_result(result));
+                    let items = protocol::parse_completion_result(result);
+                    crate::dlog!("[lsp_client] parsed {} completion items", items.len());
+                    self.completion_result = Some(items);
+                } else {
+                    crate::dlog!("[lsp_client] completion response has no 'result' field");
                 }
             }
             PendingKind::Hover => {

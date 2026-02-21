@@ -803,6 +803,7 @@ impl Editor {
         }
 
         let mgr = self.lsp_manager.as_mut().unwrap();
+        mgr.reap_dead_clients();
         mgr.drain_all();
 
         // Sync diagnostics from LSP clients to matching buffer states
@@ -829,6 +830,7 @@ impl Editor {
 
         // Apply results — mgr borrow is fully released at this point
         if let Some(items) = new_completion {
+            crate::dlog!("[lsp] completion result arrived: {} items", items.len());
             let (row, col) = self.cursor_screen_pos_for_lsp();
             self.completion_menu = Some(completion::CompletionMenu::new(items, row, col));
         }
@@ -1084,11 +1086,18 @@ impl Editor {
         let ext = std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())?;
+        crate::dlog!("[lsp] detect_lsp_language: path={} ext={}", path, ext);
         for lang_def in &self.config.languages {
             if lang_def.extensions.iter().any(|e| e == ext) {
+                crate::dlog!("[lsp] detected language: {}", lang_def.name);
+                // Only return a language if we have a server configured for it
+                let has_server = self.lsp_manager.is_some()
+                    && self.config.lsp_servers.iter().any(|(l, _)| l == &lang_def.name);
+                crate::dlog!("[lsp] has_server={}", has_server);
                 return Some(lang_def.name.clone());
             }
         }
+        crate::dlog!("[lsp] no language match for ext={}", ext);
         None
     }
 
@@ -1111,19 +1120,33 @@ impl Editor {
     /// Trigger LSP completion at the current cursor position.
     fn lsp_trigger_completion(&mut self) {
         let buf_idx = self.active_buffer_index();
+        crate::dlog!("[lsp] Ctrl+Space triggered — buf_idx={}", buf_idx);
         let lang = match self.buffers[buf_idx].lsp_language.clone() {
             Some(l) => l,
-            None => return,
+            None => {
+                crate::dlog!("[lsp] no lsp_language for buf_idx={} — aborting", buf_idx);
+                return;
+            }
         };
         let path = match self.buffers[buf_idx].buffer.file_path() {
             Some(p) => p.to_string_lossy().to_string(),
-            None => return,
+            None => {
+                crate::dlog!("[lsp] buffer has no file path — aborting");
+                return;
+            }
         };
         let uri = lsp::protocol::path_to_uri(&path);
         let line = self.buffers[buf_idx].cursor().line as u32;
         let character = self.buffers[buf_idx].cursor().col as u32;
+        crate::dlog!(
+            "[lsp] requesting completion: lang={} uri={} line={} char={}",
+            lang, uri, line, character
+        );
         if let Some(ref mut mgr) = self.lsp_manager {
             mgr.request_completion(&lang, &uri, line, character);
+            crate::dlog!("[lsp] request_completion sent");
+        } else {
+            crate::dlog!("[lsp] lsp_manager is None — no LSP configured");
         }
     }
 

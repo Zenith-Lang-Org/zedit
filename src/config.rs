@@ -147,12 +147,20 @@ impl Config {
         let path = format!("{}/.config/zedit/config.json", home);
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => return config,
+            Err(e) => {
+                crate::dlog!("[config] cannot read {}: {}", path, e);
+                return config;
+            }
         };
+        crate::dlog!("[config] loaded {} bytes from {}", content.len(), path);
         let val = match JsonValue::parse(&content) {
             Ok(v) => v,
-            Err(_) => return config,
+            Err(e) => {
+                crate::dlog!("[config] JSON parse error: {:?} — LSP will NOT load", e);
+                return config;
+            }
         };
+        crate::dlog!("[config] JSON parsed OK");
         if let Some(n) = val.get("tab_size").and_then(|v| v.as_f64()) {
             config.tab_size = (n as usize).clamp(1, 16);
         }
@@ -192,6 +200,7 @@ impl Config {
 
         // LSP server configuration
         if let Some(lsp_obj) = val.get("lsp").and_then(|v| v.as_object()) {
+            crate::dlog!("[config] found lsp section with {} entries", lsp_obj.len());
             for (lang, server_val) in lsp_obj {
                 if let Some(command) = server_val.get("command").and_then(|v| v.as_str()) {
                     let args = server_val
@@ -203,6 +212,7 @@ impl Config {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    crate::dlog!("[config] lsp server: lang={} command={}", lang, command);
                     config.lsp_servers.push((
                         lang.clone(),
                         crate::lsp::LspServerConfig {

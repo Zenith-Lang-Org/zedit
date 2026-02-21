@@ -355,7 +355,7 @@ impl Editor {
             }
         }
 
-        // Minimap sidebar overlay (drawn before other overlays)
+        // Minimap sidebar overlay — always on the buffer pane (not the terminal pane)
         if self.minimap.visible && self.diff_view.is_none() {
             self.render_minimap();
         }
@@ -1315,36 +1315,40 @@ impl Editor {
 
     pub(super) fn render_help(&mut self) {
         const HELP_LINES: &[&str] = &[
-            "                  Zedit Help                  ",
+            "              \u{2500} Zedit Help \u{2500}               ",
             "                                              ",
-            "  FILE              NAVIGATION                ",
-            "  Ctrl+S  Save      \u{2191}\u{2193}\u{2190}\u{2192}    Move cursor        ",
-            "  Ctrl+\u{21e7}S Save As   Home/End Line start/end  ",
-            "  Ctrl+O  Open      Ctrl+Home File start      ",
-            "  Ctrl+Q  Quit      Ctrl+End  File end        ",
-            "                    PgUp/PgDn Page scroll     ",
-            "  BUFFERS           Ctrl+G    Go to line      ",
-            "  Ctrl+N  New       Ctrl+F    Find            ",
-            "  Ctrl+W  Close     Ctrl+H    Replace         ",
-            "  Ctrl+PgDn Next    F3/\u{21e7}F3   Next/prev match  ",
-            "  Ctrl+PgUp Prev                              ",
-            "                    PANES                     ",
-            "  EDIT              Ctrl+\\    Split horiz     ",
-            "  Ctrl+Z  Undo      Ctrl+\u{21e7}\\   Split vert      ",
-            "  Ctrl+Y  Redo      Ctrl+\u{21e7}W  Close pane       ",
-            "  Ctrl+C  Copy      Alt+\u{2190}\u{2192}\u{2191}\u{2193}  Focus pane      ",
-            "  Ctrl+X  Cut       Alt+\u{21e7}\u{2190}\u{2192}  Resize pane     ",
-            "  Ctrl+V  Paste                               ",
-            "  Ctrl+D  Sel next MULTI-CURSOR                ",
-            "  Ctrl+\u{21e7}D Dup line  Ctrl+\u{21e7}L  All occurrences ",
-            "  Ctrl+\u{21e7}K Del line  Alt+Click Add cursor      ",
-            "  Tab     Indent    Escape    Single cursor   ",
-            "  \u{21e7}Tab    Unindent SELECTION                   ",
-            "  Ctrl+/  Comment   Shift+\u{2190}\u{2192}\u{2191}\u{2193} Extend sel     ",
-            "  Ctrl+L  Sel line  Ctrl+A    Select all      ",
-            "  Ctrl+\u{21e7}P Palette  Ctrl+B    File tree       ",
-            "  Ctrl+T  Terminal  Alt+Z     Toggle wrap     ",
-            "        Press Esc or F1 to close              ",
+            "  FILE               NAVIGATION              ",
+            "  Ctrl+S   Save      \u{2191}\u{2193}\u{2190}\u{2192}   Move cursor      ",
+            "  Ctrl+\u{21e7}S  Save As   Home/End Line start/end  ",
+            "  Ctrl+O   Open      PgUp/Dn Page scroll     ",
+            "  Ctrl+Q   Quit      Ctrl+G  Go to line      ",
+            "  Ctrl+N   New buf   Ctrl+F  Find            ",
+            "  Ctrl+W   Close buf Ctrl+H  Replace         ",
+            "  Ctrl+PgDn/PgUp Next/Prev  F3/\u{21e7}F3  Matches   ",
+            "                                              ",
+            "  EDIT               SELECTION / MULTICURSOR ",
+            "  Ctrl+Z/Y Undo/Redo Shift+\u{2190}\u{2192}\u{2191}\u{2193} Extend sel  ",
+            "  Ctrl+C   Copy      Ctrl+A   Select all     ",
+            "  Ctrl+X   Cut       Ctrl+L   Select line    ",
+            "  Ctrl+V   Paste     Ctrl+D   Next match     ",
+            "  Ctrl+\u{21e7}D  Dup line  Ctrl+\u{21e7}L  All matches    ",
+            "  Ctrl+\u{21e7}K  Del line  Alt+Click Add cursor    ",
+            "  Tab/\u{21e7}Tab Indent/Un Escape   One cursor     ",
+            "  Ctrl+/   Comment                           ",
+            "                                              ",
+            "  PANES               VIEW                   ",
+            "  Ctrl+\\   Horiz     Ctrl+B  File tree       ",
+            "  Ctrl+\u{21e7}\\  Vert      Ctrl+P  Palette        ",
+            "  Ctrl+\u{21e7}W  Close     Ctrl+T  Terminal       ",
+            "  Alt+\u{2190}\u{2192}\u{2191}\u{2193}  Focus     Alt+Z   Word wrap      ",
+            "  Alt+\u{21e7}\u{2190}\u{2192}  Resize    Alt+M   Minimap        ",
+            "                                              ",
+            "  LSP                 DIFF (vs HEAD)         ",
+            "  Ctrl+Spc Complete  F7      Open diff       ",
+            "  Alt+K    Hover doc F8/\u{21e7}F8  Next/Prev hunk  ",
+            "  F12      Go to def Escape  Close diff      ",
+            "                                              ",
+            "       Press Esc or F1 to close              ",
         ];
 
         let panel_width = 48;
@@ -2149,8 +2153,19 @@ impl Editor {
     pub(super) fn render_minimap(&mut self) {
         use minimap::{MINIMAP_WIDTH, build_minimap};
 
-        // Determine active pane rect
-        let rect = match self.layout.pane_rect(self.active_pane) {
+        // Find the pane that hosts the active buffer.
+        // When a terminal pane is active we fall back to the first buffer pane
+        // so the minimap stays visible and doesn't flicker.
+        let buf_idx = self.active_buffer_index();
+        let minimap_pane = self
+            .layout
+            .panes()
+            .iter()
+            .find(|p| p.content == crate::layout::PaneContent::Buffer(buf_idx))
+            .map(|p| p.id)
+            .unwrap_or(self.active_pane);
+
+        let rect = match self.layout.pane_rect(minimap_pane) {
             Some(r) => r,
             None => return,
         };

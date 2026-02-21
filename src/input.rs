@@ -250,8 +250,12 @@ fn decode_csi_final(final_byte: u8, params: &[u16]) -> Event {
             shift: true,
         }),
 
-        // Tilde sequences: \x1b[N~ or \x1b[N;mod~
+        // Tilde sequences: \x1b[N~ or \x1b[N;mod~ or \x1b[27;mod;codepoint~
         b'~' if !params.is_empty() => {
+            // xterm modifyOtherKeys=1/2 sends \e[27;modifier;codepoint~
+            if params[0] == 27 && params.len() >= 3 {
+                return decode_extended_key(params[2], modifier(1));
+            }
             let mod_idx = if params.len() >= 2 { 1 } else { 99 };
             let mods = modifier(mod_idx);
             match params[0] {
@@ -276,8 +280,46 @@ fn decode_csi_final(final_byte: u8, params: &[u16]) -> Event {
             }
         }
 
+        // Kitty keyboard protocol: \e[codepoint;modifier u
+        // Sent when kitty protocol level ≥1 is active.
+        b'u' if !params.is_empty() => decode_extended_key(params[0], modifier(1)),
+
         _ => Event::None,
     }
+}
+
+/// Decode a key from extended keyboard protocols (Kitty CSI u, xterm modifyOtherKeys).
+///
+/// `codepoint` — Unicode codepoint of the base key (e.g. 109 = 'm').
+/// `mods`      — (ctrl, alt, shift) triple from `decode_modifier()`.
+///
+/// Normalization rule for alphabetic keys with Ctrl+Shift:
+/// We follow the same convention as `parse_key_string`: store the uppercase
+/// char with shift=false (e.g. Ctrl+Shift+M → Key::Char('M') ctrl=true shift=false).
+/// This way, runtime events match statically-defined key strings.
+fn decode_extended_key(codepoint: u16, (ctrl, alt, shift): (bool, bool, bool)) -> Event {
+    let key = match codepoint {
+        13 => return key_with_mod(Key::Enter, (ctrl, alt, shift)),
+        9 => return key_with_mod(Key::Tab, (ctrl, alt, shift)),
+        27 => return key_with_mod(Key::Escape, (ctrl, alt, shift)),
+        127 | 8 => return key_with_mod(Key::Backspace, (ctrl, alt, shift)),
+        // Printable ASCII range
+        32..=126 => {
+            let ch = codepoint as u8 as char;
+            // Ctrl+Shift+letter: absorb shift into uppercase, matching parse_key_string.
+            if ctrl && shift && ch.is_ascii_alphabetic() {
+                return Event::Key(KeyEvent {
+                    key: Key::Char(ch.to_ascii_uppercase()),
+                    ctrl,
+                    alt,
+                    shift: false,
+                });
+            }
+            Key::Char(ch)
+        }
+        _ => return Event::None,
+    };
+    Event::Key(KeyEvent { key, ctrl, alt, shift })
 }
 
 /// Decode xterm modifier encoding: value = 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0)

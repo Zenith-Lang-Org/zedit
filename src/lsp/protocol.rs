@@ -432,12 +432,26 @@ fn json_rpc_notification(method: &str, params: JsonValue) -> JsonValue {
 // URI helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a file path to a file:// URI.
+/// Convert a file path to a `file://` URI.
+///
+/// Relative paths are resolved against the current working directory so that
+/// the resulting URI is always absolute (`file:///absolute/path`), which is
+/// what LSP servers (e.g. rust-analyzer) require.
 pub fn path_to_uri(path: &str) -> String {
-    format!("file://{}", path)
+    let p = std::path::Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(p))
+            .and_then(|full| full.canonicalize().ok().or(Some(full)))
+            .unwrap_or_else(|| p.to_path_buf())
+    };
+    format!("file://{}", abs.to_string_lossy())
 }
 
-/// Convert a file:// URI to a file path.
+/// Convert a `file://` URI to a file path string.
 pub fn uri_to_path(uri: &str) -> Option<String> {
     uri.strip_prefix("file://").map(|s| s.to_string())
 }

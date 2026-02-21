@@ -62,16 +62,20 @@ impl LspManager {
         let (_, cfg) = &self.config[config_idx];
 
         // Spawn transport
+        crate::dlog!("[lsp_mgr] spawning '{}' for lang={}", cfg.command, language_id);
         let transport = match LspTransport::spawn(&cfg.command, &cfg.args) {
-            Ok(t) => t,
-            Err(_) => return None,
+            Ok(t) => { crate::dlog!("[lsp_mgr] spawn OK"); t }
+            Err(e) => { crate::dlog!("[lsp_mgr] spawn FAILED: {}", e); return None; }
         };
 
         // Create client and send initialize
+        crate::dlog!("[lsp_mgr] sending initialize, rootUri={}", self.root_uri);
         let mut client = LspClient::new(transport, &self.root_uri, language_id);
         if client.initialize().is_err() {
+            crate::dlog!("[lsp_mgr] initialize() send FAILED");
             return None;
         }
+        crate::dlog!("[lsp_mgr] initialize request sent OK");
 
         self.clients.push((language_id.to_string(), client));
         self.clients.last_mut().map(|(_, c)| c)
@@ -92,6 +96,18 @@ impl LspManager {
             .filter(|(_, c)| c.is_alive())
             .map(|(_, c)| c.stdout_fd())
             .collect()
+    }
+
+    /// Reap any dead child processes (non-blocking).
+    pub fn reap_dead_clients(&mut self) {
+        for (lang, client) in &mut self.clients {
+            if client.is_alive() {
+                let died = client.reap_transport();
+                if died {
+                    crate::dlog!("[lsp_mgr] client for lang='{}' process died", lang);
+                }
+            }
+        }
     }
 
     /// Drain messages from all clients.

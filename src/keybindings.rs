@@ -446,8 +446,8 @@ impl KeyMap {
             ("F7", EditorAction::DiffOpenVsHead),
             ("F8", EditorAction::DiffNextHunk),
             ("Shift+F8", EditorAction::DiffPrevHunk),
-            // Minimap
-            ("Ctrl+Shift+M", EditorAction::ToggleMinimap),
+            // Minimap — Alt+M (Ctrl+Shift+M = 0x0D = Enter in all standard terminals)
+            ("Alt+M", EditorAction::ToggleMinimap),
         ];
 
         let mut bindings = HashMap::new();

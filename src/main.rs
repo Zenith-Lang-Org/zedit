@@ -1,5 +1,6 @@
 mod buffer;
 mod config;
+pub mod debug_log;
 mod cursor;
 mod diff_view;
 mod editor;
@@ -52,6 +53,7 @@ fn print_help() {
 }
 
 fn main() {
+    debug_log::init();
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {

@@ -201,6 +201,11 @@ impl LspTransport {
         let result = unsafe { waitpid(self.child_pid, &mut status, WNOHANG) };
         if result > 0 {
             self.dead = true;
+            crate::dlog!(
+                "[lsp_transport] child pid={} exited with status={} — \
+                 check if the LSP server binary is installed correctly",
+                self.child_pid, status
+            );
             true
         } else {
             false

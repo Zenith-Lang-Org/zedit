@@ -167,6 +167,7 @@ impl Terminal {
         write_all(b"\x1b[?1049h");
         enable_mouse();
         enable_bracketed_paste();
+        enable_keyboard_enhancements();
 
         Ok(Terminal {
             original,
@@ -205,6 +206,7 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        disable_keyboard_enhancements();
         disable_mouse();
         disable_bracketed_paste();
         show_cursor();
@@ -245,6 +247,28 @@ fn query_terminal_size() -> Result<(u16, u16), String> {
 // ---------------------------------------------------------------------------
 // Escape sequence helpers
 // ---------------------------------------------------------------------------
+
+/// Enable extended keyboard reporting.
+///
+/// Sends two optional enhancements that modern terminals support:
+/// - `\e[>4;1m`: xterm "modifyOtherKeys=1" — sends `\e[27;mod;codepoint~` for
+///   modifier+key combinations that have no legacy encoding (e.g. Ctrl+Shift+M).
+///   Mode 1 is conservative: it does NOT change Ctrl+letter keys that already
+///   have a standard byte (Ctrl+C=0x03, etc.), so existing key handling is safe.
+/// - `\e[>1u`: Kitty keyboard protocol level 1 — pushes a progressive
+///   enhancement flag that tells the terminal to send CSI `u` sequences for
+///   keys that cannot be represented in the legacy encoding.  The terminal
+///   ignores this if it does not support the kitty protocol.
+pub fn enable_keyboard_enhancements() {
+    write_all(b"\x1b[>4;1m"); // xterm modifyOtherKeys=1
+    write_all(b"\x1b[>1u"); //   kitty protocol level 1 (push)
+}
+
+/// Restore keyboard to pre-enhancement state.
+pub fn disable_keyboard_enhancements() {
+    write_all(b"\x1b[>4;0m"); // reset xterm modifyOtherKeys
+    write_all(b"\x1b[<u"); //    kitty protocol pop
+}
 
 pub fn enable_mouse() {
     write_all(b"\x1b[?1000h\x1b[?1006h");
