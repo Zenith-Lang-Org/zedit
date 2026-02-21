@@ -178,6 +178,9 @@ pub struct Editor {
     // Task runner state
     last_task: Option<String>,      // last command sent (for re-run)
     task_language: Option<String>,  // language of last task
+
+    // Problem panel
+    problem_panel: crate::problem_panel::ProblemPanel,
 }
 
 impl Editor {
@@ -266,6 +269,7 @@ impl Editor {
             running: true,
             last_task: None,
             task_language: None,
+            problem_panel: crate::problem_panel::ProblemPanel::new(),
         })
     }
 
@@ -320,6 +324,7 @@ impl Editor {
             running: true,
             last_task: None,
             task_language: None,
+            problem_panel: crate::problem_panel::ProblemPanel::new(),
         })
     }
 
@@ -499,6 +504,7 @@ impl Editor {
             running: true,
             last_task: None,
             task_language: None,
+            problem_panel: crate::problem_panel::ProblemPanel::new(),
         })
     }
 
@@ -793,6 +799,14 @@ impl Editor {
             if n == 0 {
                 break;
             }
+
+            // Feed to problem panel if this is the task terminal and a task is tracked.
+            if self.terminal_idx == Some(idx) && self.problem_panel.source_cmd.is_some() {
+                if let Ok(s) = std::str::from_utf8(&buf[..n]) {
+                    self.problem_panel.feed_raw(s);
+                }
+            }
+
             self.vterms[idx].feed(&buf[..n]);
 
             // Send any responses back to PTY (e.g., DSR 6n)
@@ -1411,6 +1425,10 @@ impl Editor {
         self.last_task = Some(cmd.clone());
         self.task_language = Some(lang);
 
+        // Reset problem panel for the new task.
+        self.problem_panel.clear();
+        self.problem_panel.source_cmd = Some(cmd.clone());
+
         self.ensure_terminal_panel();
         self.send_to_terminal_panel(&format!("{}\n", cmd));
         self.set_message(&format!("▶ {}", cmd), MessageType::Info);
@@ -1427,6 +1445,75 @@ impl Editor {
                 self.set_message("No terminal open", MessageType::Warning);
             }
         }
+    }
+
+    fn toggle_problem_panel(&mut self) {
+        if self.problem_panel.focused {
+            // Second press when focused: unfocus (keep visible)
+            self.problem_panel.focused = false;
+        } else if self.problem_panel.visible {
+            // Panel visible but not focused: focus it
+            self.problem_panel.focused = true;
+        } else {
+            // Panel hidden: show and focus
+            self.problem_panel.visible = true;
+            self.problem_panel.focused = true;
+        }
+    }
+
+    /// Open the file and jump to the selected problem's location.
+    fn jump_to_problem(&mut self) {
+        let (file, line, col) = match self.problem_panel.selected_problem() {
+            Some(p) => (
+                p.file.clone(),
+                p.line.saturating_sub(1) as usize,
+                p.col.saturating_sub(1) as usize,
+            ),
+            None => return,
+        };
+
+        // Unfocus panel but leave it visible
+        self.problem_panel.focused = false;
+
+        // Ensure an editor pane is active (not terminal)
+        self.ensure_editor_pane();
+
+        // Reuse an existing buffer or open new
+        let existing = self.buffers.iter().position(|bs| {
+            bs.buffer
+                .file_path()
+                .map(|p| p.to_string_lossy() == file.as_str())
+                .unwrap_or(false)
+        });
+
+        if let Some(buf_idx) = existing {
+            self.layout.set_pane_buffer(self.active_pane, buf_idx);
+            self.active_buffer = buf_idx;
+            let b = &mut self.buffers[buf_idx];
+            b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+            b.scroll_row = line.saturating_sub(5);
+        } else {
+            let path = std::path::Path::new(&file);
+            if !path.exists() {
+                self.set_message(&format!("File not found: {}", file), MessageType::Warning);
+                return;
+            }
+            if let Ok(mut new_buf) = BufferState::from_file(
+                path,
+                self.config.line_numbers,
+                &self.config.theme,
+                &self.config.languages,
+            ) {
+                new_buf.cursors[new_buf.primary].cursor.set_position(line, col, &new_buf.buffer);
+                new_buf.scroll_row = line.saturating_sub(5);
+                self.buffers.push(new_buf);
+                let new_idx = self.buffers.len() - 1;
+                self.layout.set_pane_buffer(self.active_pane, new_idx);
+                self.active_buffer = new_idx;
+                self.lsp_notify_open(new_idx);
+            }
+        }
+        self.adjust_viewport();
     }
 
     fn toggle_terminal_panel(&mut self) {
@@ -1622,6 +1709,37 @@ impl Editor {
             let ke_copy = ke.clone();
             if self.handle_filetree_key(ke_copy) {
                 return;
+            }
+        }
+
+        // When problem panel is focused, route navigation keys to it
+        if self.problem_panel.focused && self.problem_panel.visible {
+            if let Event::Key(ref ke) = event {
+                match &ke.key {
+                    Key::Up => {
+                        self.problem_panel.move_up();
+                        return;
+                    }
+                    Key::Down => {
+                        self.problem_panel.move_down();
+                        return;
+                    }
+                    Key::Enter => {
+                        self.jump_to_problem();
+                        return;
+                    }
+                    Key::Escape => {
+                        self.problem_panel.focused = false;
+                        self.problem_panel.visible = false;
+                        return;
+                    }
+                    _ => {
+                        // Allow F6 (toggle) to fall through to execute_action
+                        if self.config.keybindings.lookup(ke) != Some(EditorAction::ToggleProblemPanel) {
+                            return; // Consume other keys silently
+                        }
+                    }
+                }
             }
         }
 
@@ -1890,6 +2008,7 @@ impl Editor {
             EditorAction::TaskBuild => self.run_task(tasks::TaskKind::Build),
             EditorAction::TaskTest => self.run_task(tasks::TaskKind::Test),
             EditorAction::TaskStop => self.stop_task(),
+            EditorAction::ToggleProblemPanel => self.toggle_problem_panel(),
         }
     }
 

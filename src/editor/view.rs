@@ -260,21 +260,25 @@ impl Editor {
                 ""
             };
 
-            // LSP diagnostic count
+            // LSP diagnostic count + build problem panel counts
             let diag_indicator = {
                 let bs = &self.buffers[buf_idx];
-                let errors = bs
+                let lsp_errors = bs
                     .diagnostics
                     .iter()
                     .filter(|(_, s, _)| *s == crate::lsp::protocol::DiagnosticSeverity::Error)
                     .count();
-                let warnings = bs
+                let lsp_warnings = bs
                     .diagnostics
                     .iter()
                     .filter(|(_, s, _)| *s == crate::lsp::protocol::DiagnosticSeverity::Warning)
                     .count();
-                if errors > 0 || warnings > 0 {
-                    format!(" E:{} W:{}", errors, warnings)
+                let build_errors = self.problem_panel.error_count();
+                let build_warnings = self.problem_panel.warning_count();
+                let total_errors = lsp_errors + build_errors;
+                let total_warnings = lsp_warnings + build_warnings;
+                if total_errors > 0 || total_warnings > 0 {
+                    format!(" E:{} W:{}", total_errors, total_warnings)
                 } else {
                     String::new()
                 }
@@ -363,6 +367,11 @@ impl Editor {
         // Diff view full-screen overlay (drawn before help so Esc closes it first)
         if self.diff_view.is_some() {
             self.render_diff_view();
+        }
+
+        // Problem panel overlay (bottom panel)
+        if self.problem_panel.visible {
+            self.render_problem_panel();
         }
 
         // Help overlay (drawn on top of everything)
@@ -2435,6 +2444,153 @@ impl Editor {
             Color::Ansi(0),
             false,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Problem panel renderer — bottom overlay panel
+    // -----------------------------------------------------------------------
+
+    pub(super) fn render_problem_panel(&mut self) {
+        use crate::problem_panel::Severity;
+
+        let screen_w = self.screen.width();
+        let screen_h = self.screen.height();
+        if screen_w < 10 || screen_h < 5 {
+            return;
+        }
+
+        // Panel geometry: occupy up to 1/3 of screen height, min 5 rows.
+        let pp = &self.problem_panel;
+        let item_count = pp.items.len();
+        let visible_items = (screen_h / 3).max(5).min(item_count + 1);
+        // rows: 1 title + visible_items rows + 1 footer = visible_items + 2
+        let panel_h = (visible_items + 2).min(screen_h);
+        let panel_y = screen_h.saturating_sub(panel_h + self.status_height);
+
+        let title_bg = Color::Color256(25);  // dark blue
+        let title_fg = Color::Ansi(15);      // white
+        let item_bg = Color::Color256(235);   // near-black
+        let item_bg_sel = Color::Color256(24); // selected: blue
+        let item_fg = Color::Ansi(15);
+        let err_fg = Color::Ansi(9);          // bright red
+        let warn_fg = Color::Ansi(11);        // yellow
+        let info_fg = Color::Ansi(12);        // blue
+        let note_fg = Color::Ansi(14);        // cyan
+        let footer_bg = Color::Color256(238);
+        let footer_fg = Color::Color256(250);
+
+        // Clamp panel scroll
+        let selected = pp.selected;
+        let scroll = {
+            let list_rows = panel_h.saturating_sub(2); // excluding title + footer
+            let mut sc = pp.scroll;
+            if selected >= sc + list_rows && list_rows > 0 {
+                sc = selected + 1 - list_rows;
+            }
+            if selected < sc {
+                sc = selected;
+            }
+            sc
+        };
+
+        // -- Title row --
+        let source = pp
+            .source_cmd
+            .as_deref()
+            .unwrap_or("Build Output");
+        let errors = pp.error_count();
+        let warnings = pp.warning_count();
+        let focus_marker = if pp.focused { "●" } else { "○" };
+        let title = format!(
+            " {} Problems [{}]  E:{} W:{}  {}",
+            focus_marker,
+            source,
+            errors,
+            warnings,
+            if pp.focused { "↑↓ navigate  Enter jump  Esc close" } else { "F6 focus" }
+        );
+        for c in 0..screen_w {
+            self.screen.put_char(panel_y, c, ' ', title_fg, title_bg, false);
+        }
+        let title_trunc = truncate_str(&title, screen_w);
+        self.screen.put_str(panel_y, 0, title_trunc, title_fg, title_bg, false);
+
+        // -- Item rows --
+        let list_rows = panel_h.saturating_sub(2);
+        for row in 0..list_rows {
+            let item_row = panel_y + 1 + row;
+            if item_row >= screen_h {
+                break;
+            }
+            let item_idx = scroll + row;
+            let (bg, fg_sev, text) = if item_idx < pp.items.len() {
+                let p = &pp.items[item_idx];
+                let bg = if item_idx == selected {
+                    item_bg_sel
+                } else {
+                    item_bg
+                };
+                let fg_sev = match p.severity {
+                    Severity::Error => err_fg,
+                    Severity::Warning => warn_fg,
+                    Severity::Info => info_fg,
+                    Severity::Note => note_fg,
+                };
+                let code_part = p
+                    .code
+                    .as_ref()
+                    .map(|c| format!("[{}] ", c))
+                    .unwrap_or_default();
+                let text = format!(
+                    " [{}] {}{}:{}  {}{}",
+                    p.severity.label(),
+                    code_part,
+                    p.file,
+                    p.line,
+                    p.message,
+                    " ".repeat(screen_w)
+                );
+                (bg, fg_sev, text)
+            } else {
+                // Empty row
+                (item_bg, item_fg, " ".repeat(screen_w))
+            };
+
+            // Fill row background
+            for c in 0..screen_w {
+                self.screen.put_char(item_row, c, ' ', item_fg, bg, false);
+            }
+            // Write severity indicator in its color
+            let text_trunc = truncate_str(&text, screen_w);
+            // Write severity char with color
+            if !text_trunc.is_empty() {
+                // First char is space, then [E] / [W] etc — write whole line with item_fg
+                // but the severity letter gets fg_sev color
+                // Split: " [X]" = 4 bytes, rest is normal
+                if text_trunc.len() >= 4 {
+                    self.screen.put_str(item_row, 0, &text_trunc[..1], item_fg, bg, false);
+                    self.screen.put_str(item_row, 1, &text_trunc[1..4], fg_sev, bg, false);
+                    self.screen.put_str(item_row, 4, &text_trunc[4..], item_fg, bg, false);
+                } else {
+                    self.screen.put_str(item_row, 0, text_trunc, item_fg, bg, false);
+                }
+            }
+        }
+
+        // -- Footer row --
+        let footer_row = panel_y + 1 + list_rows;
+        if footer_row < screen_h {
+            for c in 0..screen_w {
+                self.screen.put_char(footer_row, c, ' ', footer_fg, footer_bg, false);
+            }
+            let footer = format!(
+                " {}/{} items",
+                if item_count == 0 { 0 } else { selected + 1 },
+                item_count
+            );
+            let footer_trunc = truncate_str(&footer, screen_w);
+            self.screen.put_str(footer_row, 0, footer_trunc, footer_fg, footer_bg, false);
+        }
     }
 }
 

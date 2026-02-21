@@ -13,6 +13,7 @@ mod keybindings;
 mod layout;
 mod lsp;
 mod plugin;
+mod problem_panel;
 mod pty;
 mod render;
 mod session;

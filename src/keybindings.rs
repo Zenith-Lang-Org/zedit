@@ -65,6 +65,8 @@ pub enum EditorAction {
     TaskBuild,
     TaskTest,
     TaskStop,
+    // Problem panel
+    ToggleProblemPanel,
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +381,7 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "task_build" => Some(EditorAction::TaskBuild),
         "task_test" => Some(EditorAction::TaskTest),
         "task_stop" => Some(EditorAction::TaskStop),
+        "toggle_problem_panel" => Some(EditorAction::ToggleProblemPanel),
         _ => None,
     }
 }
@@ -462,6 +465,8 @@ impl KeyMap {
             ("Ctrl+F5", EditorAction::TaskBuild),
             ("Shift+F5", EditorAction::TaskTest),
             ("Alt+F5", EditorAction::TaskStop),
+            // Problem panel
+            ("F6", EditorAction::ToggleProblemPanel),
         ];
 
         let mut bindings = HashMap::new();
