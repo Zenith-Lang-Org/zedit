@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Zymbol-Lang",
   "scopeName": "source.zymbol",
+  "fileTypes": ["zy"],
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
@@ -10,6 +11,7 @@
     { "include": "#booleans" },
     { "include": "#control-flow" },
     { "include": "#io-operators" },
+    { "include": "#function-def" },
     { "include": "#function-operators" },
     { "include": "#collection-operators" },
     { "include": "#module-operators" },
@@ -17,6 +19,7 @@
     { "include": "#format-expressions" },
     { "include": "#base-literals" },
     { "include": "#operators" },
+    { "include": "#function-call" },
     { "include": "#identifiers" }
   ],
   "repository": {
@@ -130,6 +133,24 @@
           "match": "¶|\\\\\\\\(?!\\s)"
         }
       ]
+    },
+    "function-def": {
+      "comment": "Function definition: name(params) -> highlights name as entity.name.function",
+      "patterns": [{
+        "match": "([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\([^)]*\\)\\s*->)",
+        "captures": {
+          "1": {"name": "entity.name.function.zymbol"}
+        }
+      }]
+    },
+    "function-call": {
+      "comment": "Function call: name( — highlights the function name",
+      "patterns": [{
+        "match": "([a-zA-Z_][a-zA-Z0-9_]*)(?=\\()",
+        "captures": {
+          "1": {"name": "entity.name.function.call.zymbol"}
+        }
+      }]
     },
     "function-operators": {
       "patterns": [

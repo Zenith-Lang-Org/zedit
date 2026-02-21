@@ -67,6 +67,8 @@ pub enum EditorAction {
     TaskStop,
     // Problem panel
     ToggleProblemPanel,
+    // REPL integration (Z ecosystem)
+    SendToRepl,
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +384,7 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "task_test" => Some(EditorAction::TaskTest),
         "task_stop" => Some(EditorAction::TaskStop),
         "toggle_problem_panel" => Some(EditorAction::ToggleProblemPanel),
+        "send_to_repl" => Some(EditorAction::SendToRepl),
         _ => None,
     }
 }
@@ -467,6 +470,8 @@ impl KeyMap {
             ("Alt+F5", EditorAction::TaskStop),
             // Problem panel
             ("F6", EditorAction::ToggleProblemPanel),
+            // REPL integration (Z ecosystem)
+            ("Alt+Enter", EditorAction::SendToRepl),
         ];
 
         let mut bindings = HashMap::new();

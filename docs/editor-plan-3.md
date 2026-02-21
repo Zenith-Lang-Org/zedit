@@ -125,7 +125,7 @@ Available template variables: `{file}`, `{dir}`, `{workspace}`, `{stem}` (filena
 | 3 | 7δ-C | VS Code .vsix Importer | 450 | 7δ-B | DONE |
 | 4 | 21 | Task Runner (F5) | 500 | 7δ-B | DONE |
 | 5 | 22 | Problem Panel | 650 | Phase 21 | DONE |
-| 6 | 23 | Zenith + Zymbol Integration | 400 | 7δ-B | TODO |
+| 6 | 23 | Zenith + Zymbol Integration | 400 | 7δ-B | DONE |
 
 Total: ~2,950 new lines across 6 phases.
 

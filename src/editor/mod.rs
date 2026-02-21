@@ -1461,6 +1461,71 @@ impl Editor {
         }
     }
 
+    /// Send selected text (or current line) to the Z ecosystem REPL running in
+    /// the terminal pane. Supported languages: zenith, zymbol.
+    fn send_to_repl(&mut self) {
+        let buf_idx = self.active_buffer_index();
+
+        // Detect language from file extension
+        let lang = {
+            let file_path = self.buffers[buf_idx]
+                .buffer
+                .file_path()
+                .map(|p| p.to_string_lossy().into_owned());
+            file_path.and_then(|fp| self.detect_language_by_ext(&fp))
+        };
+
+        let repl_cmd = match lang.as_deref() {
+            Some("zenith") => "zenith --repl",
+            Some("zymbol") => "zymbol --repl",
+            _ => {
+                self.set_message("REPL not available for this language", MessageType::Warning);
+                return;
+            }
+        };
+
+        // Get selected text, or fall back to current line
+        let text = if let Some((start, end)) = self.selection_range() {
+            if start != end {
+                self.buf().buffer.slice(start, end)
+            } else {
+                let line = self.buf().cursor().line;
+                self.buf().buffer.get_line(line).unwrap_or_default()
+            }
+        } else {
+            let line = self.buf().cursor().line;
+            self.buf().buffer.get_line(line).unwrap_or_default()
+        };
+
+        if text.trim().is_empty() {
+            return;
+        }
+
+        // If no live terminal exists, open one and start the REPL
+        let is_fresh = self
+            .terminal_idx
+            .map(|i| i >= self.ptys.len() || self.ptys[i].is_dead())
+            .unwrap_or(true);
+
+        self.ensure_terminal_panel();
+
+        if is_fresh {
+            // Start the REPL in the newly-opened terminal
+            self.send_to_terminal_panel(&format!("{}\n", repl_cmd));
+        }
+
+        // Send text (ensure trailing newline so the REPL evaluates it)
+        let send_text = if text.ends_with('\n') {
+            text
+        } else {
+            format!("{}\n", text)
+        };
+        self.send_to_terminal_panel(&send_text);
+
+        let lang_name = lang.as_deref().unwrap_or("?");
+        self.set_message(&format!("Sent to {} REPL", lang_name), MessageType::Info);
+    }
+
     /// Open the file and jump to the selected problem's location.
     fn jump_to_problem(&mut self) {
         let (file, line, col) = match self.problem_panel.selected_problem() {
@@ -2009,6 +2074,7 @@ impl Editor {
             EditorAction::TaskTest => self.run_task(tasks::TaskKind::Test),
             EditorAction::TaskStop => self.stop_task(),
             EditorAction::ToggleProblemPanel => self.toggle_problem_panel(),
+            EditorAction::SendToRepl => self.send_to_repl(),
         }
     }
 

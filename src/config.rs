@@ -78,6 +78,45 @@ fn parse_languages_from_config(val: &JsonValue) -> Option<Vec<LanguageDef>> {
     Some(langs)
 }
 
+/// Return the full path of `name` if it is found on `$PATH`.
+fn which_binary(name: &str) -> Option<String> {
+    let path_env = std::env::var("PATH").ok()?;
+    for dir in path_env.split(':') {
+        let full = format!("{}/{}", dir, name);
+        if std::fs::metadata(&full)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            return Some(full);
+        }
+    }
+    None
+}
+
+/// Auto-detect Z ecosystem LSP servers (`zenith-lsp`, `zymbol-lsp`) when the
+/// binaries are on `$PATH` and no explicit config entry exists for the language.
+fn auto_detect_z_lsp(config: &mut Config) {
+    const Z_SERVERS: &[(&str, &str)] = &[
+        ("zenith", "zenith-lsp"),
+        ("zymbol", "zymbol-lsp"),
+    ];
+    for (lang, binary) in Z_SERVERS {
+        if config.lsp_servers.iter().any(|(l, _)| l == lang) {
+            continue; // already explicitly configured
+        }
+        if let Some(path) = which_binary(binary) {
+            crate::dlog!("[config] auto-detected {} at {}", binary, path);
+            config.lsp_servers.push((
+                lang.to_string(),
+                crate::lsp::LspServerConfig {
+                    command: path,
+                    args: Vec::new(),
+                },
+            ));
+        }
+    }
+}
+
 fn merge_languages(user: Vec<LanguageDef>, mut builtins: Vec<LanguageDef>) -> Vec<LanguageDef> {
     let mut result: Vec<LanguageDef> = Vec::new();
     // User entries override built-ins by name
@@ -265,6 +304,9 @@ impl Config {
             }
         }
 
+        // Auto-detect Z ecosystem LSP servers if on PATH (lower priority than config.json entries)
+        auto_detect_z_lsp(&mut config);
+
         // config.json overrides take highest priority
         if let Some(user_langs) = parse_languages_from_config(&val) {
             config.languages = merge_languages(user_langs, config.languages);
@@ -371,5 +413,55 @@ mod tests {
         let json = r#"{"tab_size": 2}"#;
         let val = JsonValue::parse(json).unwrap();
         assert!(parse_languages_from_config(&val).is_none());
+    }
+
+    // --- Z ecosystem ---
+
+    #[test]
+    fn test_builtin_zenith_language() {
+        let langs = builtin_languages();
+        let zenith = langs.iter().find(|l| l.name == "zenith").unwrap();
+        assert!(zenith.extensions.contains(&"zl".to_string()));
+        assert_eq!(zenith.grammar_file, "zenith.tmLanguage.json");
+    }
+
+    #[test]
+    fn test_builtin_zymbol_language() {
+        let langs = builtin_languages();
+        let zymbol = langs.iter().find(|l| l.name == "zymbol").unwrap();
+        assert!(zymbol.extensions.contains(&"zy".to_string()));
+        assert_eq!(zymbol.grammar_file, "zymbol.tmLanguage.json");
+    }
+
+    #[test]
+    fn test_which_binary_missing() {
+        // A binary that definitely does not exist on PATH
+        assert!(which_binary("__zedit_test_nonexistent_binary__").is_none());
+    }
+
+    #[test]
+    fn test_which_binary_found() {
+        // `sh` should always be present on any POSIX system
+        assert!(which_binary("sh").is_some());
+    }
+
+    #[test]
+    fn test_auto_detect_z_lsp_no_duplicate() {
+        let mut config = Config::default();
+        // Pre-populate a zenith entry so auto-detect should skip it
+        config.lsp_servers.push((
+            "zenith".to_string(),
+            crate::lsp::LspServerConfig {
+                command: "/usr/bin/zenith-lsp".to_string(),
+                args: vec![],
+            },
+        ));
+        let before = config.lsp_servers.len();
+        auto_detect_z_lsp(&mut config);
+        // Should NOT add a second zenith entry
+        let zenith_count = config.lsp_servers.iter().filter(|(l, _)| l == "zenith").count();
+        assert_eq!(zenith_count, 1);
+        // zymbol may or may not have been added (depends on whether binary exists)
+        let _ = before; // suppress warning
     }
 }
