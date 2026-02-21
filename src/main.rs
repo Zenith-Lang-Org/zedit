@@ -4,7 +4,9 @@ pub mod debug_log;
 mod cursor;
 mod diff_view;
 mod editor;
+mod extension;
 mod filetree;
+mod vsix_import;
 mod git;
 mod input;
 mod keybindings;
@@ -29,11 +31,17 @@ const VERSION: &str = "0.1.0";
 fn print_help() {
     println!("zedit {} - modern console text editor", VERSION);
     println!();
-    println!("Usage: zedit [file]");
+    println!("Usage: zedit [options] [file]");
     println!();
     println!("Options:");
-    println!("  -h, --help       Print this help message and exit");
-    println!("  -V, --version    Print version and exit");
+    println!("  -h, --help               Print this help message and exit");
+    println!("  -V, --version            Print version and exit");
+    println!("  --ext list               List installed extensions");
+    println!("  --ext install <path>     Install extension from directory");
+    println!("  --ext remove <id>        Remove installed extension");
+    println!("  --ext info <id>          Show extension details");
+    println!("  --import <arg>           Import a VS Code .vsix extension");
+    println!("                           <arg>: local .vsix path, URL, or publisher.name");
     println!();
     println!("Keybindings:");
     println!("  Ctrl+S       Save          Ctrl+Z      Undo");
@@ -48,8 +56,121 @@ fn print_help() {
     println!();
     println!("Configuration: ~/.config/zedit/config.json");
     println!("Grammars:      ~/.config/zedit/grammars/");
+    println!("Extensions:    ~/.config/zedit/extensions/");
     println!();
     println!("See zedit(1) man page for full documentation.");
+}
+
+fn handle_ext_command(args: &[String]) {
+    let subcmd = args.first().map(|s| s.as_str()).unwrap_or("");
+    match subcmd {
+        "list" => {
+            let exts = extension::list_extensions();
+            if exts.is_empty() {
+                println!("(no extensions installed)");
+                println!();
+                println!(
+                    "Install with: zedit --ext install <path-to-extension-directory>"
+                );
+            } else {
+                println!(
+                    "{:<20} {:<30} {}",
+                    "ID", "NAME", "VERSION"
+                );
+                println!("{}", "-".repeat(55));
+                for (id, name, version) in exts {
+                    println!("{:<20} {:<30} {}", id, name, version);
+                }
+            }
+        }
+        "install" => {
+            let path_str = match args.get(1) {
+                Some(p) => p,
+                None => {
+                    eprintln!("Usage: zedit --ext install <path>");
+                    std::process::exit(1);
+                }
+            };
+            let path = Path::new(path_str);
+            match extension::install_extension(path) {
+                Ok(id) => println!("Extension '{}' installed successfully.", id),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "remove" => {
+            let id = match args.get(1) {
+                Some(id) => id,
+                None => {
+                    eprintln!("Usage: zedit --ext remove <id>");
+                    std::process::exit(1);
+                }
+            };
+            match extension::uninstall_extension(id) {
+                Ok(()) => println!("Extension '{}' removed.", id),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "info" => {
+            let id = match args.get(1) {
+                Some(id) => id,
+                None => {
+                    eprintln!("Usage: zedit --ext info <id>");
+                    std::process::exit(1);
+                }
+            };
+            let base = match extension::extension_base_dir() {
+                Some(b) => b,
+                None => {
+                    eprintln!("Error: cannot determine extensions directory");
+                    std::process::exit(1);
+                }
+            };
+            let ext_dir = base.join(id);
+            match extension::load_extension_dir(&ext_dir) {
+                Ok(ext) => {
+                    println!("ID:       {}", ext.id);
+                    println!("Name:     {}", ext.name);
+                    println!("Version:  {}", ext.version);
+                    println!("Dir:      {}", ext.dir.display());
+                    if ext.languages.is_empty() {
+                        println!("Languages: (none)");
+                    } else {
+                        let names: Vec<&str> =
+                            ext.languages.iter().map(|l| l.name.as_str()).collect();
+                        println!("Languages: {}", names.join(", "));
+                    }
+                    if let Some(lsp) = &ext.lsp {
+                        println!("LSP:      {} {:?}", lsp.command, lsp.args);
+                    }
+                    if !ext.tasks.is_empty() {
+                        let task_names: Vec<&str> =
+                            ext.tasks.iter().map(|(n, _)| n.as_str()).collect();
+                        println!("Tasks:    {}", task_names.join(", "));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: extension '{}' not found or invalid: {}", id, e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            eprintln!("Unknown subcommand: '{}'", subcmd);
+            eprintln!();
+            eprintln!("Available subcommands:");
+            eprintln!("  list               List installed extensions");
+            eprintln!("  install <path>     Install extension from directory");
+            eprintln!("  remove <id>        Remove installed extension");
+            eprintln!("  info <id>          Show extension details");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn main() {
@@ -64,6 +185,32 @@ fn main() {
             }
             "--version" | "-V" => {
                 println!("zedit {}", VERSION);
+                return;
+            }
+            "--ext" => {
+                handle_ext_command(&args[2..]);
+                return;
+            }
+            "--import" => {
+                let arg = match args.get(2) {
+                    Some(a) => a,
+                    None => {
+                        eprintln!("Usage: zedit --import <path|url|publisher.name>");
+                        std::process::exit(1);
+                    }
+                };
+                match vsix_import::import_from_arg(arg) {
+                    Ok(id) => {
+                        println!(
+                            "Extension '{}' installed. Use 'zedit --ext info {}' to inspect.",
+                            id, id
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Import failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
                 return;
             }
             _ => {}

@@ -5,6 +5,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_grammars.rs"));
 
 // ── Language definition ─────────────────────────────────────
 
+#[derive(Clone)]
 pub struct LanguageDef {
     pub name: String,
     pub extensions: Vec<String>,
@@ -106,6 +107,8 @@ pub struct Config {
     pub terminal_scrollback: usize,
     pub keybindings: crate::keybindings::KeyMap,
     pub lsp_servers: Vec<(String, crate::lsp::LspServerConfig)>,
+    /// Installed native extensions (loaded at startup from ~/.config/zedit/extensions/).
+    pub extensions: Vec<crate::extension::Extension>,
 }
 
 impl Default for Config {
@@ -124,6 +127,7 @@ impl Default for Config {
             terminal_scrollback: 1000,
             keybindings: crate::keybindings::KeyMap::defaults(),
             lsp_servers: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 }
@@ -142,6 +146,17 @@ impl Config {
         if !discovered.is_empty() {
             config.languages = merge_languages(discovered, config.languages);
         }
+
+        // Load installed extensions and merge their language defs + LSP configs.
+        // Priority: extensions < config.json (config.json overrides extension settings).
+        let exts = crate::extension::load_extensions();
+        for ext in &exts {
+            let ext_langs: Vec<LanguageDef> = ext.languages.clone();
+            if !ext_langs.is_empty() {
+                config.languages = merge_languages(ext_langs, config.languages);
+            }
+        }
+        config.extensions = exts;
 
         // Load and apply config.json
         let path = format!("{}/.config/zedit/config.json", home);
@@ -218,6 +233,32 @@ impl Config {
                         crate::lsp::LspServerConfig {
                             command: command.to_string(),
                             args,
+                        },
+                    ));
+                }
+            }
+        }
+
+        // Merge extension LSP configs for languages not already in config.json's lsp section.
+        for ext in &config.extensions {
+            if let Some(lsp) = &ext.lsp {
+                // Only add if no entry for this language already exists.
+                let lang_id = ext
+                    .languages
+                    .first()
+                    .map(|l| l.name.as_str())
+                    .unwrap_or(&ext.id);
+                if !config.lsp_servers.iter().any(|(l, _)| l == lang_id) {
+                    crate::dlog!(
+                        "[config] extension '{}' provides LSP for '{}'",
+                        ext.id,
+                        lang_id
+                    );
+                    config.lsp_servers.push((
+                        lang_id.to_string(),
+                        crate::lsp::LspServerConfig {
+                            command: lsp.command.clone(),
+                            args: lsp.args.clone(),
                         },
                     ));
                 }
