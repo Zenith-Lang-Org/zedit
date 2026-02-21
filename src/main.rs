@@ -1,6 +1,7 @@
 mod buffer;
 mod config;
 mod cursor;
+mod diff_view;
 mod editor;
 mod filetree;
 mod git;
@@ -8,6 +9,7 @@ mod input;
 mod keybindings;
 mod layout;
 mod lsp;
+mod plugin;
 mod pty;
 mod render;
 mod session;

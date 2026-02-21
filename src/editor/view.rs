@@ -355,6 +355,16 @@ impl Editor {
             }
         }
 
+        // Minimap sidebar overlay (drawn before other overlays)
+        if self.minimap.visible && self.diff_view.is_none() {
+            self.render_minimap();
+        }
+
+        // Diff view full-screen overlay (drawn before help so Esc closes it first)
+        if self.diff_view.is_some() {
+            self.render_diff_view();
+        }
+
         // Help overlay (drawn on top of everything)
         if self.help_visible {
             self.render_help();
@@ -2131,4 +2141,306 @@ impl Editor {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Minimap renderer — right-edge overlay on the active buffer pane
+    // -----------------------------------------------------------------------
+
+    pub(super) fn render_minimap(&mut self) {
+        use minimap::{MINIMAP_WIDTH, build_minimap};
+
+        // Determine active pane rect
+        let rect = match self.layout.pane_rect(self.active_pane) {
+            Some(r) => r,
+            None => return,
+        };
+
+        let pane_x = rect.x as usize;
+        let pane_y = rect.y as usize;
+        let pane_w = rect.width as usize;
+        let pane_h = rect.height as usize;
+
+        // Need at least MINIMAP_WIDTH + a few columns for actual text
+        if pane_w < MINIMAP_WIDTH + 8 {
+            return;
+        }
+
+        let buf_idx = self.active_buffer_index();
+        let buf = &self.buffers[buf_idx];
+        let line_count = buf.buffer.line_count();
+        let scroll_row = buf.scroll_row;
+        let visible_rows = pane_h;
+
+        // Minimap sits in the rightmost MINIMAP_WIDTH columns of the pane
+        let minimap_col_start = pane_x + pane_w - MINIMAP_WIDTH;
+        let minimap_row_start = pane_y;
+        let minimap_rows = pane_h;
+
+        // Build minimap data
+        let mm_lines = {
+            let buf_ref = &self.buffers[buf_idx].buffer;
+            build_minimap(
+                line_count,
+                |i| buf_ref.get_line(i).unwrap_or_default(),
+                scroll_row,
+                visible_rows,
+                minimap_rows,
+            )
+        };
+
+        // Draw a thin separator line on the left edge of the minimap
+        let sep_col = minimap_col_start.saturating_sub(1);
+        for r in 0..minimap_rows {
+            let screen_row = minimap_row_start + r;
+            self.screen.put_char(
+                screen_row,
+                sep_col,
+                '\u{2502}', // │
+                Color::Color256(240),
+                Color::Default,
+                false,
+            );
+        }
+
+        // Draw each minimap row
+        for (r, mm_line) in mm_lines.iter().enumerate() {
+            let screen_row = minimap_row_start + r;
+            for (c, cell) in mm_line.cells.iter().enumerate() {
+                let screen_col = minimap_col_start + c;
+                self.screen
+                    .put_char(screen_row, screen_col, cell.ch, cell.fg, cell.bg, false);
+            }
+        }
+
+        // Fill any remaining rows past EOF with blanks
+        let mm_line_count = mm_lines.len();
+        if mm_line_count < minimap_rows {
+            let blank_bg = Color::Color256(236);
+            for r in mm_line_count..minimap_rows {
+                let screen_row = minimap_row_start + r;
+                for c in 0..MINIMAP_WIDTH {
+                    self.screen.put_char(
+                        screen_row,
+                        minimap_col_start + c,
+                        '\u{2800}',
+                        Color::Color256(237),
+                        blank_bg,
+                        false,
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Diff view renderer — full-screen side-by-side overlay
+    // -----------------------------------------------------------------------
+
+    pub(super) fn render_diff_view(&mut self) {
+        use crate::diff_view::RowKind;
+        use crate::unicode::str_width;
+
+        let screen_w = self.screen.width();
+        let screen_h = self.screen.height();
+        if screen_w < 8 || screen_h < 4 {
+            return;
+        }
+
+        // Pull out what we need from diff_view (borrow checker)
+        let dv = match self.diff_view.as_ref() {
+            Some(d) => d,
+            None => return,
+        };
+
+        let left_label = dv.left.label.clone();
+        let right_label = dv.right.label.clone();
+        let total_rows = dv.row_count();
+        let scroll = dv.scroll;
+        let current_hunk = dv.current_hunk;
+        let hunk_count = dv.hunks.len();
+
+        // Build display lines before we borrow screen
+        // Each entry: (kind, left_text, right_text)
+        let visible_h = screen_h.saturating_sub(3); // header + separator + footer
+        let col_w = screen_w / 2;
+
+        // Collect visible row data
+        struct RowData {
+            kind: RowKind,
+            left: String,
+            right: String,
+        }
+        let mut visible_rows: Vec<RowData> = Vec::with_capacity(visible_h);
+        let dv = self.diff_view.as_ref().unwrap();
+        for i in 0..visible_h {
+            let ri = scroll + i;
+            if ri >= total_rows {
+                visible_rows.push(RowData {
+                    kind: RowKind::Equal,
+                    left: String::new(),
+                    right: String::new(),
+                });
+                continue;
+            }
+            let row = &dv.rows[ri];
+            let left_text = match row.left {
+                Some(li) => dv.left.lines.get(li).cloned().unwrap_or_default(),
+                None => String::new(),
+            };
+            let right_text = match row.right {
+                Some(ri2) => dv.right.lines.get(ri2).cloned().unwrap_or_default(),
+                None => String::new(),
+            };
+            visible_rows.push(RowData {
+                kind: row.kind,
+                left: left_text,
+                right: right_text,
+            });
+        }
+
+        // Colors
+        let bg_default = Color::Color256(235);
+        let fg_default = Color::Ansi(7);
+        let bg_added = Color::Color256(22); // dark green
+        let fg_added = Color::Ansi(2); // green
+        let bg_deleted = Color::Color256(52); // dark red
+        let fg_deleted = Color::Ansi(1); // red
+        let bg_modified = Color::Color256(58); // dark yellow
+        let fg_modified = Color::Ansi(3); // yellow
+        let border_color = Color::Ansi(6); // cyan
+
+        // --- Header row (row 0) ---
+        // Fill header background
+        for c in 0..screen_w {
+            self.screen
+                .put_char(0, c, ' ', fg_default, Color::Ansi(4), false);
+        }
+        // Left label
+        let left_trunc = if left_label.len() > col_w.saturating_sub(4) {
+            &left_label[..col_w.saturating_sub(4)]
+        } else {
+            &left_label
+        };
+        self.screen
+            .put_str(0, 2, left_trunc, Color::Ansi(7), Color::Ansi(4), true);
+        // Divider
+        if col_w < screen_w {
+            self.screen
+                .put_char(0, col_w, '\u{2502}', border_color, Color::Ansi(4), false);
+        }
+        // Right label
+        let right_trunc = if right_label.len() > col_w.saturating_sub(4) {
+            &right_label[..col_w.saturating_sub(4)]
+        } else {
+            &right_label
+        };
+        self.screen.put_str(
+            0,
+            col_w + 2,
+            right_trunc,
+            Color::Ansi(7),
+            Color::Ansi(4),
+            true,
+        );
+
+        // --- Content rows ---
+        for (i, row) in visible_rows.iter().enumerate() {
+            let screen_row = i + 1; // row 0 is header
+            if screen_row >= screen_h.saturating_sub(1) {
+                break;
+            }
+
+            let (row_bg, row_fg) = match row.kind {
+                RowKind::Equal => (bg_default, fg_default),
+                RowKind::Added => (bg_added, fg_added),
+                RowKind::Deleted => (bg_deleted, fg_deleted),
+                RowKind::Modified => (bg_modified, fg_modified),
+            };
+
+            // Fill entire row with background
+            for c in 0..screen_w {
+                self.screen
+                    .put_char(screen_row, c, ' ', row_fg, row_bg, false);
+            }
+
+            // Left cell — blank for Added rows
+            if row.kind != RowKind::Added {
+                let avail = col_w.saturating_sub(2);
+                let display = truncate_str(&row.left, avail);
+                let w = str_width(display);
+                if w > 0 {
+                    self.screen
+                        .put_str(screen_row, 1, display, row_fg, row_bg, false);
+                }
+            }
+
+            // Center divider
+            if col_w < screen_w {
+                self.screen
+                    .put_char(screen_row, col_w, '\u{2502}', border_color, row_bg, false);
+            }
+
+            // Right cell — blank for Deleted rows
+            if row.kind != RowKind::Deleted {
+                let avail = screen_w.saturating_sub(col_w + 2);
+                let display = truncate_str(&row.right, avail);
+                let w = str_width(display);
+                if w > 0 {
+                    self.screen
+                        .put_str(screen_row, col_w + 1, display, row_fg, row_bg, false);
+                }
+            }
+        }
+
+        // --- Footer ---
+        let footer_row = screen_h.saturating_sub(1);
+        for c in 0..screen_w {
+            self.screen
+                .put_char(footer_row, c, ' ', fg_default, Color::Ansi(0), false);
+        }
+        let hunk_str = if hunk_count == 0 {
+            "No changes".to_string()
+        } else {
+            format!("Hunk {}/{}", current_hunk + 1, hunk_count)
+        };
+        let footer_text = format!(
+            " {} | F8 next  Shift+F8 prev  Up/Down scroll  Esc close",
+            hunk_str
+        );
+        let footer_trunc = if footer_text.len() > screen_w {
+            &footer_text[..screen_w]
+        } else {
+            &footer_text
+        };
+        self.screen.put_str(
+            footer_row,
+            0,
+            footer_trunc,
+            Color::Ansi(7),
+            Color::Ansi(0),
+            false,
+        );
+    }
+}
+
+/// Truncate a string to at most `max_cols` display columns (ASCII-safe approximation).
+fn truncate_str(s: &str, max_cols: usize) -> &str {
+    if max_cols == 0 {
+        return "";
+    }
+    let mut width = 0;
+    let mut byte_pos = 0;
+    for ch in s.chars() {
+        let cw = if ch == '\t' {
+            4
+        } else {
+            crate::unicode::char_width(ch)
+        };
+        if width + cw > max_cols {
+            break;
+        }
+        width += cw;
+        byte_pos += ch.len_utf8();
+    }
+    &s[..byte_pos]
 }

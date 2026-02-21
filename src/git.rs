@@ -704,6 +704,14 @@ impl GitInfo {
     }
 }
 
+/// Read the HEAD version of a file as a vector of lines.
+/// Returns `None` if the file is not tracked or the repo can't be read.
+pub fn head_lines(path: &Path) -> Option<Vec<String>> {
+    let blob = read_head_blob(path)?;
+    let text = String::from_utf8(blob).ok()?;
+    Some(text.lines().map(|l| l.to_string()).collect())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

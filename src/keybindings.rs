@@ -56,6 +56,10 @@ pub enum EditorAction {
     LspComplete,
     LspHover,
     LspGoToDef,
+    DiffOpenVsHead,
+    DiffNextHunk,
+    DiffPrevHunk,
+    ToggleMinimap,
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +366,10 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "lsp_complete" => Some(EditorAction::LspComplete),
         "lsp_hover" => Some(EditorAction::LspHover),
         "lsp_go_to_def" => Some(EditorAction::LspGoToDef),
+        "diff_open_vs_head" => Some(EditorAction::DiffOpenVsHead),
+        "diff_next_hunk" => Some(EditorAction::DiffNextHunk),
+        "diff_prev_hunk" => Some(EditorAction::DiffPrevHunk),
+        "toggle_minimap" => Some(EditorAction::ToggleMinimap),
         _ => None,
     }
 }
@@ -434,6 +442,12 @@ impl KeyMap {
             ("Ctrl+Space", EditorAction::LspComplete),
             ("Alt+K", EditorAction::LspHover),
             ("F12", EditorAction::LspGoToDef),
+            // Diff view
+            ("F7", EditorAction::DiffOpenVsHead),
+            ("F8", EditorAction::DiffNextHunk),
+            ("Shift+F8", EditorAction::DiffPrevHunk),
+            // Minimap
+            ("Ctrl+Shift+M", EditorAction::ToggleMinimap),
         ];
 
         let mut bindings = HashMap::new();

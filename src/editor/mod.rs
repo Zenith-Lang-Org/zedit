@@ -1,9 +1,11 @@
 mod buffer_state;
 mod completion;
+mod diff_integration;
 mod editing;
 mod filetree_integration;
 mod helpers;
 mod hover;
+mod minimap;
 mod palette;
 mod prompt;
 mod search;
@@ -33,7 +35,9 @@ use helpers::*;
 use prompt::*;
 use search::*;
 
+use crate::diff_view;
 use crate::lsp;
+use crate::plugin;
 
 // ---------------------------------------------------------------------------
 // Message types
@@ -147,6 +151,15 @@ pub struct Editor {
     completion_menu: Option<completion::CompletionMenu>,
     hover_popup: Option<hover::HoverPopup>,
 
+    // Plugin system
+    plugin_manager: Option<plugin::PluginManager>,
+
+    // Diff/Merge view overlay
+    diff_view: Option<diff_view::DiffView>,
+
+    // Minimap sidebar
+    minimap: minimap::Minimap,
+
     // Swap file timer
     swap_timer: std::time::Instant,
     swap_interval_ms: u64,
@@ -163,6 +176,17 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// Build a PluginManager: discover and launch all installed plugins.
+    fn build_plugin_manager() -> Option<plugin::PluginManager> {
+        let mut mgr = plugin::PluginManager::new();
+        mgr.discover();
+        if mgr.discovered.is_empty() {
+            return None;
+        }
+        mgr.launch_all();
+        Some(mgr)
+    }
+
     /// Build an LspManager from config (if any LSP servers are configured).
     fn build_lsp_manager(config: &Config) -> Option<lsp::LspManager> {
         if config.lsp_servers.is_empty() {
@@ -225,6 +249,9 @@ impl Editor {
             lsp_manager,
             completion_menu: None,
             hover_popup: None,
+            plugin_manager: Self::build_plugin_manager(),
+            diff_view: None,
+            minimap: minimap::Minimap::new(),
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: 2,
@@ -274,6 +301,9 @@ impl Editor {
             lsp_manager,
             completion_menu: None,
             hover_popup: None,
+            plugin_manager: Self::build_plugin_manager(),
+            diff_view: None,
+            minimap: minimap::Minimap::new(),
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: 1,
@@ -448,6 +478,9 @@ impl Editor {
             lsp_manager,
             completion_menu: None,
             hover_popup: None,
+            plugin_manager: Self::build_plugin_manager(),
+            diff_view: None,
+            minimap: minimap::Minimap::new(),
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
             next_untitled_id: max_untitled + 1,
@@ -609,6 +642,9 @@ impl Editor {
             // 2b. Drain LSP messages and sync diagnostics
             self.drain_lsp_messages();
 
+            // 2c. Drain plugin messages and handle requests
+            self.drain_plugin_messages();
+
             // 3. Reap dead children
             for pty in &mut self.ptys {
                 pty.reap();
@@ -643,7 +679,10 @@ impl Editor {
             self.flush_lsp_changes();
         }
 
-        // On exit: shutdown LSP servers, save session and final swap state
+        // On exit: shutdown plugins, LSP servers, save session and final swap state
+        if let Some(ref mut mgr) = self.plugin_manager {
+            mgr.shutdown_all();
+        }
         if let Some(ref mut mgr) = self.lsp_manager {
             mgr.shutdown_all();
         }
@@ -660,7 +699,12 @@ impl Editor {
             .as_ref()
             .map(|m| m.stdout_fds())
             .unwrap_or_default();
-        let mut fds = Vec::with_capacity(1 + self.ptys.len() + lsp_fds.len());
+        let plugin_fds = self
+            .plugin_manager
+            .as_ref()
+            .map(|m| m.stdout_fds())
+            .unwrap_or_default();
+        let mut fds = Vec::with_capacity(1 + self.ptys.len() + lsp_fds.len() + plugin_fds.len());
 
         // stdin
         fds.push(PollFd {
@@ -682,6 +726,15 @@ impl Editor {
 
         // LSP stdout fds
         for fd in &lsp_fds {
+            fds.push(PollFd {
+                fd: *fd,
+                events: POLLIN,
+                revents: 0,
+            });
+        }
+
+        // Plugin stdout fds
+        for fd in &plugin_fds {
             fds.push(PollFd {
                 fd: *fd,
                 events: POLLIN,
@@ -790,12 +843,125 @@ impl Editor {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Plugin integration
+    // -----------------------------------------------------------------------
+
+    /// Drain plugin messages and handle each incoming request.
+    fn drain_plugin_messages(&mut self) {
+        if self.plugin_manager.is_none() {
+            return;
+        }
+
+        // Collect requests (releases borrow on plugin_manager)
+        let requests = self.plugin_manager.as_mut().unwrap().drain_and_collect();
+
+        for req in requests {
+            match req {
+                plugin::PluginRequest::RegisterCommand { .. } => {
+                    // Already stored on the plugin's commands vec.
+                    // If palette is open, rebuild it to include new command.
+                    if self.palette.is_some() {
+                        self.refresh_palette_plugin_commands();
+                    }
+                }
+                plugin::PluginRequest::SubscribeEvent { .. } => {
+                    // Already stored on the plugin's subscriptions vec.
+                }
+                plugin::PluginRequest::ShowMessage { text, kind, .. } => {
+                    let msg_type = if kind == "error" {
+                        MessageType::Error
+                    } else if kind == "warning" {
+                        MessageType::Warning
+                    } else {
+                        MessageType::Info
+                    };
+                    self.set_message(&text, msg_type);
+                }
+                plugin::PluginRequest::InsertText { text, .. } => {
+                    self.delete_selection();
+                    self.handle_paste(&text);
+                }
+                plugin::PluginRequest::GetBufferText {
+                    plugin_name,
+                    request_id,
+                } => {
+                    let text = self.buf().buffer.text();
+                    let response = plugin::build_response(
+                        &request_id,
+                        crate::syntax::json_parser::JsonValue::String(text),
+                    );
+                    if let Some(ref mut mgr) = self.plugin_manager {
+                        mgr.send_to(&plugin_name, &response);
+                    }
+                }
+                plugin::PluginRequest::GetFilePath {
+                    plugin_name,
+                    request_id,
+                } => {
+                    let path_val = self
+                        .buf()
+                        .buffer
+                        .file_path()
+                        .map(|p| {
+                            crate::syntax::json_parser::JsonValue::String(
+                                p.to_string_lossy().to_string(),
+                            )
+                        })
+                        .unwrap_or(crate::syntax::json_parser::JsonValue::Null);
+                    let response = plugin::build_response(&request_id, path_val);
+                    if let Some(ref mut mgr) = self.plugin_manager {
+                        mgr.send_to(&plugin_name, &response);
+                    }
+                }
+            }
+        }
+
+        // Reap any dead plugin processes
+        if let Some(ref mut mgr) = self.plugin_manager {
+            mgr.reap_dead();
+        }
+    }
+
+    /// Dispatch a plugin event to all subscribed plugins.
+    fn plugin_dispatch(
+        &mut self,
+        kind: plugin::EventKind,
+        data: crate::syntax::json_parser::JsonValue,
+    ) {
+        if let Some(ref mut mgr) = self.plugin_manager {
+            mgr.dispatch_event(&kind, &data);
+        }
+    }
+
+    /// Rebuild the palette's plugin-command section when the palette is open.
+    fn refresh_palette_plugin_commands(&mut self) {
+        let cmds: Vec<(String, String, String)> = if let Some(ref mgr) = self.plugin_manager {
+            mgr.all_commands()
+                .iter()
+                .map(|(pname, cmd)| (pname.clone(), cmd.id.clone(), cmd.label.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(ref mut palette) = self.palette {
+            palette.replace_plugin_commands(&cmds);
+        }
+    }
+
     /// Notify LSP that a buffer was opened.
     fn lsp_notify_open(&mut self, buf_idx: usize) {
         let path = match self.buffers[buf_idx].buffer.file_path() {
             Some(p) => p.to_string_lossy().to_string(),
             None => return,
         };
+
+        // Dispatch plugin event
+        let event_data = crate::syntax::json_parser::JsonValue::Object(vec![(
+            "path".to_string(),
+            crate::syntax::json_parser::JsonValue::String(path.clone()),
+        )]);
+        self.plugin_dispatch(plugin::EventKind::BufferOpen, event_data);
 
         // Detect language from file extension
         let lang = match self.detect_lsp_language(&path) {
@@ -844,6 +1010,16 @@ impl Editor {
 
     /// Notify LSP that a buffer was saved.
     fn lsp_notify_save(&mut self, buf_idx: usize) {
+        // Dispatch plugin event
+        if let Some(path) = self.buffers[buf_idx].buffer.file_path() {
+            let path_str = path.to_string_lossy().to_string();
+            let event_data = crate::syntax::json_parser::JsonValue::Object(vec![(
+                "path".to_string(),
+                crate::syntax::json_parser::JsonValue::String(path_str),
+            )]);
+            self.plugin_dispatch(plugin::EventKind::BufferSave, event_data);
+        }
+
         let lang = match self.buffers[buf_idx].lsp_language.clone() {
             Some(l) => l,
             None => return,
@@ -863,6 +1039,16 @@ impl Editor {
 
     /// Notify LSP that a buffer was closed.
     fn lsp_notify_close(&mut self, buf_idx: usize) {
+        // Dispatch plugin event
+        if let Some(path) = self.buffers[buf_idx].buffer.file_path() {
+            let path_str = path.to_string_lossy().to_string();
+            let event_data = crate::syntax::json_parser::JsonValue::Object(vec![(
+                "path".to_string(),
+                crate::syntax::json_parser::JsonValue::String(path_str),
+            )]);
+            self.plugin_dispatch(plugin::EventKind::BufferClose, event_data);
+        }
+
         let lang = match self.buffers[buf_idx].lsp_language.clone() {
             Some(l) => l,
             None => return,
@@ -1403,6 +1589,14 @@ impl Editor {
             self.hover_popup = None;
         }
 
+        // Diff view overlay: consume all key events
+        if self.diff_view.is_some() {
+            if let Event::Key(ke) = event {
+                self.handle_diff_key(ke);
+            }
+            return;
+        }
+
         // Clear message on any event, but only when no prompt is active
         if self.prompt.is_none() && !matches!(&event, Event::None) {
             self.message = None;
@@ -1525,13 +1719,36 @@ impl Editor {
                 }
             }
             EditorAction::CommandPalette => {
-                self.palette = Some(palette::Palette::new(&self.config.keybindings));
+                let mut p = palette::Palette::new(&self.config.keybindings);
+                if let Some(ref mgr) = self.plugin_manager {
+                    let cmds: Vec<(String, String, String)> = mgr
+                        .all_commands()
+                        .iter()
+                        .map(|(pname, cmd)| (pname.clone(), cmd.id.clone(), cmd.label.clone()))
+                        .collect();
+                    p.add_plugin_commands(&cmds);
+                }
+                self.palette = Some(p);
             }
             EditorAction::ToggleTerminal => self.toggle_terminal_panel(),
             EditorAction::NewTerminal => self.new_terminal(),
             EditorAction::LspComplete => self.lsp_trigger_completion(),
             EditorAction::LspHover => self.lsp_trigger_hover(),
             EditorAction::LspGoToDef => self.lsp_trigger_goto_def(),
+            EditorAction::DiffOpenVsHead => self.open_diff_vs_head(),
+            EditorAction::DiffNextHunk => {
+                if let Some(ref mut dv) = self.diff_view {
+                    dv.next_hunk();
+                }
+            }
+            EditorAction::DiffPrevHunk => {
+                if let Some(ref mut dv) = self.diff_view {
+                    dv.prev_hunk();
+                }
+            }
+            EditorAction::ToggleMinimap => {
+                self.minimap.visible = !self.minimap.visible;
+            }
         }
     }
 

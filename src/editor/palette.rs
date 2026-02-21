@@ -7,7 +7,7 @@ use super::*;
 // Palette action — every command the palette can execute
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PaletteAction {
     // File
     Save,
@@ -58,6 +58,8 @@ pub(super) enum PaletteAction {
     // Terminal
     ToggleTerminal,
     NewTerminal,
+    // Plugin commands (command_id stored inline)
+    PluginCommand(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +67,7 @@ pub(super) enum PaletteAction {
 // ---------------------------------------------------------------------------
 
 pub(super) struct PaletteEntry {
-    pub label: &'static str,
+    pub label: String,
     pub shortcut: String,
     pub action: PaletteAction,
 }
@@ -280,14 +282,14 @@ impl Palette {
 
         let entries: Vec<PaletteEntry> = defs
             .iter()
-            .map(|&(label, action, editor_action)| {
+            .map(|&(label, ref action, editor_action)| {
                 let shortcut = editor_action
                     .map(|ea| keymap.label(ea).to_string())
                     .unwrap_or_default();
                 PaletteEntry {
-                    label,
+                    label: label.to_string(),
                     shortcut,
-                    action,
+                    action: action.clone(),
                 }
             })
             .collect();
@@ -303,6 +305,32 @@ impl Palette {
         }
     }
 
+    /// Append plugin commands to the palette entries and re-filter.
+    pub fn add_plugin_commands(&mut self, commands: &[(String, String, String)]) {
+        // commands: Vec<(plugin_name, command_id, label)>
+        for (plugin_name, cmd_id, label) in commands {
+            let display = format!("Plugin ({}): {}", plugin_name, label);
+            self.entries.push(PaletteEntry {
+                label: display,
+                shortcut: String::new(),
+                action: PaletteAction::PluginCommand(cmd_id.clone()),
+            });
+        }
+        // Re-build the full filter
+        if self.input.is_empty() {
+            self.filtered = (0..self.entries.len()).collect();
+        } else {
+            self.update_filter();
+        }
+    }
+
+    /// Remove all plugin commands and replace with a new set.
+    pub fn replace_plugin_commands(&mut self, commands: &[(String, String, String)]) {
+        self.entries
+            .retain(|e| !matches!(e.action, PaletteAction::PluginCommand(_)));
+        self.add_plugin_commands(commands);
+    }
+
     /// Re-filter and sort entries based on current input.
     pub fn update_filter(&mut self) {
         if self.input.is_empty() {
@@ -313,7 +341,7 @@ impl Palette {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, entry)| {
-                    fuzzy_score(&self.input, entry.label).map(|(score, _)| (i, score))
+                    fuzzy_score(&self.input, &entry.label).map(|(score, _)| (i, score))
                 })
                 .collect();
             scored.sort_by(|a, b| b.1.cmp(&a.1));
@@ -340,7 +368,7 @@ impl Palette {
         if self.input.is_empty() {
             return Vec::new();
         }
-        fuzzy_score(&self.input, self.entries[entry_idx].label)
+        fuzzy_score(&self.input, &self.entries[entry_idx].label)
             .map(|(_, positions)| positions)
             .unwrap_or_default()
     }
@@ -436,7 +464,7 @@ impl Editor {
                 if let Some(palette) = self.palette.take()
                     && let Some(entry) = palette.selected_entry()
                 {
-                    let action = entry.action;
+                    let action = entry.action.clone();
                     self.execute_palette_action(action);
                 }
             }
@@ -571,10 +599,24 @@ impl Editor {
             }
             CommandPalette => {
                 // Re-open palette (already closed by taking it)
-                self.palette = Some(Palette::new(&self.config.keybindings));
+                let mut p = Palette::new(&self.config.keybindings);
+                if let Some(ref mgr) = self.plugin_manager {
+                    let cmds: Vec<(String, String, String)> = mgr
+                        .all_commands()
+                        .iter()
+                        .map(|(pname, cmd)| (pname.clone(), cmd.id.clone(), cmd.label.clone()))
+                        .collect();
+                    p.add_plugin_commands(&cmds);
+                }
+                self.palette = Some(p);
             }
             ToggleTerminal => self.toggle_terminal_panel(),
             NewTerminal => self.new_terminal(),
+            PluginCommand(cmd_id) => {
+                if let Some(ref mut mgr) = self.plugin_manager {
+                    mgr.invoke_command(&cmd_id);
+                }
+            }
         }
     }
 }

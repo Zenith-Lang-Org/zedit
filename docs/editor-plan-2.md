@@ -19,10 +19,10 @@ Phases reordered by dependency graph and complexity (quick wins first, heavy pha
 | 7  | 11    | File Tree Sidebar    | 750    | Phase 8           | DONE   |
 | 8  | 9     | Integrated Terminal  | 1,450  | Phase 8           | DONE   |
 | 9  | 14    | Session + Swap Files | 650    | Phase 8           | DONE   |
-| 10 | 17    | LSP Client           | 1,650  | Phase 9           |        |
-| 11 | 19    | Diff / Merge View    | 650    | Phase 8 + 13      |        |
-| 12 | 20    | Minimap              | 330    | Phase 8           |        |
-| 13 | 18    | Plugin System        | 700    | Phase 15          |        |
+| 10 | 17    | LSP Client           | 1,650  | Phase 9           | DONE   |
+| 11 | 19    | Diff / Merge View    | 650    | Phase 8 + 13      | DONE   |
+| 12 | 20    | Minimap              | 330    | Phase 8           | DONE   |
+| 13 | 18    | Plugin System        | 700    | Phase 15          | DONE   |
 
 Phase 7δ (Runtime Grammar System) is independent and can be done at any point.
 
