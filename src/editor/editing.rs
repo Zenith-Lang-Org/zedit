@@ -1138,4 +1138,51 @@ impl Editor {
             cs.selection = None;
         }
     }
+
+    /// Copy the absolute path of the current buffer's file (or filetree selection) to the clipboard.
+    pub(super) fn copy_file_path(&mut self) {
+        let path_opt: Option<std::path::PathBuf> = if self.filetree_focused {
+            self.filetree
+                .as_ref()
+                .and_then(|ft| ft.selected_path())
+                .map(|p| p.to_path_buf())
+        } else {
+            self.buf().buffer.file_path().map(|p| p.to_path_buf())
+        };
+
+        if let Some(path) = path_opt {
+            let abs = path.canonicalize().unwrap_or(path);
+            let s = abs.to_string_lossy().to_string();
+            crate::clipboard::set(&s);
+            self.sys_clip_set(&s);
+            self.clipboard.set_text(s.clone());
+            self.set_message(&format!("Copied path: {}", s), MessageType::Info);
+        } else {
+            self.set_message("No file selected", MessageType::Warning);
+        }
+    }
+
+    /// Copy the relative path (from cwd) of the current buffer's file (or filetree selection) to the clipboard.
+    pub(super) fn copy_file_path_relative(&mut self) {
+        let path_opt: Option<std::path::PathBuf> = if self.filetree_focused {
+            self.filetree
+                .as_ref()
+                .and_then(|ft| ft.selected_path())
+                .map(|p| p.to_path_buf())
+        } else {
+            self.buf().buffer.file_path().map(|p| p.to_path_buf())
+        };
+
+        if let Some(path) = path_opt {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let rel = path.strip_prefix(&cwd).unwrap_or(&path);
+            let s = rel.to_string_lossy().to_string();
+            crate::clipboard::set(&s);
+            self.sys_clip_set(&s);
+            self.clipboard.set_text(s.clone());
+            self.set_message(&format!("Copied path: {}", s), MessageType::Info);
+        } else {
+            self.set_message("No file selected", MessageType::Warning);
+        }
+    }
 }

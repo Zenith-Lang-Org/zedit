@@ -61,6 +61,9 @@ pub(super) struct BufferState {
     pub(super) lsp_version: i32,
     /// Whether the buffer has been modified since last LSP didChange.
     pub(super) lsp_dirty: bool,
+    /// Semantic token spans pre-resolved via theme, covering the whole file.
+    /// Populated after LSP responds to semanticTokens/full; empty if no LSP.
+    pub(super) semantic_spans: Vec<crate::syntax::highlight::SemanticSpan>,
 }
 
 impl BufferState {
@@ -92,6 +95,7 @@ impl BufferState {
             lsp_language: None,
             lsp_version: 0,
             lsp_dirty: false,
+            semantic_spans: Vec::new(),
         }
     }
 
@@ -135,6 +139,7 @@ impl BufferState {
             lsp_language: None,
             lsp_version: 0,
             lsp_dirty: false,
+            semantic_spans: Vec::new(),
         })
     }
 

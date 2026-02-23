@@ -22,6 +22,9 @@
     { "scope": "variable", "settings": { "foreground": "#cdd6f4" } },
     { "scope": "support.function", "settings": { "foreground": "#f5c2e7" } },
     { "scope": "punctuation", "settings": { "foreground": "#9399b2" } },
+    { "scope": "entity.name.tag", "settings": { "foreground": "#94e2d5" } },
+    { "scope": "keyword.operator", "settings": { "foreground": "#89dceb" } },
+    { "scope": "storage.modifier", "settings": { "foreground": "#89b4fa" } },
     { "scope": "invalid", "settings": { "foreground": "#f38ba8", "fontStyle": "bold" } }
   ]
 }

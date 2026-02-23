@@ -88,8 +88,7 @@ pub fn import_vsix(vsix_path: &Path) -> Result<String, String> {
     let ext_id = format!("{}.{}", pkg.publisher, pkg.name);
     println!("Converting '{}' v{}...", pkg.display_name, pkg.version);
 
-    let base = extension::extension_base_dir()
-        .ok_or("cannot determine extensions directory")?;
+    let base = extension::extension_base_dir().ok_or("cannot determine extensions directory")?;
     std::fs::create_dir_all(&base)
         .map_err(|e| format!("cannot create extensions directory: {}", e))?;
 
@@ -189,7 +188,11 @@ struct PackageJson {
 
 impl std::fmt::Debug for PackageJson {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PackageJson {{ publisher: {:?}, name: {:?} }}", self.publisher, self.name)
+        write!(
+            f,
+            "PackageJson {{ publisher: {:?}, name: {:?} }}",
+            self.publisher, self.name
+        )
     }
 }
 
@@ -373,10 +376,7 @@ fn parse_package_json(text: &str) -> Result<PackageJson, String> {
 
 /// Try to read line comment prefix from language-configuration.json files.
 /// Returns a map of language-id → line-comment-prefix.
-fn collect_comment_prefixes(
-    ext_root: &Path,
-    languages: &[PkgLanguage],
-) -> Vec<(String, String)> {
+fn collect_comment_prefixes(ext_root: &Path, languages: &[PkgLanguage]) -> Vec<(String, String)> {
     let mut map = Vec::new();
     for lang in languages {
         let cfg_path = match &lang.configuration {
@@ -450,7 +450,10 @@ fn build_manifest_json(
         .iter()
         .map(|g| {
             JsonValue::Object(vec![
-                ("language".to_string(), JsonValue::String(g.language.clone())),
+                (
+                    "language".to_string(),
+                    JsonValue::String(g.language.clone()),
+                ),
                 (
                     "scopeName".to_string(),
                     JsonValue::String(g.scope_name.clone()),
@@ -499,8 +502,7 @@ fn build_manifest_json(
 // ── Shell helpers ─────────────────────────────────────────────
 
 fn extract_vsix(vsix_path: &Path, tmp_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(tmp_dir)
-        .map_err(|e| format!("cannot create temp dir: {}", e))?;
+    std::fs::create_dir_all(tmp_dir).map_err(|e| format!("cannot create temp dir: {}", e))?;
 
     let status = Command::new("unzip")
         .args([
@@ -511,12 +513,7 @@ fn extract_vsix(vsix_path: &Path, tmp_dir: &Path) -> Result<(), String> {
             tmp_dir.to_str().unwrap_or(""),
         ])
         .status()
-        .map_err(|e| {
-            format!(
-                "cannot run 'unzip' (is it installed?): {}",
-                e
-            )
-        })?;
+        .map_err(|e| format!("cannot run 'unzip' (is it installed?): {}", e))?;
 
     if !status.success() {
         return Err(format!(
@@ -530,22 +527,12 @@ fn extract_vsix(vsix_path: &Path, tmp_dir: &Path) -> Result<(), String> {
 
 fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     let status = Command::new("curl")
-        .args([
-            "-s",
-            "-S",
-            "-L",
-            "-o",
-            dest.to_str().unwrap_or(""),
-            url,
-        ])
+        .args(["-s", "-S", "-L", "-o", dest.to_str().unwrap_or(""), url])
         .status()
         .map_err(|e| format!("cannot run 'curl' (is it installed?): {}", e))?;
 
     if !status.success() {
-        return Err(format!(
-            "curl failed with exit code {:?}",
-            status.code()
-        ));
+        return Err(format!("curl failed with exit code {:?}", status.code()));
     }
     if !dest.exists() {
         return Err(format!("curl produced no output for URL: {}", url));
@@ -713,10 +700,7 @@ mod tests {
         assert_eq!(pkg.grammars.len(), 1);
         assert_eq!(pkg.grammars[0].language, "testlang");
         assert_eq!(pkg.grammars[0].scope_name, "source.tl");
-        assert_eq!(
-            pkg.grammars[0].path,
-            "./syntaxes/testlang.tmLanguage.json"
-        );
+        assert_eq!(pkg.grammars[0].path, "./syntaxes/testlang.tmLanguage.json");
         assert!(pkg.themes.is_empty());
     }
 
@@ -749,11 +733,11 @@ mod tests {
         let manifest = build_manifest_json("rust-lang.rust", &pkg, &grammars, &[], &[]);
         // Parse back and verify
         let val = JsonValue::parse(&manifest).unwrap();
-        assert_eq!(val.get("id").and_then(|v| v.as_str()), Some("rust-lang.rust"));
         assert_eq!(
-            val.get("version").and_then(|v| v.as_str()),
-            Some("1.2.3")
+            val.get("id").and_then(|v| v.as_str()),
+            Some("rust-lang.rust")
         );
+        assert_eq!(val.get("version").and_then(|v| v.as_str()), Some("1.2.3"));
         let langs = val.get("languages").and_then(|v| v.as_array()).unwrap();
         assert_eq!(langs.len(), 1);
         let grammars_out = val.get("grammars").and_then(|v| v.as_array()).unwrap();

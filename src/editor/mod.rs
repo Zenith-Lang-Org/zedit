@@ -125,11 +125,20 @@ pub struct Editor {
     // Clipboard (shared across buffers)
     clipboard: Clipboard,
 
+    // Persistent arboard instance — must stay alive for X11 clipboard ownership.
+    // On X11, dropping the Clipboard object releases selection ownership and clears
+    // the clipboard; keeping it here ensures content survives until the next copy.
+    sys_clipboard: Option<arboard::Clipboard>,
+
     // Active prompt (mini-prompt for Open, Save As, etc.)
     prompt: Option<Prompt>,
 
     // Mouse drag state
     mouse_dragging: bool,
+
+    // When true, render() skips adjust_viewport() so scroll-only actions
+    // (Ctrl+Up/Down) don't get immediately cancelled. Cleared on any non-scroll key.
+    scroll_only_mode: bool,
 
     // Help overlay
     help_visible: bool,
@@ -244,8 +253,10 @@ impl Editor {
             message_type: MessageType::Info,
             quit_confirm: false,
             clipboard: Clipboard::new(),
+            sys_clipboard: arboard::Clipboard::new().ok(),
             prompt: None,
             mouse_dragging: false,
+            scroll_only_mode: false,
             help_visible: false,
             palette: None,
             filetree: None,
@@ -299,8 +310,10 @@ impl Editor {
             message_type: MessageType::Info,
             quit_confirm: false,
             clipboard: Clipboard::new(),
+            sys_clipboard: arboard::Clipboard::new().ok(),
             prompt: None,
             mouse_dragging: false,
+            scroll_only_mode: false,
             help_visible: false,
             palette: None,
             filetree: None,
@@ -479,8 +492,10 @@ impl Editor {
             message_type: MessageType::Info,
             quit_confirm: false,
             clipboard: Clipboard::new(),
+            sys_clipboard: arboard::Clipboard::new().ok(),
             prompt: None,
             mouse_dragging: false,
+            scroll_only_mode: false,
             help_visible: false,
             palette: None,
             filetree: None,
@@ -1917,17 +1932,29 @@ impl Editor {
                         }
                         return;
                     }
+                    // Shift+Arrow: extend keyboard selection (never forward to PTY —
+                    // the bare escape sequences confuse bash and produce 'C'/'D').
+                    if ke.shift
+                        && !ke.ctrl
+                        && !ke.alt
+                        && matches!(ke.key, Key::Left | Key::Right | Key::Up | Key::Down)
+                    {
+                        let ke_clone = ke.clone();
+                        self.extend_terminal_selection(&ke_clone);
+                        return;
+                    }
                     // Intercept editor-level keybindings
                     if self.is_terminal_intercepted_key(ke) {
                         self.handle_terminal_meta_key(ke.clone());
                         return;
                     }
-                    // Any keypress resets scroll to bottom
+                    // Any keypress resets scroll to bottom and clears selection
                     if let Some(idx) = self.active_terminal_index() {
                         let off = self.vterms[idx].scroll_offset();
                         if off > 0 {
                             self.vterms[idx].scroll_view(off as isize);
                         }
+                        self.vterms[idx].clear_selection();
                     }
                     // Forward to PTY
                     self.forward_key_to_pty(ke);
@@ -1964,7 +1991,7 @@ impl Editor {
                             return;
                         }
                     }
-                    // Handle scroll wheel in terminal pane
+                    // Handle scroll wheel and left-drag selection in terminal pane
                     if let Some(idx) = self.active_terminal_index() {
                         match me.button {
                             crate::input::MouseButton::ScrollUp => {
@@ -1972,6 +1999,20 @@ impl Editor {
                             }
                             crate::input::MouseButton::ScrollDown => {
                                 self.vterms[idx].scroll_view(3);
+                            }
+                            crate::input::MouseButton::Left => {
+                                if let Some(rect) = self.layout.pane_rect(self.active_pane) {
+                                    let local_row = me.row.saturating_sub(rect.y);
+                                    let local_col = me.col.saturating_sub(rect.x);
+                                    if me.pressed && !me.motion {
+                                        // Start new selection on click
+                                        self.vterms[idx].set_sel_anchor(local_row, local_col);
+                                    } else if me.motion {
+                                        // Extend selection while dragging
+                                        self.vterms[idx].set_sel_active(local_row, local_col);
+                                    }
+                                    // On release: keep selection as-is
+                                }
                             }
                             _ => {}
                         }
@@ -2068,10 +2109,118 @@ impl Editor {
             }
             return;
         }
-        // All other intercepted keys go through keymap
+        // Copy / Paste / Cut need special terminal behaviour
         if let Some(action) = self.config.keybindings.lookup(&ke) {
-            self.execute_action(action);
+            match action {
+                EditorAction::Copy => {
+                    // Copy terminal selection; if nothing selected, Ctrl+C = SIGINT.
+                    let copied = self.terminal_copy();
+                    if !copied {
+                        self.forward_key_to_pty(&ke);
+                    }
+                }
+                EditorAction::Cut => {
+                    // Cut = copy in terminal (nothing to delete from rendered output).
+                    // If no selection just inform the user — never send \x18 to PTY.
+                    let copied = self.terminal_copy();
+                    if !copied {
+                        self.set_message("No text selected", MessageType::Warning);
+                    }
+                }
+                EditorAction::Paste => {
+                    // Prefer system clipboard, fall back to internal clipboard.
+                    let text = self.sys_clip_get()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| self.clipboard.text());
+                    if !text.is_empty() {
+                        self.forward_paste_to_pty(&text);
+                    } else {
+                        self.forward_key_to_pty(&ke);
+                    }
+                }
+                other => self.execute_action(other),
+            }
         }
+    }
+
+    /// Copy selected text from the active terminal.
+    /// Returns true if there was a selection that was copied.
+    /// Extend the terminal keyboard selection by one step in the arrow direction.
+    /// If no selection is active, anchors at the VTerm cursor position first.
+    fn extend_terminal_selection(&mut self, ke: &KeyEvent) {
+        let idx = match self.active_terminal_index() {
+            Some(i) => i,
+            None => return,
+        };
+        let pane_rect = match self.layout.pane_rect(self.active_pane) {
+            Some(r) => r,
+            None => return,
+        };
+        let pane_h = pane_rect.height as usize;
+        let pane_w = pane_rect.width as usize;
+
+        // VTerm cursor in pane-local display coordinates (accounting for scrollback).
+        let scroll_off = self.vterms[idx].scroll_offset();
+        let sb_lines = scroll_off
+            .min(self.vterms[idx].scrollback().len())
+            .min(pane_h);
+        let (vt_row, vt_col) = self.vterms[idx].cursor_pos();
+        let anchor_row = (sb_lines + vt_row as usize).min(pane_h.saturating_sub(1)) as u16;
+        let anchor_col = vt_col;
+
+        // If no selection exists yet, plant the anchor at the cursor.
+        if self.vterms[idx].sel_anchor.is_none() {
+            self.vterms[idx].set_sel_anchor(anchor_row, anchor_col);
+            self.vterms[idx].set_sel_active(anchor_row, anchor_col);
+        }
+
+        // Advance the active (moving) end one cell in the arrow direction.
+        let (row, col) = self.vterms[idx].sel_active.unwrap_or((anchor_row, anchor_col));
+        let (new_row, new_col) = match ke.key {
+            Key::Right => (row, (col + 1).min(pane_w.saturating_sub(1) as u16)),
+            Key::Left => (row, col.saturating_sub(1)),
+            Key::Down => ((row + 1).min(pane_h.saturating_sub(1) as u16), col),
+            Key::Up => (row.saturating_sub(1), col),
+            _ => (row, col),
+        };
+        self.vterms[idx].set_sel_active(new_row, new_col);
+    }
+
+    fn terminal_copy(&mut self) -> bool {
+        let idx = match self.active_terminal_index() {
+            Some(i) => i,
+            None => return false,
+        };
+        if !self.vterms[idx].has_selection() {
+            return false;
+        }
+        let (pane_h, pane_w) = self
+            .layout
+            .pane_rect(self.active_pane)
+            .map(|r| (r.height as usize, r.width as usize))
+            .unwrap_or((24, 80));
+        if let Some(text) = self.vterms[idx].selection_text(pane_h, pane_w) {
+            crate::clipboard::set(&text);
+            self.sys_clip_set(&text);
+            self.clipboard.set_text(text);
+            self.vterms[idx].clear_selection();
+            self.set_message("Copied", MessageType::Info);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Write text to the persistent arboard clipboard (X11/Wayland native).
+    pub(super) fn sys_clip_set(&mut self, text: &str) {
+        if let Some(ref mut cb) = self.sys_clipboard {
+            let _ = cb.set_text(text);
+        }
+    }
+
+    /// Read text from the persistent arboard clipboard.
+    pub(super) fn sys_clip_get(&mut self) -> Option<String> {
+        self.sys_clipboard.as_mut()?.get_text().ok()
     }
 
     /// Execute a configurable editor action.
@@ -2164,33 +2313,18 @@ impl Editor {
             EditorAction::ToggleProblemPanel => self.toggle_problem_panel(),
             EditorAction::SendToRepl => self.send_to_repl(),
             EditorAction::ScrollLineUp => {
-                let h = self.text_area_height();
                 let buf_idx = self.active_buffer_index();
                 self.buffers[buf_idx].scroll_row =
                     self.buffers[buf_idx].scroll_row.saturating_sub(1);
-                // Clamp cursor to remain within the new visible area
-                if h > 0 {
-                    let b = self.buf_mut();
-                    if b.cursor().line >= b.scroll_row + h {
-                        let target = b.scroll_row + h - 1;
-                        let col = b.cursor().col;
-                        b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
-                    }
-                }
             }
             EditorAction::ScrollLineDown => {
                 let buf_idx = self.active_buffer_index();
                 let max_scroll = self.buffers[buf_idx].buffer.line_count().saturating_sub(1);
                 self.buffers[buf_idx].scroll_row =
                     (self.buffers[buf_idx].scroll_row + 1).min(max_scroll);
-                // Clamp cursor to remain within the new visible area
-                let b = self.buf_mut();
-                if b.cursor().line < b.scroll_row {
-                    let target = b.scroll_row;
-                    let col = b.cursor().col;
-                    b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
-                }
             }
+            EditorAction::CopyFilePath => self.copy_file_path(),
+            EditorAction::CopyFilePathRelative => self.copy_file_path_relative(),
         }
     }
 
@@ -2199,6 +2333,20 @@ impl Editor {
         let action = self.config.keybindings.lookup(&ke);
         if action != Some(EditorAction::Quit) && action != Some(EditorAction::CloseBuffer) {
             self.quit_confirm = false;
+        }
+
+        // Scroll-only mode: active only while the user is pressing Ctrl+Up/Down.
+        // Any other key re-enables viewport tracking (adjust_viewport will run again).
+        let is_scroll_action = matches!(
+            action,
+            Some(EditorAction::ScrollLineUp) | Some(EditorAction::ScrollLineDown)
+        );
+        if is_scroll_action {
+            self.scroll_only_mode = true;
+        } else {
+            // Any non-scroll key: let render() call adjust_viewport() again so the
+            // viewport snaps back to show the cursor.
+            self.scroll_only_mode = false;
         }
 
         let is_nav = matches!(
@@ -2573,6 +2721,7 @@ impl Editor {
         };
         self.layout.resize_split(self.active_pane, delta, total);
         self.resolve_layout();
+        self.sync_pty_sizes();
     }
 
     fn resize_active_pane_vertical(&mut self, delta: i16) {

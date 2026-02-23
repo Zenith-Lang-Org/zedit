@@ -151,6 +151,17 @@ fn parse_escape(term: &Terminal) -> Event {
         b'O' => parse_ss3(term),
         // Alt + printable character
         0x20..=0x7e => Event::Key(KeyEvent::alt(Key::Char(next as char))),
+        // ESC + control byte = Alt+Ctrl+char (legacy terminal encoding for Ctrl+Alt+A..Z)
+        // e.g. Ctrl+Alt+C → ESC 0x03 → Key::Char('c') ctrl=true alt=true
+        0x01..=0x1a => {
+            let ch = (next + b'a' - 1) as char;
+            Event::Key(KeyEvent {
+                key: Key::Char(ch),
+                ctrl: true,
+                alt: true,
+                shift: false,
+            })
+        }
         _ => Event::Key(KeyEvent::plain(Key::Escape)),
     }
 }
@@ -319,7 +330,12 @@ fn decode_extended_key(codepoint: u16, (ctrl, alt, shift): (bool, bool, bool)) -
         }
         _ => return Event::None,
     };
-    Event::Key(KeyEvent { key, ctrl, alt, shift })
+    Event::Key(KeyEvent {
+        key,
+        ctrl,
+        alt,
+        shift,
+    })
 }
 
 /// Decode xterm modifier encoding: value = 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0)

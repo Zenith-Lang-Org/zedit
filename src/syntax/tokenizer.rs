@@ -882,6 +882,58 @@ mod tests {
         assert!(tokens[0].scopes.contains(&"comment.line".to_string()));
     }
 
+    /// Regression: compound keywords with hyphens (ELSE-IF, END-IF, …) must be
+    /// tokenized as keyword.control, NOT as identifier.
+    ///
+    /// Root cause: `find_earliest_match` takes the LONGEST match at a given
+    /// position.  When the keyword pattern tries alternatives left-to-right and
+    /// matches `ELSE` (4 chars), but the identifier pattern `[a-zA-Z_][a-zA-Z0-9_-]*`
+    /// matches the full `ELSE-IF` (7 chars), the identifier used to win.
+    /// Fix: put compound keywords (`ELSE-IF`, `SINO-SI`, …) BEFORE their
+    /// shorter prefix in the alternation so the keyword pattern also produces
+    /// a 7-char match, tying the identifier — and the first (keyword) pattern wins.
+    #[test]
+    fn test_compound_keyword_beats_identifier() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {"match": "(?i)\\b(ELSE-IF|ELSE|IF|END-IF)\\b", "name": "keyword.control"},
+                    {"match": "\\b[a-zA-Z_][a-zA-Z0-9_-]*\\b",      "name": "variable.other"}
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+
+        // ELSE-IF must get keyword.control, not variable.other
+        let (tokens, _) = t.tokenize_line("ELSE-IF x", &LineState::initial());
+        let kw = tokens
+            .iter()
+            .find(|tok| tok.start == 0 && tok.end == 7)
+            .expect("expected token at [0,7] for ELSE-IF");
+        assert!(
+            kw.scopes.contains(&"keyword.control".to_string()),
+            "ELSE-IF should be keyword.control, got {:?}",
+            kw.scopes
+        );
+
+        // Standalone ELSE still works
+        let (tokens2, _) = t.tokenize_line("ELSE x", &LineState::initial());
+        let kw2 = tokens2
+            .iter()
+            .find(|tok| tok.start == 0 && tok.end == 4)
+            .expect("expected token at [0,4] for ELSE");
+        assert!(kw2.scopes.contains(&"keyword.control".to_string()));
+
+        // END-IF works (its prefix END is not in the alternation — no conflict)
+        let (tokens3, _) = t.tokenize_line("END-IF", &LineState::initial());
+        let kw3 = tokens3
+            .iter()
+            .find(|tok| tok.start == 0 && tok.end == 6)
+            .expect("expected token at [0,6] for END-IF");
+        assert!(kw3.scopes.contains(&"keyword.control".to_string()));
+    }
+
     #[test]
     fn test_zero_width_match_no_infinite_loop() {
         let g = make_grammar(

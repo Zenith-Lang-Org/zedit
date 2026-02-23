@@ -45,9 +45,7 @@ impl TaskRunner {
         // 1. Extension tasks — first extension that covers the language wins.
         for ext in extensions {
             if ext.languages.iter().any(|l| l.name == lang) {
-                if let Some((_, task)) =
-                    ext.tasks.iter().find(|(n, _)| n == kind.as_str())
-                {
+                if let Some((_, task)) = ext.tasks.iter().find(|(n, _)| n == kind.as_str()) {
                     return Some(task.cmd.clone());
                 }
             }
@@ -62,14 +60,8 @@ impl TaskRunner {
     /// Variables: `{file}`, `{dir}`, `{stem}`, `{workspace}`
     pub fn expand(cmd: &str, file_path: &str, workspace: &str) -> String {
         let path = Path::new(file_path);
-        let dir = path
-            .parent()
-            .and_then(|p| p.to_str())
-            .unwrap_or("");
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let dir = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         cmd.replace("{file}", file_path)
             .replace("{dir}", dir)
             .replace("{stem}", stem)
@@ -207,8 +199,8 @@ mod tests {
 
     #[test]
     fn test_extension_task_overrides_builtin() {
-        use crate::extension::{Extension, ExtLspConfig, TaskDef};
         use crate::config::LanguageDef;
+        use crate::extension::{ExtLspConfig, Extension, TaskDef};
         use std::path::PathBuf;
 
         let ext = Extension {
@@ -241,8 +233,8 @@ mod tests {
 
     #[test]
     fn test_extension_falls_through_to_builtin_for_missing_task() {
-        use crate::extension::{Extension, TaskDef};
         use crate::config::LanguageDef;
+        use crate::extension::{Extension, TaskDef};
         use std::path::PathBuf;
 
         // Extension covers "rust" but only has a "build" task, not "test"

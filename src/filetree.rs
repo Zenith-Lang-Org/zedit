@@ -66,7 +66,23 @@ pub struct FileTree {
 // Default ignored paths
 // ---------------------------------------------------------------------------
 
-const DEFAULT_IGNORED: &[&str] = &[".git", "target", "node_modules", ".DS_Store", "__pycache__"];
+const DEFAULT_IGNORED: &[&str] = &[
+    // VCS / build artifacts
+    ".git",
+    "target",
+    "node_modules",
+    ".DS_Store",
+    "__pycache__",
+    // Editor swap / backup files
+    "*.swp",
+    "*.swo",
+    "*.swn",
+    "*~",
+    "*.bak",
+    "*.tmp",
+    // OS metadata
+    "Thumbs.db",
+];
 
 // ---------------------------------------------------------------------------
 // FileTree implementation
@@ -801,8 +817,8 @@ fn scan_dir(path: &Path, depth: usize, ignored: &[String]) -> Vec<TreeNode> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
 
-        // Skip ignored
-        if ignored.iter().any(|ig| ig == &name) {
+        // Skip ignored (supports glob patterns: * and ?)
+        if ignored.iter().any(|ig| glob_match(ig, &name)) {
             continue;
         }
 
@@ -855,6 +871,31 @@ fn scan_dir(path: &Path, depth: usize, ignored: &[String]) -> Vec<TreeNode> {
 
     dirs.extend(files);
     dirs
+}
+
+// ---------------------------------------------------------------------------
+// Glob matching (supports * and ? wildcards)
+// ---------------------------------------------------------------------------
+
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let nam: Vec<char> = name.chars().collect();
+    glob_match_inner(&pat, &nam)
+}
+
+fn glob_match_inner(pat: &[char], name: &[char]) -> bool {
+    match (pat.first(), name.first()) {
+        (None, None) => true,
+        (None, _) => false,
+        (Some('*'), _) => {
+            // * matches zero or more characters
+            glob_match_inner(&pat[1..], name)
+                || (!name.is_empty() && glob_match_inner(pat, &name[1..]))
+        }
+        (Some('?'), Some(_)) => glob_match_inner(&pat[1..], &name[1..]),
+        (Some(p), Some(n)) if p == n => glob_match_inner(&pat[1..], &name[1..]),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------

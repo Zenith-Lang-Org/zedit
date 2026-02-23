@@ -462,10 +462,23 @@ impl<'a> Compiler<'a> {
                     }
                     Ok(())
                 }
-                _ => Err(format!(
-                    "Regex error at {}: unsupported group modifier",
-                    self.pos
-                )),
+                _ => {
+                    // Inline mode flags: (?i), (?s), (?m), (?i-m), etc.
+                    // These are zero-length mode modifiers with no body.
+                    // We parse past the flags and closing ')' and emit nothing.
+                    loop {
+                        match self.advance() {
+                            Some(b')') => return Ok(()),
+                            Some(b) if b.is_ascii_alphabetic() || b == b'-' => {} // flag char
+                            _ => {
+                                return Err(format!(
+                                    "Regex error at {}: unsupported group modifier",
+                                    self.pos
+                                ))
+                            }
+                        }
+                    }
+                }
             }
         } else {
             self.group_count += 1;
@@ -1035,6 +1048,20 @@ mod tests {
     fn test_compile_groups() {
         Regex::new("(abc)").unwrap();
         Regex::new("(?:abc)").unwrap();
+    }
+
+    #[test]
+    fn test_compile_inline_mode_flags() {
+        // (?i), (?s), (?m), (?i-m) are Oniguruma mode modifiers — must compile without error.
+        // We treat them as no-ops (case-sensitivity is not affected; Zenith keywords are uppercase).
+        Regex::new("(?i)abc").unwrap();
+        Regex::new("(?i)\\b(IF|ELSE-IF)\\b").unwrap();
+        Regex::new("(?i-m)\\w+").unwrap();
+        // The match is case-sensitive (no-op semantics); uppercase must still match.
+        let re = Regex::new("(?i)\\b(ELSE-IF|ELSE|IF)\\b").unwrap();
+        assert!(re.find("ELSE-IF x", 0).is_some());
+        let m = re.find("ELSE-IF x", 0).unwrap();
+        assert_eq!(m.end - m.start, 7, "must match full ELSE-IF (7 chars)");
     }
 
     #[test]

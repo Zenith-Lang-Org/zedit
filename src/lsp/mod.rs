@@ -62,10 +62,20 @@ impl LspManager {
         let (_, cfg) = &self.config[config_idx];
 
         // Spawn transport
-        crate::dlog!("[lsp_mgr] spawning '{}' for lang={}", cfg.command, language_id);
+        crate::dlog!(
+            "[lsp_mgr] spawning '{}' for lang={}",
+            cfg.command,
+            language_id
+        );
         let transport = match LspTransport::spawn(&cfg.command, &cfg.args) {
-            Ok(t) => { crate::dlog!("[lsp_mgr] spawn OK"); t }
-            Err(e) => { crate::dlog!("[lsp_mgr] spawn FAILED: {}", e); return None; }
+            Ok(t) => {
+                crate::dlog!("[lsp_mgr] spawn OK");
+                t
+            }
+            Err(e) => {
+                crate::dlog!("[lsp_mgr] spawn FAILED: {}", e);
+                return None;
+            }
         };
 
         // Create client and send initialize
@@ -158,6 +168,13 @@ impl LspManager {
         }
     }
 
+    /// Send a semantic tokens request for the given language.
+    pub fn request_semantic_tokens(&mut self, lang: &str, uri: &str) {
+        if let Some(client) = self.client_mut(lang) {
+            client.request_semantic_tokens(uri);
+        }
+    }
+
     /// Take any pending completion result from any client.
     pub fn take_completion_result(&mut self) -> Option<Vec<CompletionItem>> {
         for (_, client) in &mut self.clients {
@@ -183,6 +200,37 @@ impl LspManager {
         for (_, client) in &mut self.clients {
             if let Some(r) = client.definition_result.take() {
                 return Some(r);
+            }
+        }
+        None
+    }
+
+    /// Return the language IDs of clients whose initialization just completed.
+    /// Each ID is returned exactly once (flag is cleared on read).
+    /// Used by drain_lsp_messages to re-send did_open for already-open buffers
+    /// that were attempted before the server finished initializing.
+    pub fn take_newly_initialized_langs(&mut self) -> Vec<String> {
+        self.clients
+            .iter_mut()
+            .filter_map(|(lang, client)| {
+                if client.take_newly_initialized() {
+                    Some(lang.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Take any pending semantic tokens result: (uri, tokens, legend).
+    pub fn take_semantic_tokens_result(
+        &mut self,
+    ) -> Option<(String, Vec<protocol::SemanticTokenEntry>, Vec<String>)> {
+        for (_, client) in &mut self.clients {
+            if !client.semantic_tokens_result.is_empty() {
+                let (uri, tokens) = client.semantic_tokens_result.remove(0);
+                let legend = client.semantic_legend.clone();
+                return Some((uri, tokens, legend));
             }
         }
         None

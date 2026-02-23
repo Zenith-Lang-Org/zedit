@@ -1,5 +1,4 @@
 use crate::cursor::Cursor;
-use crate::terminal;
 use crate::undo::{GroupContext, Operation};
 
 use super::*;
@@ -74,7 +73,8 @@ impl Editor {
             }
             let text = self.buf().buffer.slice(start, end);
             let len = text.chars().count();
-            terminal::set_clipboard_osc52(&text);
+            crate::clipboard::set(&text);
+            self.sys_clip_set(&text);
             self.clipboard.set_text(text);
             self.set_message(&format!("Copied {} chars", len), MessageType::Info);
         } else {
@@ -88,7 +88,8 @@ impl Editor {
         let line_text = b.buffer.get_line(b.cursor().line).unwrap_or_default();
         let text = format!("{}\n", line_text);
         let len = line_text.chars().count();
-        terminal::set_clipboard_osc52(&text);
+        crate::clipboard::set(&text);
+        self.sys_clip_set(&text);
         self.clipboard.set_line(text);
         self.set_message(&format!("Copied line ({} chars)", len), MessageType::Info);
     }
@@ -101,7 +102,8 @@ impl Editor {
             }
             let text = self.delete_selection().unwrap_or_default();
             let len = text.chars().count();
-            terminal::set_clipboard_osc52(&text);
+            crate::clipboard::set(&text);
+            self.sys_clip_set(&text);
             self.clipboard.set_text(text);
             self.set_message(&format!("Cut {} chars", len), MessageType::Info);
         } else {
@@ -136,43 +138,28 @@ impl Editor {
         b.cursors[b.primary].cursor.clamp(&b.buffer);
         b.cursors[b.primary].cursor.col = 0;
         b.cursors[b.primary].cursor.desired_col = 0;
-        terminal::set_clipboard_osc52(&text);
+        crate::clipboard::set(&text);
+        self.sys_clip_set(&text);
         self.clipboard.set_line(text);
         self.set_message(&format!("Cut line ({} chars)", len), MessageType::Info);
     }
 
     pub(super) fn paste_clipboard(&mut self) {
-        if self.clipboard.is_empty() {
-            self.set_message("Clipboard is empty", MessageType::Warning);
-            return;
-        }
+        // Prefer system clipboard; fall back to internal clipboard.
+        let sys = self.sys_clip_get().filter(|s| !s.is_empty());
+        let text = match sys {
+            Some(t) => t,
+            None => {
+                if self.clipboard.is_empty() {
+                    self.set_message("Clipboard is empty", MessageType::Warning);
+                    return;
+                }
+                self.clipboard.text()
+            }
+        };
         // Delete selection if active
         self.delete_selection();
-
-        if self.clipboard.line_mode {
-            // Line-mode paste: insert as a new line above current cursor position
-            let text = self.clipboard.text();
-            let before = self.cursor_state();
-            let b = self.buf();
-            let line_start = b.buffer.line_start(b.cursor().line).unwrap_or(0);
-            let b = self.buf_mut();
-            b.buffer.insert(line_start, &text);
-            b.undo_stack.record(
-                Operation::Insert {
-                    pos: line_start,
-                    text: text.clone(),
-                },
-                before,
-                GroupContext::Paste,
-            );
-            // Position cursor at beginning of pasted content
-            b.cursors[b.primary].cursor.col = 0;
-            b.cursors[b.primary].cursor.desired_col = 0;
-            self.invalidate_highlight();
-        } else {
-            let text = self.clipboard.text();
-            self.handle_paste(&text);
-        }
+        self.handle_paste(&text);
     }
 
     pub(super) fn select_all(&mut self) {

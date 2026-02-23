@@ -9,13 +9,11 @@
     {"include": "#strings"},
     {"include": "#numbers"},
     {"include": "#booleans"},
-    {"include": "#function-def"},
     {"include": "#keywords"},
     {"include": "#types"},
     {"include": "#operators"},
     {"include": "#macros"},
-    {"include": "#identifiers"},
-    {"include": "#invalid"}
+    {"include": "#identifiers"}
   ],
   "repository": {
     "directive": {
@@ -36,13 +34,7 @@
         {
           "name": "string.quoted.triple.zenith",
           "begin": "'''",
-          "end": "'''",
-          "patterns": [
-            {
-              "name": "constant.character.escape.zenith",
-              "match": "\\\\[nrt\\\\'\"]"
-            }
-          ]
+          "end": "'''"
         },
         {
           "name": "string.quoted.single.zenith",
@@ -60,8 +52,7 @@
         {"name": "constant.numeric.hex.zenith", "match": "\\b0x[0-9a-fA-F]+\\b"},
         {"name": "constant.numeric.binary.zenith", "match": "\\b0b[01]+\\b"},
         {"name": "constant.numeric.octal.zenith", "match": "\\b0o[0-7]+\\b"},
-        {"name": "constant.numeric.float.zenith", "match": "\\b\\d+\\.\\d+\\b"},
-        {"name": "constant.numeric.decimal.zenith", "match": "\\b\\d+\\b"}
+        {"name": "constant.numeric.decimal.zenith", "match": "\\b\\d+(\\.\\d+)?\\b"}
       ]
     },
     "booleans": {
@@ -70,26 +61,10 @@
         "match": "(?i)\\b(TRUE|FALSE|VERDADERO|FALSO)\\b"
       }]
     },
-    "function-def": {
-      "comment": "FUNCTION funcname — highlight keyword + function name as separate scopes",
-      "patterns": [{
-        "match": "(?i)\\b(FUNCTION|FUNCION)\\s+([a-zA-Z_][a-zA-Z0-9_-]*)",
-        "captures": {
-          "1": {"name": "keyword.control.zenith"},
-          "2": {"name": "entity.name.function.zenith"}
-        }
-      }, {
-        "match": "(?i)\\b(PROGRAM|PROGRAMA|MODULE|MODULO)\\s+([a-zA-Z_][a-zA-Z0-9_-]*)",
-        "captures": {
-          "1": {"name": "keyword.control.zenith"},
-          "2": {"name": "entity.name.namespace.zenith"}
-        }
-      }]
-    },
     "keywords": {
       "patterns": [{
         "name": "keyword.control.zenith",
-        "match": "(?i)\\b(DEFINE|DEFINIR|CONSTANT|CONSTANTE|IF|SI|THEN|ENTONCES|ELSE|SINO|ELSE-IF|SINO-SI|END-IF|FIN-SI|REPEAT|REPETIR|WHILE|MIENTRAS|UNTIL|HASTA|TIMES|VECES|BETWEEN|ENTRE|NEXT-REPEAT|FIN-REPETIR|FOR|PARA|SKIP-REPEAT|SALTAR-REPETIR|EXIT-REPEAT|SALIR-REPETIR|MATCH|COINCIDIR|CASE|CASO|OTHER|OTRO|END-MATCH|FIN-COINCIDIR|WHERE|DONDE|BY|POR|TO|A|OF|DE|INFINITY|WITH|CON|FUNCTION|FUNCION|END-FUNCTION|FIN-FUNCION|CALL|LLAMAR|RETURN|RETORNAR|RETURNS|RETORNA|USING|USANDO|CHANGING|CAMBIANDO|PROGRAM|PROGRAMA|END-PROGRAM|FIN-PROGRAMA|MODULE|MODULO|END-MODULE|FIN-MODULO|IMPORT|IMPORTAR|EXPORT|EXPORTAR|END-EXPORT|FIN-EXPORTAR|AS|COMO|IN|EN|STRUCTURE|ESTRUCTURA|END-STRUCTURE|FIN-ESTRUCTURA|DESTROY|DESTRUIR|TYPE|TIPO|LIKE|DISPLAY|MOSTRAR|INPUT|ENTRADA|LOG|INFO|WARNING|ADVERTENCIA|ERROR|HIDDEN|OCULTO|MASKED|ENMASCARADO|AT|LINE|LINEA|COLUMN|COLUMNA|COLOR|BACKGROUND|FONDO|BOLD|NEGRITA|ITALIC|CURSIVA|UNDERLINE|SUBRAYADO|SPACE|ESPACIO|NEWLINE|NUEVA-LINEA|NL|INTO|HACIA|SEPARATED|SEPARADO|INSERT|INSERTAR|UPDATE|ACTUALIZAR|DELETE|ELIMINAR|FIND|BUSCAR|SORT|ORDENAR|CLEAR|LIMPIAR|FROM|DESDE|ALL|TODO|ASCENDING|ASCENDENTE|DESCENDING|DESCENDENTE|INDEX|INDICE|FIELD|CAMPO|BATCH|LOTE|OPERATION|OPERACION|SYSTEM|SISTEMA|GET|OBTENER|COMPUTE|CALCULAR|COPY|COPIAR|ASSERT|AFIRMAR|STOP|DETENER|SIZE|TAMANO|EMPTY|VACIO|VERSION|AUTHOR|AUTOR|DESCRIPTION|DESCRIPCION|TIME-ZONE|ZONA-HORARIA|READ-KEY|LEER-TECLA|OPEN-FILE|ABRIR-ARCHIVO|CLOSE-FILE|CERRAR-ARCHIVO|TRY|INTENTAR|CATCH|CAPTURAR|FINALLY|FINALMENTE|END-TRY|FIN-INTENTAR|RAISE|LANZAR|ANY|CUALQUIER|NEW|NUEVO)\\b"
+        "match": "(?i)\\b(DEFINE|DEFINIR|CONSTANT|CONSTANTE|IF|SI|THEN|ENTONCES|ELSE-IF|SINO-SI|ELSE|SINO|END-IF|FIN-SI|REPEAT|REPETIR|WHILE|MIENTRAS|UNTIL|HASTA|TIMES|VECES|BETWEEN|ENTRE|NEXT-REPEAT|FIN-REPETIR|FOR|PARA|SKIP-REPEAT|SALTAR-REPETIR|EXIT-REPEAT|SALIR-REPETIR|MATCH|COINCIDIR|CASE|CASO|OTHER|OTRO|END-MATCH|FIN-COINCIDIR|WHERE|DONDE|BY|POR|TO|A|OF|DE|INFINITY|WITH|CON|FUNCTION|FUNCION|END-FUNCTION|FIN-FUNCION|CALL|LLAMAR|RETURN|RETORNAR|RETURNS|RETORNA|USING|USANDO|CHANGING|CAMBIANDO|PROGRAM|PROGRAMA|END-PROGRAM|FIN-PROGRAMA|MODULE|MODULO|END-MODULE|FIN-MODULO|IMPORT|IMPORTAR|EXPORT|EXPORTAR|END-EXPORT|FIN-EXPORTAR|AS|COMO|IN|EN|STRUCTURE|ESTRUCTURA|END-STRUCTURE|FIN-ESTRUCTURA|DESTROY|DESTRUIR|TYPE|TIPO|LIKE|DISPLAY|MOSTRAR|INPUT|ENTRADA|LOG|INFO|WARNING|ADVERTENCIA|ERROR|HIDDEN|OCULTO|MASKED|ENMASCARADO|AT|LINE|LINEA|COLUMN|COLUMNA|COLOR|BACKGROUND|FONDO|BOLD|NEGRITA|ITALIC|CURSIVA|UNDERLINE|SUBRAYADO|SPACE|ESPACIO|NEWLINE|NUEVA-LINEA|NL|INTO|HACIA|SEPARATED|SEPARADO|INSERT|INSERTAR|UPDATE|ACTUALIZAR|DELETE|ELIMINAR|FIND|BUSCAR|SORT|ORDENAR|CLEAR|LIMPIAR|FROM|DESDE|ALL|TODO|ASCENDING|ASCENDENTE|DESCENDING|DESCENDENTE|INDEX|INDICE|FIELD|CAMPO|BATCH|LOTE|OPERATION|OPERACION|SYSTEM|SISTEMA|GET|OBTENER|COMPUTE|CALCULAR|COPY|COPIAR|ASSERT|AFIRMAR|STOP|DETENER|SIZE|TAMANO|EMPTY|VACIO|VERSION|AUTHOR|AUTOR|DESCRIPTION|DESCRIPCION|TIME-ZONE|ZONA-HORARIA|READ-KEY|LEER-TECLA|OPEN-FILE|ABRIR-ARCHIVO|CLOSE-FILE|CERRAR-ARCHIVO|TRY|INTENTAR|CATCH|CAPTURAR|FINALLY|FINALMENTE|END-TRY|FIN-INTENTAR|RAISE|LANZAR|ANY|CUALQUIER|NEW|NUEVO)\\b"
       }]
     },
     "types": {
@@ -120,12 +95,6 @@
       "patterns": [{
         "name": "variable.other.zenith",
         "match": "\\b[a-zA-Z_][a-zA-Z0-9_-]*\\b"
-      }]
-    },
-    "invalid": {
-      "patterns": [{
-        "name": "invalid.illegal.zenith",
-        "match": "[^\\s\\w\\-'\"#/\\*=<>!+%^:.,(){}\\[\\]@&|~`]"
       }]
     }
   }

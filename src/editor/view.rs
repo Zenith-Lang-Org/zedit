@@ -146,7 +146,9 @@ impl Editor {
         } else {
             0
         };
-        self.adjust_viewport();
+        if !self.scroll_only_mode {
+            self.adjust_viewport();
+        }
 
         let screen_width = self.screen.width();
         let screen_height = self.screen.height();
@@ -416,15 +418,26 @@ impl Editor {
         } else if let Some(crate::layout::PaneContent::Terminal(ti)) =
             self.layout.pane_content(self.active_pane)
         {
-            // Terminal pane cursor
+            // Terminal pane cursor: offset by however many scrollback lines are
+            // shown above the live buffer. If the cursor would land below the
+            // bottom of the pane (scrolled too far up) we simply don't move it.
             if let Some(rect) = self.layout.pane_rect(self.active_pane)
                 && ti < self.vterms.len()
                 && self.vterms[ti].cursor_visible()
             {
+                let pane_h = rect.height as usize;
+                let scroll_off = self.vterms[ti].scroll_offset();
+                let sb_lines = scroll_off
+                    .min(self.vterms[ti].scrollback().len())
+                    .min(pane_h);
                 let (vt_row, vt_col) = self.vterms[ti].cursor_pos();
-                let screen_row = rect.y as usize + vt_row as usize;
-                let screen_col = rect.x as usize + vt_col as usize;
-                terminal::move_cursor((screen_row + 1) as u16, (screen_col + 1) as u16);
+                let screen_row = rect.y as usize + sb_lines + vt_row as usize;
+                if screen_row < rect.y as usize + pane_h {
+                    let screen_col = rect.x as usize + vt_col as usize;
+                    terminal::move_cursor((screen_row + 1) as u16, (screen_col + 1) as u16);
+                }
+                // If screen_row >= pane bottom the cursor is off-screen (viewing
+                // old scrollback). Don't move the hardware cursor there.
             }
         } else if let Some(rect) = self.layout.pane_rect(self.active_pane) {
             let b = self.buf();
@@ -458,16 +471,21 @@ impl Editor {
             } else {
                 let cursor_screen_row =
                     b.cursor().line.saturating_sub(b.scroll_row) + rect.y as usize;
-                let cursor_display = self.cursor_display_col();
-                let cursor_screen_col = cursor_display
-                    .saturating_sub(b.scroll_col)
-                    .saturating_add(b.gutter_width)
-                    + rect.x as usize;
+                let pane_bottom = rect.y as usize + rect.height as usize;
+                // Only position the caret when the cursor is inside the visible pane.
+                // During scroll-only mode the cursor may be off-screen.
+                if cursor_screen_row < pane_bottom {
+                    let cursor_display = self.cursor_display_col();
+                    let cursor_screen_col = cursor_display
+                        .saturating_sub(b.scroll_col)
+                        .saturating_add(b.gutter_width)
+                        + rect.x as usize;
 
-                terminal::move_cursor(
-                    (cursor_screen_row + 1) as u16,
-                    (cursor_screen_col + 1) as u16,
-                );
+                    terminal::move_cursor(
+                        (cursor_screen_row + 1) as u16,
+                        (cursor_screen_col + 1) as u16,
+                    );
+                }
             }
         }
         terminal::flush();
@@ -794,6 +812,9 @@ impl Editor {
                     })
                 };
 
+                let semantic_spans = &self.buffers[buffer_idx].semantic_spans;
+                let mut char_col: u32 = 0;
+
                 // Collect diagnostic severity for this line
                 let line_diag_severity = self.buffers[buffer_idx]
                     .diagnostics
@@ -838,6 +859,17 @@ impl Editor {
                             .iter()
                             .any(|(s, e)| char_byte >= *s && char_byte < *e);
                         let is_secondary_cursor = secondary_cursor_offsets.contains(&char_byte);
+                        // String/comment regions: TextMate context is authoritative.
+                        // Semantic tokens from the LSP must not override string/comment
+                        // coloring because the LSP may emit tokens for identifiers inside
+                        // string literals (e.g., 'HELLO' → LSP says HELLO is a variable).
+                        let is_str_or_comment = spans
+                            .as_ref()
+                            .map(|s| {
+                                highlight::is_in_string_or_comment(s, byte_offset_in_line)
+                            })
+                            .unwrap_or(false);
+
                         let (fg, bg, bold) = if is_selected {
                             (Color::Ansi(0), Color::Ansi(7), true)
                         } else if is_secondary_cursor {
@@ -850,6 +882,34 @@ impl Editor {
                                 } else {
                                     (Color::Ansi(0), Color::Ansi(3), false)
                                 }
+                            } else if !is_str_or_comment {
+                                // Semantic tokens override TextMate for Zenith multi-language accuracy
+                                if let Some((sem_fg, sem_bold)) = highlight::lookup_semantic_span(
+                                    semantic_spans,
+                                    file_line as u32,
+                                    char_col,
+                                ) {
+                                    (sem_fg, Color::Default, sem_bold)
+                                } else {
+                                    match &spans {
+                                        Some(s) => highlight::lookup_style(s, byte_offset_in_line),
+                                        None => (Color::Default, Color::Default, false),
+                                    }
+                                }
+                            } else {
+                                match &spans {
+                                    Some(s) => highlight::lookup_style(s, byte_offset_in_line),
+                                    None => (Color::Default, Color::Default, false),
+                                }
+                            }
+                        } else if !is_str_or_comment {
+                            // Semantic tokens override TextMate for Zenith multi-language accuracy
+                            if let Some((sem_fg, sem_bold)) = highlight::lookup_semantic_span(
+                                semantic_spans,
+                                file_line as u32,
+                                char_col,
+                            ) {
+                                (sem_fg, Color::Default, sem_bold)
                             } else {
                                 match &spans {
                                     Some(s) => highlight::lookup_style(s, byte_offset_in_line),
@@ -903,6 +963,7 @@ impl Editor {
                         }
                     }
                     byte_offset_in_line += ch.len_utf8();
+                    char_col += 1;
                     display_col += cw;
                 }
 
@@ -1163,6 +1224,9 @@ impl Editor {
                 })
             };
 
+            let semantic_spans = &self.buffers[buffer_idx].semantic_spans;
+            let mut char_col: u32 = 0;
+
             let mut display_col: usize = 0;
             let mut byte_offset_in_line: usize = 0;
             let text_start_col = pane_x + gutter_width;
@@ -1184,6 +1248,17 @@ impl Editor {
                         .any(|(s, e)| char_byte >= *s && char_byte < *e);
                     let is_secondary_cursor = secondary_cursor_offsets.contains(&char_byte);
 
+                    // String/comment regions: TextMate context is authoritative.
+                    // Semantic tokens from the LSP must not override string/comment
+                    // coloring because the LSP may emit tokens for identifiers inside
+                    // string literals (e.g., 'HELLO' → LSP says HELLO is a variable).
+                    let is_str_or_comment = spans
+                        .as_ref()
+                        .map(|s| {
+                            highlight::is_in_string_or_comment(s, byte_offset_in_line)
+                        })
+                        .unwrap_or(false);
+
                     let (fg, bg, bold) = if is_selected {
                         (Color::Ansi(0), Color::Ansi(7), true)
                     } else if is_secondary_cursor {
@@ -1195,6 +1270,34 @@ impl Editor {
                             } else {
                                 (Color::Ansi(0), Color::Ansi(3), false)
                             }
+                        } else if !is_str_or_comment {
+                            // Semantic tokens override TextMate for Zenith multi-language accuracy
+                            if let Some((sem_fg, sem_bold)) = highlight::lookup_semantic_span(
+                                semantic_spans,
+                                file_line as u32,
+                                char_col,
+                            ) {
+                                (sem_fg, Color::Default, sem_bold)
+                            } else {
+                                match &spans {
+                                    Some(s) => highlight::lookup_style(s, byte_offset_in_line),
+                                    None => (Color::Default, Color::Default, false),
+                                }
+                            }
+                        } else {
+                            match &spans {
+                                Some(s) => highlight::lookup_style(s, byte_offset_in_line),
+                                None => (Color::Default, Color::Default, false),
+                            }
+                        }
+                    } else if !is_str_or_comment {
+                        // Semantic tokens override TextMate for Zenith multi-language accuracy
+                        if let Some((sem_fg, sem_bold)) = highlight::lookup_semantic_span(
+                            semantic_spans,
+                            file_line as u32,
+                            char_col,
+                        ) {
+                            (sem_fg, Color::Default, sem_bold)
                         } else {
                             match &spans {
                                 Some(s) => highlight::lookup_style(s, byte_offset_in_line),
@@ -1213,6 +1316,7 @@ impl Editor {
                 }
 
                 byte_offset_in_line += char_len;
+                char_col += 1;
             }
 
             // Fill remaining with spaces
@@ -1683,6 +1787,7 @@ impl Editor {
             for local_col in 0..pane_w {
                 let screen_row = pane_y + local_row;
                 let screen_col = pane_x + local_col;
+                let selected = vt.is_cell_selected(local_row as u16, local_col as u16);
 
                 if local_row < scrollback_lines {
                     // Render from scrollback
@@ -1690,24 +1795,25 @@ impl Editor {
                     if sb_idx < scrollback.len() && local_col < scrollback[sb_idx].len() {
                         let cell = &scrollback[sb_idx][local_col];
                         let style = crate::render::CellStyle {
-                            fg: cell.fg,
-                            bg: cell.bg,
+                            fg: if selected { cell.bg } else { cell.fg },
+                            bg: if selected { cell.fg } else { cell.bg },
                             bold: cell.bold,
                             underline: cell.underline,
-                            inverse: cell.inverse,
+                            inverse: cell.inverse != selected,
                             italic: cell.italic,
                         };
                         self.screen
                             .put_cell_styled(screen_row, screen_col, cell.ch, style);
                     } else {
-                        self.screen.put_char(
-                            screen_row,
-                            screen_col,
-                            ' ',
-                            Color::Default,
-                            Color::Default,
-                            false,
-                        );
+                        let style = crate::render::CellStyle {
+                            fg: if selected { Color::Default } else { Color::Default },
+                            bg: if selected { Color::Ansi(7) } else { Color::Default },
+                            bold: false,
+                            underline: false,
+                            inverse: false,
+                            italic: false,
+                        };
+                        self.screen.put_cell_styled(screen_row, screen_col, ' ', style);
                     }
                 } else {
                     // Render from live screen buffer
@@ -1715,24 +1821,25 @@ impl Editor {
                     if vt_row < vt_rows && local_col < vt_cols {
                         let cell = &vt.cells()[vt_row * vt_cols + local_col];
                         let style = crate::render::CellStyle {
-                            fg: cell.fg,
-                            bg: cell.bg,
+                            fg: if selected { cell.bg } else { cell.fg },
+                            bg: if selected { cell.fg } else { cell.bg },
                             bold: cell.bold,
                             underline: cell.underline,
-                            inverse: cell.inverse,
+                            inverse: cell.inverse != selected,
                             italic: cell.italic,
                         };
                         self.screen
                             .put_cell_styled(screen_row, screen_col, cell.ch, style);
                     } else {
-                        self.screen.put_char(
-                            screen_row,
-                            screen_col,
-                            ' ',
-                            Color::Default,
-                            Color::Default,
-                            false,
-                        );
+                        let style = crate::render::CellStyle {
+                            fg: Color::Default,
+                            bg: if selected { Color::Ansi(7) } else { Color::Default },
+                            bold: false,
+                            underline: false,
+                            inverse: false,
+                            italic: false,
+                        };
+                        self.screen.put_cell_styled(screen_row, screen_col, ' ', style);
                     }
                 }
             }
@@ -2473,15 +2580,15 @@ impl Editor {
         let panel_h = (visible_items + 2).min(screen_h);
         let panel_y = screen_h.saturating_sub(panel_h + self.status_height);
 
-        let title_bg = Color::Color256(25);  // dark blue
-        let title_fg = Color::Ansi(15);      // white
-        let item_bg = Color::Color256(235);   // near-black
+        let title_bg = Color::Color256(25); // dark blue
+        let title_fg = Color::Ansi(15); // white
+        let item_bg = Color::Color256(235); // near-black
         let item_bg_sel = Color::Color256(24); // selected: blue
         let item_fg = Color::Ansi(15);
-        let err_fg = Color::Ansi(9);          // bright red
-        let warn_fg = Color::Ansi(11);        // yellow
-        let info_fg = Color::Ansi(12);        // blue
-        let note_fg = Color::Ansi(14);        // cyan
+        let err_fg = Color::Ansi(9); // bright red
+        let warn_fg = Color::Ansi(11); // yellow
+        let info_fg = Color::Ansi(12); // blue
+        let note_fg = Color::Ansi(14); // cyan
         let footer_bg = Color::Color256(238);
         let footer_fg = Color::Color256(250);
 
@@ -2500,10 +2607,7 @@ impl Editor {
         };
 
         // -- Title row --
-        let source = pp
-            .source_cmd
-            .as_deref()
-            .unwrap_or("Build Output");
+        let source = pp.source_cmd.as_deref().unwrap_or("Build Output");
         let errors = pp.error_count();
         let warnings = pp.warning_count();
         let focus_marker = if pp.focused { "●" } else { "○" };
@@ -2513,13 +2617,19 @@ impl Editor {
             source,
             errors,
             warnings,
-            if pp.focused { "↑↓ navigate  Enter jump  Esc close" } else { "F6 focus" }
+            if pp.focused {
+                "↑↓ navigate  Enter jump  Esc close"
+            } else {
+                "F6 focus"
+            }
         );
         for c in 0..screen_w {
-            self.screen.put_char(panel_y, c, ' ', title_fg, title_bg, false);
+            self.screen
+                .put_char(panel_y, c, ' ', title_fg, title_bg, false);
         }
         let title_trunc = truncate_str(&title, screen_w);
-        self.screen.put_str(panel_y, 0, title_trunc, title_fg, title_bg, false);
+        self.screen
+            .put_str(panel_y, 0, title_trunc, title_fg, title_bg, false);
 
         // -- Item rows --
         let list_rows = panel_h.saturating_sub(2);
@@ -2574,11 +2684,15 @@ impl Editor {
                 // but the severity letter gets fg_sev color
                 // Split: " [X]" = 4 bytes, rest is normal
                 if text_trunc.len() >= 4 {
-                    self.screen.put_str(item_row, 0, &text_trunc[..1], item_fg, bg, false);
-                    self.screen.put_str(item_row, 1, &text_trunc[1..4], fg_sev, bg, false);
-                    self.screen.put_str(item_row, 4, &text_trunc[4..], item_fg, bg, false);
+                    self.screen
+                        .put_str(item_row, 0, &text_trunc[..1], item_fg, bg, false);
+                    self.screen
+                        .put_str(item_row, 1, &text_trunc[1..4], fg_sev, bg, false);
+                    self.screen
+                        .put_str(item_row, 4, &text_trunc[4..], item_fg, bg, false);
                 } else {
-                    self.screen.put_str(item_row, 0, text_trunc, item_fg, bg, false);
+                    self.screen
+                        .put_str(item_row, 0, text_trunc, item_fg, bg, false);
                 }
             }
         }
@@ -2587,7 +2701,8 @@ impl Editor {
         let footer_row = panel_y + 1 + list_rows;
         if footer_row < screen_h {
             for c in 0..screen_w {
-                self.screen.put_char(footer_row, c, ' ', footer_fg, footer_bg, false);
+                self.screen
+                    .put_char(footer_row, c, ' ', footer_fg, footer_bg, false);
             }
             let footer = format!(
                 " {}/{} items",
@@ -2595,7 +2710,8 @@ impl Editor {
                 item_count
             );
             let footer_trunc = truncate_str(&footer, screen_w);
-            self.screen.put_str(footer_row, 0, footer_trunc, footer_fg, footer_bg, false);
+            self.screen
+                .put_str(footer_row, 0, footer_trunc, footer_fg, footer_bg, false);
         }
     }
 }

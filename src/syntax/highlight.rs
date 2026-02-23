@@ -16,6 +16,19 @@ pub struct StyledSpan {
     pub end: usize,
     pub fg: Color,
     pub bold: bool,
+    /// True when this span is inside a `string.*` or `comment.*` TextMate scope.
+    /// Used to prevent LSP semantic tokens from overriding the correct contextual color.
+    pub is_string_or_comment: bool,
+}
+
+/// A pre-resolved semantic token span for a single buffer line.
+/// Colors are resolved at store time; spans are sorted by (line, start_char).
+pub struct SemanticSpan {
+    pub line: u32,
+    pub start_char: u32, // inclusive (character index, 0-based)
+    pub end_char: u32,   // exclusive
+    pub fg: Color,
+    pub bold: bool,
 }
 
 pub struct Highlighter {
@@ -121,11 +134,16 @@ impl Highlighter {
             .iter()
             .map(|tok| {
                 let style = self.theme.resolve(&tok.scopes);
+                let is_string_or_comment = tok
+                    .scopes
+                    .iter()
+                    .any(|s| s.starts_with("string") || s.starts_with("comment"));
                 StyledSpan {
                     start: tok.start,
                     end: tok.end,
                     fg: style.fg,
                     bold: style.bold,
+                    is_string_or_comment,
                 }
             })
             .collect()
@@ -169,8 +187,7 @@ fn grammar_search_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
         // 1. Installed extension directories (highest priority).
-        let ext_base =
-            std::path::PathBuf::from(format!("{}/.config/zedit/extensions", home));
+        let ext_base = std::path::PathBuf::from(format!("{}/.config/zedit/extensions", home));
         if let Ok(entries) = std::fs::read_dir(&ext_base) {
             let mut ext_dirs: Vec<_> = entries
                 .flatten()
@@ -219,11 +236,14 @@ pub fn discover_user_grammars(home: &str) -> Vec<LanguageDef> {
             Err(_) => continue,
         };
 
-        // Extract name from grammar
-        let name = match val.get("name").and_then(|v| v.as_str()) {
-            Some(n) => n.to_lowercase(),
-            None => continue,
-        };
+        // Derive the language name from the filename stem (e.g. "zenith.tmLanguage.json"
+        // → "zenith"). This is correct because the TextMate "name" field is a human-readable
+        // display name (e.g. "Zenith-Lang"), not a stable language identifier. The filename
+        // always matches what languages.json and the task runner expect.
+        let name = file_name
+            .strip_suffix(".tmLanguage.json")
+            .unwrap_or(&file_name)
+            .to_lowercase();
 
         // Extract fileTypes for extensions
         let extensions: Vec<String> = val
@@ -300,6 +320,68 @@ pub fn lookup_style(spans: &[StyledSpan], byte_offset: usize) -> (Color, Color, 
         }
     }
     (Color::Default, Color::Default, false)
+}
+
+/// Returns true if the byte offset falls inside a string or comment span.
+/// Used to prevent LSP semantic tokens from overriding TextMate's context-aware coloring
+/// (e.g., identifiers inside a string literal must stay green, not turn keyword purple).
+pub fn is_in_string_or_comment(spans: &[StyledSpan], byte_offset: usize) -> bool {
+    for span in spans {
+        if byte_offset >= span.start && byte_offset < span.end {
+            return span.is_string_or_comment;
+        }
+    }
+    false
+}
+
+/// Find the color for (file_line, char_col) in pre-resolved semantic spans.
+/// Spans must be sorted by (line, start_char) — guaranteed by LSP delta order.
+pub fn lookup_semantic_span(
+    spans: &[SemanticSpan],
+    line: u32,
+    char_col: u32,
+) -> Option<(Color, bool)> {
+    let start = spans.partition_point(|s| s.line < line);
+    for s in &spans[start..] {
+        if s.line > line {
+            break;
+        }
+        if char_col >= s.start_char && char_col < s.end_char && s.fg != Color::Default {
+            return Some((s.fg, s.bold));
+        }
+    }
+    None
+}
+
+/// Map a semantic token type name (from LSP legend) to a TextMate scope prefix.
+/// Used to resolve colors via the active theme without hardcoding hex values.
+pub fn semantic_token_scope(token_type: &str) -> &'static str {
+    match token_type {
+        "keyword" => "keyword.control",
+        "type" => "entity.name.type",
+        "variable" => "variable.other",
+        "function" => "entity.name.function",
+        "struct" => "entity.name.type.struct",
+        "property" => "variable.other.property",
+        "number" => "constant.numeric",
+        "string" => "string.quoted",
+        "comment" => "comment",
+        "operator" => "keyword.operator",
+        "directive" => "entity.name.tag",   // .:ES:., .:EN:.
+        "constraint" => "storage.modifier", // PRIMARY-KEY, UNIQUE
+        "boolean" => "constant.language",
+        // standard VSCode extras (forward-compat)
+        "namespace" => "entity.name.namespace",
+        "class" => "entity.name.type",
+        "enum" => "entity.name.type",
+        "interface" => "entity.name.type",
+        "parameter" => "variable.parameter",
+        "enumMember" => "variable.other.enummember",
+        "method" => "entity.name.function",
+        "macro" => "entity.name.function.macro",
+        "decorator" => "entity.name.function",
+        _ => "",
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -415,12 +497,14 @@ mod tests {
                 end: 2,
                 fg: Color::Rgb(200, 100, 50),
                 bold: true,
+                is_string_or_comment: false,
             },
             StyledSpan {
                 start: 3,
                 end: 7,
                 fg: Color::Default,
                 bold: false,
+                is_string_or_comment: false,
             },
         ];
         let (fg, _, bold) = lookup_style(&spans, 0);
@@ -434,6 +518,263 @@ mod tests {
         // Out of range
         let (fg, _, _) = lookup_style(&spans, 10);
         assert_eq!(fg, Color::Default);
+    }
+
+    #[test]
+    fn test_is_in_string_or_comment() {
+        // Simulates: 'HELLO' where the whole span (including delimiters) has string scope.
+        // LSP sends a "variable" token for HELLO (chars 1-5 inside the string).
+        // The render loop should NOT apply the semantic token there.
+        let spans = vec![
+            StyledSpan {
+                start: 0,
+                end: 7, // 'HELLO'  (7 bytes)
+                fg: Color::Rgb(166, 227, 161), // green string color
+                bold: false,
+                is_string_or_comment: true, // ← the whole region is protected
+            },
+        ];
+        // All bytes in the string are protected
+        assert!(is_in_string_or_comment(&spans, 0)); // opening quote
+        assert!(is_in_string_or_comment(&spans, 1)); // H
+        assert!(is_in_string_or_comment(&spans, 5)); // O
+        assert!(is_in_string_or_comment(&spans, 6)); // closing quote
+
+        // Outside the string — not protected
+        assert!(!is_in_string_or_comment(&spans, 7));
+        assert!(!is_in_string_or_comment(&[], 0));
+
+        // Comment region is also protected
+        let comment_spans = vec![StyledSpan {
+            start: 0,
+            end: 20,
+            fg: Color::Color256(240),
+            bold: false,
+            is_string_or_comment: true,
+        }];
+        assert!(is_in_string_or_comment(&comment_spans, 10));
+
+        // Non-string span (keyword) is NOT protected
+        let keyword_spans = vec![StyledSpan {
+            start: 0,
+            end: 2,
+            fg: Color::Rgb(203, 166, 247), // purple keyword
+            bold: true,
+            is_string_or_comment: false,
+        }];
+        assert!(!is_in_string_or_comment(&keyword_spans, 1));
+    }
+
+    // ── lookup_semantic_span ─────────────────────────────────
+
+    fn make_semantic_spans() -> Vec<SemanticSpan> {
+        vec![
+            // Line 0: ".:ES:." directive (chars 0-5)
+            SemanticSpan {
+                line: 0,
+                start_char: 0,
+                end_char: 6,
+                fg: Color::Rgb(100, 200, 255),
+                bold: false,
+            },
+            // Line 0: "SI" keyword (chars 7-8)
+            SemanticSpan {
+                line: 0,
+                start_char: 7,
+                end_char: 9,
+                fg: Color::Rgb(255, 200, 0),
+                bold: true,
+            },
+            // Line 1: "miVar" variable (chars 0-4)
+            SemanticSpan {
+                line: 1,
+                start_char: 0,
+                end_char: 5,
+                fg: Color::Rgb(200, 200, 200),
+                bold: false,
+            },
+            // Line 3: "FIN-SI" keyword (chars 0-5)
+            SemanticSpan {
+                line: 3,
+                start_char: 0,
+                end_char: 6,
+                fg: Color::Rgb(255, 200, 0),
+                bold: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_hit_directive() {
+        let spans = make_semantic_spans();
+        // char 0 on line 0 → inside ".:ES:." directive (chars 0-5)
+        let result = lookup_semantic_span(&spans, 0, 0);
+        assert!(result.is_some());
+        let (fg, bold) = result.unwrap();
+        assert_eq!(fg, Color::Rgb(100, 200, 255));
+        assert!(!bold);
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_hit_keyword() {
+        let spans = make_semantic_spans();
+        // char 7 on line 0 → "SI" keyword
+        let result = lookup_semantic_span(&spans, 0, 7);
+        assert!(result.is_some());
+        let (fg, bold) = result.unwrap();
+        assert_eq!(fg, Color::Rgb(255, 200, 0));
+        assert!(bold);
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_gap_returns_none() {
+        let spans = make_semantic_spans();
+        // char 6 on line 0 → the space between ".:ES:." and "SI" — no span
+        let result = lookup_semantic_span(&spans, 0, 6);
+        assert!(result.is_none(), "gap between tokens should return None");
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_end_exclusive() {
+        let spans = make_semantic_spans();
+        // end_char=6, so char 6 is exclusive (not in the span)
+        let result = lookup_semantic_span(&spans, 0, 6);
+        assert!(result.is_none());
+        // char 5 is the last included char (0-5 inclusive, end=6 exclusive)
+        let result = lookup_semantic_span(&spans, 0, 5);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_different_line() {
+        let spans = make_semantic_spans();
+        // line 1, char 2 → inside "miVar" (chars 0-4)
+        let result = lookup_semantic_span(&spans, 1, 2);
+        assert!(result.is_some());
+        let (fg, _) = result.unwrap();
+        assert_eq!(fg, Color::Rgb(200, 200, 200));
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_skips_to_correct_line() {
+        let spans = make_semantic_spans();
+        // line 2 has no spans at all
+        let result = lookup_semantic_span(&spans, 2, 0);
+        assert!(result.is_none(), "line 2 has no semantic spans");
+
+        // line 3 has "FIN-SI"
+        let result = lookup_semantic_span(&spans, 3, 0);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_empty_list() {
+        let result = lookup_semantic_span(&[], 0, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_lookup_semantic_span_default_color_invisible() {
+        // Spans with Color::Default fg should NOT be returned (they are "no color")
+        let spans = vec![SemanticSpan {
+            line: 0,
+            start_char: 0,
+            end_char: 5,
+            fg: Color::Default,
+            bold: false,
+        }];
+        let result = lookup_semantic_span(&spans, 0, 2);
+        assert!(
+            result.is_none(),
+            "Default fg spans should be skipped like invisible tokens"
+        );
+    }
+
+    // ── semantic_token_scope ─────────────────────────────────
+
+    #[test]
+    fn test_semantic_token_scope_zenith_types() {
+        assert_eq!(semantic_token_scope("keyword"), "keyword.control");
+        assert_eq!(semantic_token_scope("type"), "entity.name.type");
+        assert_eq!(semantic_token_scope("variable"), "variable.other");
+        assert_eq!(semantic_token_scope("function"), "entity.name.function");
+        assert_eq!(semantic_token_scope("directive"), "entity.name.tag");
+        assert_eq!(semantic_token_scope("constraint"), "storage.modifier");
+        assert_eq!(semantic_token_scope("boolean"), "constant.language");
+        assert_eq!(semantic_token_scope("number"), "constant.numeric");
+        assert_eq!(semantic_token_scope("string"), "string.quoted");
+        assert_eq!(semantic_token_scope("comment"), "comment");
+        assert_eq!(semantic_token_scope("operator"), "keyword.operator");
+    }
+
+    #[test]
+    fn test_semantic_token_scope_standard_extras() {
+        assert_eq!(semantic_token_scope("namespace"), "entity.name.namespace");
+        assert_eq!(semantic_token_scope("parameter"), "variable.parameter");
+        assert_eq!(semantic_token_scope("method"), "entity.name.function");
+        assert_eq!(semantic_token_scope("macro"), "entity.name.function.macro");
+    }
+
+    #[test]
+    fn test_semantic_token_scope_unknown_returns_empty() {
+        assert_eq!(semantic_token_scope("nonexistent_type"), "");
+        assert_eq!(semantic_token_scope(""), "");
+    }
+
+    #[test]
+    fn test_semantic_token_scope_resolves_via_theme() {
+        // Verify that the scope strings actually produce colors in the built-in theme
+        let theme = load_theme("zedit-dark");
+        let keyword_scope = semantic_token_scope("keyword");
+        let style = theme.resolve(&[keyword_scope.to_string()]);
+        assert_ne!(
+            style.fg,
+            Color::Default,
+            "keyword scope should resolve to a color in zedit-dark"
+        );
+
+        // Directive scope (entity.name.tag) now has a teal color rule
+        let directive_scope = semantic_token_scope("directive");
+        let style = theme.resolve(&[directive_scope.to_string()]);
+        assert_ne!(
+            style.fg,
+            Color::Default,
+            "entity.name.tag (directive) should resolve to a color in zedit-dark"
+        );
+
+        // Operator scope now has a distinct color
+        let op_scope = semantic_token_scope("operator");
+        let style = theme.resolve(&[op_scope.to_string()]);
+        assert_ne!(
+            style.fg,
+            Color::Default,
+            "keyword.operator should resolve to a color in zedit-dark"
+        );
+    }
+
+    #[test]
+    fn test_zenith_string_is_protected() {
+        // Verifies that a Zenith single-quoted string produces spans with
+        // is_string_or_comment=true, which prevents LSP semantic tokens from
+        // overriding the green string color with keyword/variable colors.
+        let langs = builtin_languages();
+        let grammar = match load_grammar("zenith", &langs) {
+            Some(g) => g,
+            None => return, // grammar file not available in this test environment
+        };
+        let theme = load_theme("zedit-dark");
+        let mut hl = Highlighter::new(grammar, theme);
+
+        let line = "'HELLO MUNDO'";
+        let spans = hl.style_line(0, line, |_| None);
+
+        // Every byte inside the string literal (including delimiters) must be protected
+        for (i, _) in line.char_indices() {
+            assert!(
+                is_in_string_or_comment(&spans, i),
+                "byte {i} inside Zenith string literal should be protected from LSP override"
+            );
+        }
     }
 
     #[test]

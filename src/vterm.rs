@@ -90,6 +90,9 @@ pub struct VTerm {
     // UTF-8 multi-byte decode buffer
     utf8_buf: Vec<u8>,
     utf8_remaining: u8,
+    // Mouse text selection (pane-local display coordinates)
+    pub sel_anchor: Option<(u16, u16)>, // (local_row, local_col) where drag started
+    pub sel_active: Option<(u16, u16)>, // current drag endpoint
 }
 
 impl VTerm {
@@ -123,6 +126,8 @@ impl VTerm {
             responses: Vec::new(),
             utf8_buf: Vec::new(),
             utf8_remaining: 0,
+            sel_anchor: None,
+            sel_active: None,
         }
     }
 
@@ -139,13 +144,59 @@ impl VTerm {
         let old_rows = self.rows;
         let new_size = cols as usize * rows as usize;
         let mut new_cells = vec![VTermCell::default(); new_size];
-
-        // Copy existing content
-        let copy_rows = old_rows.min(rows) as usize;
         let copy_cols = old_cols.min(cols) as usize;
-        for r in 0..copy_rows {
-            for c in 0..copy_cols {
-                new_cells[r * cols as usize + c] = self.cells[r * old_cols as usize + c];
+
+        if rows < old_rows {
+            // Shrinking: preserve the BOTTOM `rows` rows.
+            // Push the top `delta` rows into scrollback so they are not lost.
+            let delta = (old_rows - rows) as usize;
+            for r in 0..delta {
+                let row_start = r * old_cols as usize;
+                let row: Vec<VTermCell> = self.cells[row_start..row_start + old_cols as usize].to_vec();
+                self.scrollback.push(row);
+                if self.scrollback.len() > self.scrollback_max {
+                    self.scrollback.remove(0);
+                }
+            }
+            // Copy rows delta..old_rows → 0..rows in the new buffer.
+            for r in 0..rows as usize {
+                for c in 0..copy_cols {
+                    new_cells[r * cols as usize + c] =
+                        self.cells[(r + delta) * old_cols as usize + c];
+                }
+            }
+            // Adjust cursor: same logical position, shifted up by delta.
+            self.cursor_row = self.cursor_row.saturating_sub(delta as u16);
+        } else if rows > old_rows {
+            // Growing: pull lines from scrollback into the top of the new buffer
+            // so existing content stays and scrollback history becomes visible.
+            let delta = (rows - old_rows) as usize;
+            let pull = delta.min(self.scrollback.len());
+            // Shift existing content down by `pull` rows.
+            for r in (0..old_rows as usize).rev() {
+                for c in 0..copy_cols {
+                    new_cells[(r + pull) * cols as usize + c] =
+                        self.cells[r * old_cols as usize + c];
+                }
+            }
+            // Fill the top `pull` rows from the end of scrollback.
+            let sb_base = self.scrollback.len() - pull;
+            for i in 0..pull {
+                let row = &self.scrollback[sb_base + i];
+                for c in 0..row.len().min(cols as usize) {
+                    new_cells[i * cols as usize + c] = row[c];
+                }
+            }
+            self.scrollback.truncate(sb_base);
+            // Adjust cursor: moves down by the number of pulled rows.
+            self.cursor_row = (self.cursor_row as usize + pull)
+                .min(rows as usize - 1) as u16;
+        } else {
+            // Same height: just reflow columns.
+            for r in 0..old_rows as usize {
+                for c in 0..copy_cols {
+                    new_cells[r * cols as usize + c] = self.cells[r * old_cols as usize + c];
+                }
             }
         }
 
@@ -159,8 +210,9 @@ impl VTerm {
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
         self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
 
-        // Resize alt buffer if active
+        // Resize alt buffer if active (simple copy from top, shell redraws anyway).
         if let Some(ref mut alt) = self.alt_cells {
+            let copy_rows = old_rows.min(rows) as usize;
             let mut new_alt = vec![VTermCell::default(); new_size];
             for r in 0..copy_rows {
                 for c in 0..copy_cols {
@@ -213,6 +265,98 @@ impl VTerm {
 
     pub fn take_responses(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.responses)
+    }
+
+    // -- Text selection --
+
+    pub fn set_sel_anchor(&mut self, row: u16, col: u16) {
+        self.sel_anchor = Some((row, col));
+        self.sel_active = None;
+    }
+
+    pub fn set_sel_active(&mut self, row: u16, col: u16) {
+        self.sel_active = Some((row, col));
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.sel_anchor = None;
+        self.sel_active = None;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.sel_anchor.is_some() && self.sel_active.is_some()
+    }
+
+    /// Return normalized selection range ((r1,c1),(r2,c2)) with r1<=r2.
+    pub fn sel_range(&self) -> Option<((u16, u16), (u16, u16))> {
+        let a = self.sel_anchor?;
+        let b = self.sel_active?;
+        if a.0 < b.0 || (a.0 == b.0 && a.1 <= b.1) {
+            Some((a, b))
+        } else {
+            Some((b, a))
+        }
+    }
+
+    /// True if the cell at (local_row, local_col) falls inside the selection.
+    pub fn is_cell_selected(&self, local_row: u16, local_col: u16) -> bool {
+        let ((r1, c1), (r2, c2)) = match self.sel_range() {
+            Some(r) => r,
+            None => return false,
+        };
+        if local_row < r1 || local_row > r2 {
+            return false;
+        }
+        if local_row == r1 && local_col < c1 {
+            return false;
+        }
+        if local_row == r2 && local_col > c2 {
+            return false;
+        }
+        true
+    }
+
+    /// Extract the selected text from the visible display (scrollback + live cells).
+    /// `pane_h` and `pane_w` describe the pane dimensions used during rendering.
+    pub fn selection_text(&self, pane_h: usize, pane_w: usize) -> Option<String> {
+        let ((r1, c1), (r2, c2)) = self.sel_range()?;
+        let scrollback_lines = self.scroll_offset.min(self.scrollback.len()).min(pane_h);
+        let mut text = String::new();
+        for row in r1..=r2 {
+            let col_start = if row == r1 { c1 } else { 0 };
+            let col_end = if row == r2 { c2 + 1 } else { pane_w as u16 };
+            let row_chars: String = if (row as usize) < scrollback_lines {
+                let sb_idx = self.scrollback.len().saturating_sub(self.scroll_offset) + row as usize;
+                (col_start..col_end)
+                    .map(|c| {
+                        if sb_idx < self.scrollback.len()
+                            && (c as usize) < self.scrollback[sb_idx].len()
+                        {
+                            self.scrollback[sb_idx][c as usize].ch
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect()
+            } else {
+                let vt_row = (row as usize).saturating_sub(scrollback_lines);
+                (col_start..col_end)
+                    .map(|c| {
+                        if vt_row < self.rows as usize && (c as usize) < self.cols as usize {
+                            self.cells[vt_row * self.cols as usize + c as usize].ch
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect()
+            };
+            let trimmed = row_chars.trim_end_matches(' ');
+            text.push_str(trimmed);
+            if row < r2 {
+                text.push('\n');
+            }
+        }
+        if text.trim().is_empty() { None } else { Some(text) }
     }
 
     // -- Internal byte processing --
@@ -740,6 +884,10 @@ impl VTerm {
         for c in 0..cols {
             self.cells[bot_start + c] = VTermCell::default();
         }
+
+        // New output arrived: snap scrollback view to bottom so the new
+        // content (prompt, command output) is immediately visible.
+        self.scroll_offset = 0;
     }
 
     fn scroll_down(&mut self) {
@@ -1109,8 +1257,10 @@ mod tests {
         vt.resize(40, 12);
         assert_eq!(vt.cols(), 40);
         assert_eq!(vt.rows(), 12);
-        // Content preserved
-        assert_eq!(vt.cells()[0].ch, 'H');
+        // Shrinking 24→12 pushes the top 12 rows to scrollback so the bottom
+        // (cursor) region is preserved.  "Hello" was on row 0, which is now
+        // the first row in the scrollback buffer.
+        assert_eq!(vt.scrollback()[0][0].ch, 'H');
     }
 
     #[test]

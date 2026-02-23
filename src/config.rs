@@ -96,10 +96,7 @@ fn which_binary(name: &str) -> Option<String> {
 /// Auto-detect Z ecosystem LSP servers (`zenith-lsp`, `zymbol-lsp`) when the
 /// binaries are on `$PATH` and no explicit config entry exists for the language.
 fn auto_detect_z_lsp(config: &mut Config) {
-    const Z_SERVERS: &[(&str, &str)] = &[
-        ("zenith", "zenith-lsp"),
-        ("zymbol", "zymbol-lsp"),
-    ];
+    const Z_SERVERS: &[(&str, &str)] = &[("zenith", "zenith-lsp"), ("zymbol", "zymbol-lsp")];
     for (lang, binary) in Z_SERVERS {
         if config.lsp_servers.iter().any(|(l, _)| l == lang) {
             continue; // already explicitly configured
@@ -459,7 +456,11 @@ mod tests {
         let before = config.lsp_servers.len();
         auto_detect_z_lsp(&mut config);
         // Should NOT add a second zenith entry
-        let zenith_count = config.lsp_servers.iter().filter(|(l, _)| l == "zenith").count();
+        let zenith_count = config
+            .lsp_servers
+            .iter()
+            .filter(|(l, _)| l == "zenith")
+            .count();
         assert_eq!(zenith_count, 1);
         // zymbol may or may not have been added (depends on whether binary exists)
         let _ = before; // suppress warning

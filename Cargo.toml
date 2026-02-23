@@ -6,3 +6,7 @@ license = "GPL-3.0-only"
 description = "Zedit - modern console text editor with zero dependencies"
 
 [dependencies]
+# EXCEPTION TO ZERO-DEPS RULE (approved by project owner):
+# arboard provides native X11 (pure-Rust x11rb) and Wayland (smithay-clipboard)
+# clipboard access without requiring external CLI tools (xclip/xsel/wl-clipboard).
+arboard = { version = "3", default-features = false }

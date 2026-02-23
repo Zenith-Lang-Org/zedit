@@ -72,6 +72,9 @@ pub enum EditorAction {
     // Scroll viewport by one line (cursor moves with it at the edge)
     ScrollLineUp,
     ScrollLineDown,
+    // Copy file path to clipboard
+    CopyFilePath,
+    CopyFilePathRelative,
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +393,8 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "send_to_repl" => Some(EditorAction::SendToRepl),
         "scroll_line_up" => Some(EditorAction::ScrollLineUp),
         "scroll_line_down" => Some(EditorAction::ScrollLineDown),
+        "copy_file_path" => Some(EditorAction::CopyFilePath),
+        "copy_file_path_relative" => Some(EditorAction::CopyFilePathRelative),
         _ => None,
     }
 }
@@ -480,6 +485,9 @@ impl KeyMap {
             // Scroll viewport one line (cursor moves with view at edge)
             ("Ctrl+Up", EditorAction::ScrollLineUp),
             ("Ctrl+Down", EditorAction::ScrollLineDown),
+            // Copy file path to clipboard
+            ("Ctrl+Alt+C", EditorAction::CopyFilePath),
+            ("Ctrl+Alt+R", EditorAction::CopyFilePathRelative),
         ];
 
         let mut bindings = HashMap::new();

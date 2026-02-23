@@ -65,6 +65,15 @@ pub struct Location {
     pub range: Range,
 }
 
+/// One decoded semantic token (absolute position, delta-decoded).
+#[derive(Clone, Debug)]
+pub struct SemanticTokenEntry {
+    pub line: u32,
+    pub start_char: u32,
+    pub length: u32, // byte length from server (= char count for ASCII)
+    pub token_type_idx: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Server capabilities (minimal subset)
 // ---------------------------------------------------------------------------
@@ -114,6 +123,66 @@ pub fn initialize_request(id: i64, root_uri: &str) -> JsonValue {
                                 "relatedInformation".into(),
                                 JsonValue::Bool(false),
                             )]),
+                        ),
+                        (
+                            "semanticTokens".into(),
+                            JsonValue::Object(vec![
+                                ("dynamicRegistration".into(), JsonValue::Bool(false)),
+                                (
+                                    "requests".into(),
+                                    JsonValue::Object(vec![("full".into(), JsonValue::Bool(true))]),
+                                ),
+                                (
+                                    "tokenTypes".into(),
+                                    JsonValue::Array(
+                                        [
+                                            "keyword",
+                                            "type",
+                                            "variable",
+                                            "function",
+                                            "struct",
+                                            "property",
+                                            "number",
+                                            "string",
+                                            "comment",
+                                            "operator",
+                                            "directive",
+                                            "constraint",
+                                            "boolean",
+                                            // standard VSCode extras for forward-compat:
+                                            "namespace",
+                                            "class",
+                                            "enum",
+                                            "interface",
+                                            "typeParameter",
+                                            "enumMember",
+                                            "event",
+                                            "method",
+                                            "macro",
+                                            "parameter",
+                                            "decorator",
+                                            "regexp",
+                                        ]
+                                        .iter()
+                                        .map(|s| JsonValue::String(s.to_string()))
+                                        .collect(),
+                                    ),
+                                ),
+                                (
+                                    "tokenModifiers".into(),
+                                    JsonValue::Array(vec![
+                                        JsonValue::String("declaration".into()),
+                                        JsonValue::String("definition".into()),
+                                        JsonValue::String("readonly".into()),
+                                    ]),
+                                ),
+                                (
+                                    "formats".into(),
+                                    JsonValue::Array(vec![JsonValue::String("relative".into())]),
+                                ),
+                                ("overlappingTokenSupport".into(), JsonValue::Bool(false)),
+                                ("multilineTokenSupport".into(), JsonValue::Bool(false)),
+                            ]),
                         ),
                     ]),
                 )]),
@@ -201,6 +270,18 @@ pub fn hover_request(id: i64, uri: &str, line: u32, character: u32) -> JsonValue
 /// Build a textDocument/definition request.
 pub fn definition_request(id: i64, uri: &str, line: u32, character: u32) -> JsonValue {
     text_document_position_request(id, "textDocument/definition", uri, line, character)
+}
+
+/// Build a textDocument/semanticTokens/full request.
+pub fn semantic_tokens_request(id: i64, uri: &str) -> JsonValue {
+    json_rpc_request(
+        id,
+        "textDocument/semanticTokens/full",
+        JsonValue::Object(vec![(
+            "textDocument".into(),
+            JsonValue::Object(vec![("uri".into(), JsonValue::String(uri.into()))]),
+        )]),
+    )
 }
 
 fn text_document_position_request(
@@ -292,9 +373,10 @@ fn parse_position(val: &JsonValue) -> Option<Position> {
     Some(Position { line, character })
 }
 
-/// Parse initialize result to extract server capabilities.
-pub fn parse_initialize_result(result: &JsonValue) -> ServerCapabilities {
+/// Parse initialize result; second return value is the semantic token legend.
+pub fn parse_initialize_result(result: &JsonValue) -> (ServerCapabilities, Vec<String>) {
     let mut caps = ServerCapabilities::default();
+    let mut legend: Vec<String> = Vec::new();
     if let Some(cap) = result.get("capabilities") {
         if let Some(sync) = cap.get("textDocumentSync") {
             // Can be a number or an object with { openClose, change, save }
@@ -304,8 +386,19 @@ pub fn parse_initialize_result(result: &JsonValue) -> ServerCapabilities {
                 caps.text_document_sync = change as i32;
             }
         }
+        // Extract semantic tokens legend
+        if let Some(provider) = cap.get("semanticTokensProvider") {
+            if let Some(leg) = provider.get("legend") {
+                if let Some(types) = leg.get("tokenTypes").and_then(|v| v.as_array()) {
+                    legend = types
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+            }
+        }
     }
-    caps
+    (caps, legend)
 }
 
 /// Parse a textDocument/completion result.
@@ -389,6 +482,42 @@ pub fn parse_definition_result(result: &JsonValue) -> Vec<Location> {
         JsonValue::Null => Vec::new(),
         _ => parse_one_location_or_link(result).into_iter().collect(),
     }
+}
+
+/// Decode the flat delta-encoded `data` array of a semanticTokens/full response.
+/// Each group of 5 integers: (deltaLine, deltaChar, length, tokenTypeIdx, modifiersBitmask).
+pub fn parse_semantic_tokens(data: &JsonValue) -> Vec<SemanticTokenEntry> {
+    let arr = match data.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let mut tokens = Vec::new();
+    let mut cur_line: u32 = 0;
+    let mut cur_char: u32 = 0;
+    let mut i = 0;
+    while i + 4 < arr.len() {
+        let delta_line = arr[i].as_f64().unwrap_or(0.0) as u32;
+        let delta_char = arr[i + 1].as_f64().unwrap_or(0.0) as u32;
+        let length = arr[i + 2].as_f64().unwrap_or(0.0) as u32;
+        let token_type_idx = arr[i + 3].as_f64().unwrap_or(0.0) as u32;
+        // arr[i+4] = modifier bitmask (ignored for now)
+        if delta_line > 0 {
+            cur_line += delta_line;
+            cur_char = delta_char; // resets to absolute on new line
+        } else {
+            cur_char += delta_char;
+        }
+        if length > 0 {
+            tokens.push(SemanticTokenEntry {
+                line: cur_line,
+                start_char: cur_char,
+                length,
+                token_type_idx,
+            });
+        }
+        i += 5;
+    }
+    tokens
 }
 
 fn parse_one_location_or_link(val: &JsonValue) -> Option<Location> {
@@ -545,16 +674,50 @@ mod tests {
     fn test_parse_initialize_result() {
         let json = r#"{"capabilities": {"textDocumentSync": 1}}"#;
         let val = JsonValue::parse(json).unwrap();
-        let caps = parse_initialize_result(&val);
+        let (caps, legend) = parse_initialize_result(&val);
         assert_eq!(caps.text_document_sync, 1);
+        assert!(legend.is_empty());
     }
 
     #[test]
     fn test_parse_initialize_result_object_sync() {
         let json = r#"{"capabilities": {"textDocumentSync": {"openClose": true, "change": 2}}}"#;
         let val = JsonValue::parse(json).unwrap();
-        let caps = parse_initialize_result(&val);
+        let (caps, _legend) = parse_initialize_result(&val);
         assert_eq!(caps.text_document_sync, 2);
+    }
+
+    #[test]
+    fn test_parse_initialize_result_with_legend() {
+        let json = r#"{"capabilities": {"textDocumentSync": 1, "semanticTokensProvider": {"legend": {"tokenTypes": ["keyword", "type", "variable"], "tokenModifiers": []}, "full": true}}}"#;
+        let val = JsonValue::parse(json).unwrap();
+        let (caps, legend) = parse_initialize_result(&val);
+        assert_eq!(caps.text_document_sync, 1);
+        assert_eq!(legend, vec!["keyword", "type", "variable"]);
+    }
+
+    #[test]
+    fn test_parse_semantic_tokens() {
+        // 3 tokens: (0,0,3,0,0), (0,5,2,1,0), (1,0,4,2,0)
+        // Line 0 char 0 len 3 type 0 (keyword)
+        // Line 0 char 5 len 2 type 1 (type)
+        // Line 1 char 0 len 4 type 2 (variable)
+        let json = r#"[0,0,3,0,0, 0,5,2,1,0, 1,0,4,2,0]"#;
+        let val = JsonValue::parse(json).unwrap();
+        let tokens = parse_semantic_tokens(&val);
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].line, 0);
+        assert_eq!(tokens[0].start_char, 0);
+        assert_eq!(tokens[0].length, 3);
+        assert_eq!(tokens[0].token_type_idx, 0);
+        assert_eq!(tokens[1].line, 0);
+        assert_eq!(tokens[1].start_char, 5);
+        assert_eq!(tokens[1].length, 2);
+        assert_eq!(tokens[1].token_type_idx, 1);
+        assert_eq!(tokens[2].line, 1);
+        assert_eq!(tokens[2].start_char, 0);
+        assert_eq!(tokens[2].length, 4);
+        assert_eq!(tokens[2].token_type_idx, 2);
     }
 
     #[test]

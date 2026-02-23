@@ -1,12 +1,12 @@
 mod buffer;
+mod clipboard;
 mod config;
-pub mod debug_log;
 mod cursor;
+pub mod debug_log;
 mod diff_view;
 mod editor;
 mod extension;
 mod filetree;
-mod vsix_import;
 mod git;
 mod input;
 mod keybindings;
@@ -22,6 +22,7 @@ mod syntax;
 mod terminal;
 mod undo;
 pub mod unicode;
+mod vsix_import;
 mod vterm;
 
 use std::env;
@@ -70,14 +71,9 @@ fn handle_ext_command(args: &[String]) {
             if exts.is_empty() {
                 println!("(no extensions installed)");
                 println!();
-                println!(
-                    "Install with: zedit --ext install <path-to-extension-directory>"
-                );
+                println!("Install with: zedit --ext install <path-to-extension-directory>");
             } else {
-                println!(
-                    "{:<20} {:<30} {}",
-                    "ID", "NAME", "VERSION"
-                );
+                println!("{:<20} {:<30} {}", "ID", "NAME", "VERSION");
                 println!("{}", "-".repeat(55));
                 for (id, name, version) in exts {
                     println!("{:<20} {:<30} {}", id, name, version);

@@ -32,7 +32,11 @@ pub struct Extension {
 // Manual Debug impl because LanguageDef doesn't derive Debug.
 impl std::fmt::Debug for Extension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Extension {{ id: {:?}, version: {:?} }}", self.id, self.version)
+        write!(
+            f,
+            "Extension {{ id: {:?}, version: {:?} }}",
+            self.id, self.version
+        )
     }
 }
 
@@ -79,8 +83,7 @@ pub fn load_extension_dir(path: &Path) -> Result<Extension, String> {
 }
 
 fn parse_manifest(json: &str, dir: &Path) -> Result<Extension, String> {
-    let val =
-        JsonValue::parse(json).map_err(|e| format!("JSON parse error: {:?}", e))?;
+    let val = JsonValue::parse(json).map_err(|e| format!("JSON parse error: {:?}", e))?;
 
     let id = val
         .get("id")
@@ -239,8 +242,7 @@ pub fn uninstall_extension(id: &str) -> Result<(), String> {
     if !ext_dir.exists() {
         return Err(format!("extension '{}' is not installed", id));
     }
-    std::fs::remove_dir_all(&ext_dir)
-        .map_err(|e| format!("cannot remove extension: {}", e))
+    std::fs::remove_dir_all(&ext_dir).map_err(|e| format!("cannot remove extension: {}", e))
 }
 
 /// List installed extensions: (id, name, version).
@@ -254,8 +256,7 @@ pub fn list_extensions() -> Vec<(String, String, String)> {
 // ── Directory copy helper ────────────────────────────────────
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
-    let entries =
-        std::fs::read_dir(src).map_err(|e| format!("cannot read directory: {}", e))?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("cannot read directory: {}", e))?;
     for entry in entries.flatten() {
         let ty = entry.file_type().map_err(|e| e.to_string())?;
         let dst_path = dst.join(entry.file_name());
@@ -263,8 +264,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
             std::fs::create_dir_all(&dst_path).map_err(|e| e.to_string())?;
             copy_dir_all(&entry.path(), &dst_path)?;
         } else {
-            std::fs::copy(entry.path(), &dst_path)
-                .map_err(|e| format!("copy failed: {}", e))?;
+            std::fs::copy(entry.path(), &dst_path).map_err(|e| format!("copy failed: {}", e))?;
         }
     }
     Ok(())
@@ -362,11 +362,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("zedit_ext_test_roundtrip");
         let src = tmp.join("mysrc");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(
-            src.join("manifest.json"),
-            minimal_manifest("roundtrip-ext"),
-        )
-        .unwrap();
+        std::fs::write(src.join("manifest.json"), minimal_manifest("roundtrip-ext")).unwrap();
 
         // Install into a temp extensions dir by temporarily pointing HOME
         let fake_home = tmp.join("home");

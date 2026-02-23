@@ -204,7 +204,8 @@ impl LspTransport {
             crate::dlog!(
                 "[lsp_transport] child pid={} exited with status={} — \
                  check if the LSP server binary is installed correctly",
-                self.child_pid, status
+                self.child_pid,
+                status
             );
             true
         } else {
@@ -231,6 +232,34 @@ impl LspTransport {
 
     pub fn is_dead(&self) -> bool {
         self.dead
+    }
+
+    /// Create a permanently-dead transport with empty buffers, for unit tests
+    /// that drive the client state machine via handle_message rather than real I/O.
+    #[cfg(test)]
+    pub(crate) fn new_dead() -> Self {
+        LspTransport {
+            child_pid: -1,
+            stdin_fd: -1,
+            stdout_fd: -1,
+            read_buf: Vec::new(),
+            dead: true,
+        }
+    }
+
+    /// Create a transport that is logically "alive" but backed by pre-populated
+    /// incoming data (simulates server bytes already in the OS pipe buffer).
+    /// read(-1) fails immediately so try_recv falls through to try_parse_message,
+    /// which consumes the pre-loaded `incoming` bytes.
+    #[cfg(test)]
+    pub(crate) fn new_with_incoming(incoming: Vec<u8>) -> Self {
+        LspTransport {
+            child_pid: -1,
+            stdin_fd: -1,
+            stdout_fd: -1,
+            read_buf: incoming,
+            dead: false,
+        }
     }
 
     // -- Internal helpers --
