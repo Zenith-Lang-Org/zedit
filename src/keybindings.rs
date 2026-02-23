@@ -69,6 +69,9 @@ pub enum EditorAction {
     ToggleProblemPanel,
     // REPL integration (Z ecosystem)
     SendToRepl,
+    // Scroll viewport by one line (cursor moves with it at the edge)
+    ScrollLineUp,
+    ScrollLineDown,
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +388,8 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "task_stop" => Some(EditorAction::TaskStop),
         "toggle_problem_panel" => Some(EditorAction::ToggleProblemPanel),
         "send_to_repl" => Some(EditorAction::SendToRepl),
+        "scroll_line_up" => Some(EditorAction::ScrollLineUp),
+        "scroll_line_down" => Some(EditorAction::ScrollLineDown),
         _ => None,
     }
 }
@@ -472,6 +477,9 @@ impl KeyMap {
             ("F6", EditorAction::ToggleProblemPanel),
             // REPL integration (Z ecosystem)
             ("Alt+Enter", EditorAction::SendToRepl),
+            // Scroll viewport one line (cursor moves with view at edge)
+            ("Ctrl+Up", EditorAction::ScrollLineUp),
+            ("Ctrl+Down", EditorAction::ScrollLineDown),
         ];
 
         let mut bindings = HashMap::new();

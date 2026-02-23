@@ -176,8 +176,8 @@ pub struct Editor {
     running: bool,
 
     // Task runner state
-    last_task: Option<String>,      // last command sent (for re-run)
-    task_language: Option<String>,  // language of last task
+    last_task: Option<String>,     // last command sent (for re-run)
+    task_language: Option<String>, // language of last task
 
     // Problem panel
     problem_panel: crate::problem_panel::ProblemPanel,
@@ -831,6 +831,13 @@ impl Editor {
         mgr.reap_dead_clients();
         mgr.drain_all();
 
+        // Detect clients that just completed initialization (race-condition fix).
+        // lsp_notify_open calls did_open + request_semantic_tokens immediately when a
+        // file is opened, but the server may not be initialized yet at that point, so
+        // both calls silently no-op. Now that drain_all() has processed the initialize
+        // response, we re-send for every open buffer whose language just became ready.
+        let newly_init_langs = mgr.take_newly_initialized_langs();
+
         // Sync diagnostics from LSP clients to matching buffer states
         for bs in &mut self.buffers {
             if let Some(ref lang) = bs.lsp_language {
@@ -852,6 +859,11 @@ impl Editor {
         let new_completion = mgr.take_completion_result();
         let new_hover = mgr.take_hover_result();
         let new_definition = mgr.take_definition_result();
+        // Drain all pending semantic token results — multiple buffers may have responses ready.
+        let mut sem_token_results = Vec::new();
+        while let Some(r) = mgr.take_semantic_tokens_result() {
+            sem_token_results.push(r);
+        }
 
         // Apply results — mgr borrow is fully released at this point
         if let Some(items) = new_completion {
@@ -867,6 +879,75 @@ impl Editor {
             && let Some(loc) = locs.into_iter().next()
         {
             self.lsp_navigate_to(loc);
+        }
+        // Apply all accumulated semantic token results — one per buffer URI.
+        use crate::syntax::highlight;
+        for (uri, tokens, legend) in sem_token_results {
+            for bs in &mut self.buffers {
+                if let Some(path) = bs.buffer.file_path() {
+                    if lsp::protocol::path_to_uri(&path.to_string_lossy()) == uri {
+                        let theme_opt = bs.highlighter.as_ref().map(|hl| &hl.theme);
+                        bs.semantic_spans = tokens
+                            .iter()
+                            .map(|t| {
+                                let type_name = legend
+                                    .get(t.token_type_idx as usize)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("");
+                                let scope = highlight::semantic_token_scope(type_name);
+                                let (fg, bold) = if let Some(th) = theme_opt {
+                                    let style = th.resolve(&[scope.to_string()]);
+                                    (style.fg, style.bold)
+                                } else {
+                                    (crate::render::Color::Default, false)
+                                };
+                                highlight::SemanticSpan {
+                                    line: t.line,
+                                    start_char: t.start_char,
+                                    end_char: t.start_char + t.length,
+                                    fg,
+                                    bold,
+                                }
+                            })
+                            .collect();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Re-notify all open buffers for languages that just became initialized.
+        // This fixes the startup race condition where did_open + request_semantic_tokens
+        // were silently dropped because the server hadn't responded to initialize yet.
+        for lang in newly_init_langs {
+            self.lsp_renotify_after_init(&lang);
+        }
+    }
+
+    /// Re-send did_open + request_semantic_tokens for every open buffer whose
+    /// LSP language matches `lang`. Called once per language, right after the
+    /// initialize handshake completes.
+    fn lsp_renotify_after_init(&mut self, lang: &str) {
+        // Collect buffer info without borrowing self.lsp_manager yet
+        let buf_infos: Vec<(String, String)> = self
+            .buffers
+            .iter()
+            .filter(|bs| bs.lsp_language.as_deref() == Some(lang))
+            .filter_map(|bs| {
+                let path = bs.buffer.file_path()?.to_string_lossy().to_string();
+                let uri = lsp::protocol::path_to_uri(&path);
+                let text = bs.buffer.text();
+                Some((uri, text))
+            })
+            .collect();
+
+        for (uri, text) in buf_infos {
+            if let Some(ref mut mgr) = self.lsp_manager {
+                if let Some(client) = mgr.client_mut(lang) {
+                    client.did_open(&uri, &text);
+                    client.request_semantic_tokens(&uri);
+                }
+            }
         }
     }
 
@@ -1005,6 +1086,7 @@ impl Editor {
         if let Some(ref mut mgr) = self.lsp_manager {
             if let Some(client) = mgr.ensure_client(&lang) {
                 client.did_open(&uri, &text);
+                client.request_semantic_tokens(&uri);
             }
         }
     }
@@ -1060,6 +1142,7 @@ impl Editor {
         if let Some(ref mut mgr) = self.lsp_manager {
             if let Some(client) = mgr.client_mut(&lang) {
                 client.did_save(&uri);
+                client.request_semantic_tokens(&uri);
             }
         }
     }
@@ -1117,7 +1200,11 @@ impl Editor {
                 crate::dlog!("[lsp] detected language: {}", lang_def.name);
                 // Only return a language if we have a server configured for it
                 let has_server = self.lsp_manager.is_some()
-                    && self.config.lsp_servers.iter().any(|(l, _)| l == &lang_def.name);
+                    && self
+                        .config
+                        .lsp_servers
+                        .iter()
+                        .any(|(l, _)| l == &lang_def.name);
                 crate::dlog!("[lsp] has_server={}", has_server);
                 return Some(lang_def.name.clone());
             }
@@ -1165,7 +1252,10 @@ impl Editor {
         let character = self.buffers[buf_idx].cursor().col as u32;
         crate::dlog!(
             "[lsp] requesting completion: lang={} uri={} line={} char={}",
-            lang, uri, line, character
+            lang,
+            uri,
+            line,
+            character
         );
         if let Some(ref mut mgr) = self.lsp_manager {
             mgr.request_completion(&lang, &uri, line, character);
@@ -1380,10 +1470,7 @@ impl Editor {
         let file_path = match self.buffers[buf_idx].buffer.file_path() {
             Some(p) => p.to_string_lossy().into_owned(),
             None => {
-                self.set_message(
-                    "Save the file first before running",
-                    MessageType::Warning,
-                );
+                self.set_message("Save the file first before running", MessageType::Warning);
                 return;
             }
         };
@@ -1391,7 +1478,10 @@ impl Editor {
         let lang = match self.detect_language_by_ext(&file_path) {
             Some(l) => l,
             None => {
-                self.set_message("Unknown file type — no task available", MessageType::Warning);
+                self.set_message(
+                    "Unknown file type — no task available",
+                    MessageType::Warning,
+                );
                 return;
             }
         };
@@ -1401,25 +1491,17 @@ impl Editor {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let cmd_template = match tasks::TaskRunner::resolve(
-            &lang,
-            kind,
-            &self.config.extensions,
-            &self.config,
-        ) {
-            Some(c) => c,
-            None => {
-                self.set_message(
-                    &format!(
-                        "No {} task configured for '{}'",
-                        kind.as_str(),
-                        lang
-                    ),
-                    MessageType::Warning,
-                );
-                return;
-            }
-        };
+        let cmd_template =
+            match tasks::TaskRunner::resolve(&lang, kind, &self.config.extensions, &self.config) {
+                Some(c) => c,
+                None => {
+                    self.set_message(
+                        &format!("No {} task configured for '{}'", kind.as_str(), lang),
+                        MessageType::Warning,
+                    );
+                    return;
+                }
+            };
 
         let cmd = tasks::TaskRunner::expand(&cmd_template, &file_path, &workspace);
         self.last_task = Some(cmd.clone());
@@ -1555,7 +1637,9 @@ impl Editor {
             self.layout.set_pane_buffer(self.active_pane, buf_idx);
             self.active_buffer = buf_idx;
             let b = &mut self.buffers[buf_idx];
-            b.cursors[b.primary].cursor.set_position(line, col, &b.buffer);
+            b.cursors[b.primary]
+                .cursor
+                .set_position(line, col, &b.buffer);
             b.scroll_row = line.saturating_sub(5);
         } else {
             let path = std::path::Path::new(&file);
@@ -1569,7 +1653,9 @@ impl Editor {
                 &self.config.theme,
                 &self.config.languages,
             ) {
-                new_buf.cursors[new_buf.primary].cursor.set_position(line, col, &new_buf.buffer);
+                new_buf.cursors[new_buf.primary]
+                    .cursor
+                    .set_position(line, col, &new_buf.buffer);
                 new_buf.scroll_row = line.saturating_sub(5);
                 self.buffers.push(new_buf);
                 let new_idx = self.buffers.len() - 1;
@@ -1800,7 +1886,9 @@ impl Editor {
                     }
                     _ => {
                         // Allow F6 (toggle) to fall through to execute_action
-                        if self.config.keybindings.lookup(ke) != Some(EditorAction::ToggleProblemPanel) {
+                        if self.config.keybindings.lookup(ke)
+                            != Some(EditorAction::ToggleProblemPanel)
+                        {
                             return; // Consume other keys silently
                         }
                     }
@@ -2075,6 +2163,34 @@ impl Editor {
             EditorAction::TaskStop => self.stop_task(),
             EditorAction::ToggleProblemPanel => self.toggle_problem_panel(),
             EditorAction::SendToRepl => self.send_to_repl(),
+            EditorAction::ScrollLineUp => {
+                let h = self.text_area_height();
+                let buf_idx = self.active_buffer_index();
+                self.buffers[buf_idx].scroll_row =
+                    self.buffers[buf_idx].scroll_row.saturating_sub(1);
+                // Clamp cursor to remain within the new visible area
+                if h > 0 {
+                    let b = self.buf_mut();
+                    if b.cursor().line >= b.scroll_row + h {
+                        let target = b.scroll_row + h - 1;
+                        let col = b.cursor().col;
+                        b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
+                    }
+                }
+            }
+            EditorAction::ScrollLineDown => {
+                let buf_idx = self.active_buffer_index();
+                let max_scroll = self.buffers[buf_idx].buffer.line_count().saturating_sub(1);
+                self.buffers[buf_idx].scroll_row =
+                    (self.buffers[buf_idx].scroll_row + 1).min(max_scroll);
+                // Clamp cursor to remain within the new visible area
+                let b = self.buf_mut();
+                if b.cursor().line < b.scroll_row {
+                    let target = b.scroll_row;
+                    let col = b.cursor().col;
+                    b.cursors[b.primary].cursor.set_position(target, col, &b.buffer);
+                }
+            }
         }
     }
 

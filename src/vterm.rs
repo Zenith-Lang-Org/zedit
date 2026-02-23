@@ -87,6 +87,9 @@ pub struct VTerm {
     pub cursor_visible: bool,
     // Response queue (for DSR 6n)
     responses: Vec<Vec<u8>>,
+    // UTF-8 multi-byte decode buffer
+    utf8_buf: Vec<u8>,
+    utf8_remaining: u8,
 }
 
 impl VTerm {
@@ -118,6 +121,8 @@ impl VTerm {
             title: String::new(),
             cursor_visible: true,
             responses: Vec::new(),
+            utf8_buf: Vec::new(),
+            utf8_remaining: 0,
         }
     }
 
@@ -255,24 +260,37 @@ impl VTerm {
                 self.cursor_col = 0;
             }
             0x00..=0x1f => {} // Other control chars — ignore
+            0x20..=0x7e => {
+                // ASCII printable
+                self.put_char(byte as char);
+            }
+            0x7f => {} // DEL — ignore
+            0xc0..=0xff => {
+                // UTF-8 lead byte: start new sequence
+                self.utf8_buf.clear();
+                self.utf8_buf.push(byte);
+                self.utf8_remaining = if byte >= 0xf0 { 3 } else if byte >= 0xe0 { 2 } else { 1 };
+            }
             _ => {
-                // Printable or UTF-8 lead
-                self.put_printable(byte);
+                // UTF-8 continuation byte (0x80-0xBF)
+                if !self.utf8_buf.is_empty() && self.utf8_remaining > 0 {
+                    self.utf8_buf.push(byte);
+                    self.utf8_remaining -= 1;
+                    if self.utf8_remaining == 0 {
+                        let ch = std::str::from_utf8(&self.utf8_buf)
+                            .ok()
+                            .and_then(|s| s.chars().next())
+                            .unwrap_or('\u{FFFD}');
+                        self.utf8_buf.clear();
+                        self.put_char(ch);
+                    }
+                }
+                // Stray continuation with no lead: ignore
             }
         }
     }
 
-    fn put_printable(&mut self, byte: u8) {
-        // Decode UTF-8 character
-        let ch = if byte < 0x80 {
-            byte as char
-        } else {
-            // For multi-byte UTF-8, store as replacement char
-            // (A proper implementation would buffer and decode,
-            //  but for most terminal output this is sufficient)
-            '\u{FFFD}'
-        };
-
+    fn put_char(&mut self, ch: char) {
         if self.pending_wrap && self.autowrap {
             self.pending_wrap = false;
             self.cursor_col = 0;

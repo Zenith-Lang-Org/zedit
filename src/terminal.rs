@@ -271,11 +271,12 @@ pub fn disable_keyboard_enhancements() {
 }
 
 pub fn enable_mouse() {
-    write_all(b"\x1b[?1000h\x1b[?1006h");
+    // ?1000h = X10 mouse (click), ?1002h = button-event tracking (drag), ?1006h = SGR format
+    write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
 }
 
 pub fn disable_mouse() {
-    write_all(b"\x1b[?1006l\x1b[?1000l");
+    write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l");
 }
 
 pub fn enable_bracketed_paste() {
