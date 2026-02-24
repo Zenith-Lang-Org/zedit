@@ -1,5 +1,6 @@
 mod buffer;
 mod clipboard;
+mod mmap;
 mod config;
 mod cursor;
 pub mod debug_log;

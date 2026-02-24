@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 
 const INITIAL_GAP: usize = 1024;
 
+/// Files larger than this threshold are opened via `mmap(2)` instead of being
+/// read fully into the gap buffer. The OS handles paging so only accessed pages
+/// consume RAM. On first edit the entire content is materialized to the gap buffer.
+pub const MMAP_THRESHOLD: usize = 1024 * 1024; // 1 MB
+
 /// Normalize `path` for storage: if the path is absolute and is located under
 /// the current working directory, strip the CWD prefix so it is stored as a
 /// relative path (e.g. `src/main.rs` instead of `/home/user/project/src/main.rs`).
@@ -32,6 +37,9 @@ pub struct Buffer {
     lines: Vec<usize>,
     modified: bool,
     file_path: Option<PathBuf>,
+    /// Non-None while the buffer is backed by a memory-mapped file.
+    /// Cleared (and content materialized into `data`) on first edit.
+    mmap: Option<crate::mmap::Mmap>,
 }
 
 impl Buffer {
@@ -44,10 +52,40 @@ impl Buffer {
             lines: vec![0],
             modified: false,
             file_path: None,
+            mmap: None,
         }
     }
 
     pub fn from_file(path: &Path) -> Result<Buffer, String> {
+        // Large file: attempt mmap to avoid loading everything into RAM.
+        let file_size = fs::metadata(path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+
+        if file_size > MMAP_THRESHOLD {
+            if let Ok(map) = crate::mmap::Mmap::open(path) {
+                let bytes = map.as_bytes();
+                // Validate UTF-8 without copying (single scan).
+                if std::str::from_utf8(bytes).is_err() {
+                    return Err("File is not valid UTF-8".to_string());
+                }
+                // Build the line cache directly from the mapped bytes.
+                let mut lines = vec![0usize];
+                scan_newlines(bytes, 0, &mut lines);
+                return Ok(Buffer {
+                    data: vec![0u8; INITIAL_GAP],
+                    gap_start: 0,
+                    gap_end: INITIAL_GAP,
+                    lines,
+                    modified: false,
+                    file_path: Some(normalize_to_relative(path)),
+                    mmap: Some(map),
+                });
+                // If mmap fails, fall through to regular read below.
+            }
+        }
+
+        // Small file (or mmap unavailable): read fully into gap buffer.
         let content = fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
         let content_len = content.len();
         let gap_size = INITIAL_GAP.max(content_len / 4);
@@ -62,6 +100,7 @@ impl Buffer {
             lines: Vec::new(),
             modified: false,
             file_path: Some(normalize_to_relative(path)),
+            mmap: None,
         };
         buf.rebuild_lines();
         Ok(buf)
@@ -94,10 +133,20 @@ impl Buffer {
         self.modified = false;
     }
 
+    /// Returns `true` while the buffer content is backed by a memory-mapped
+    /// file rather than the gap buffer.  Becomes `false` after the first edit.
+    pub fn is_mmap_backed(&self) -> bool {
+        self.mmap.is_some()
+    }
+
     // --- Text access ---
 
     pub fn len(&self) -> usize {
-        self.data.len() - self.gap_len()
+        if let Some(ref map) = self.mmap {
+            map.len()
+        } else {
+            self.data.len() - self.gap_len()
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -165,6 +214,9 @@ impl Buffer {
     // --- Editing ---
 
     pub fn insert(&mut self, pos: usize, text: &str) {
+        if self.mmap.is_some() {
+            self.materialize_mmap();
+        }
         let pos = pos.min(self.len());
         let bytes = text.as_bytes();
         self.ensure_gap(bytes.len());
@@ -176,6 +228,9 @@ impl Buffer {
     }
 
     pub fn delete(&mut self, pos: usize, len: usize) -> String {
+        if self.mmap.is_some() {
+            self.materialize_mmap();
+        }
         if len == 0 || pos >= self.len() {
             return String::new();
         }
@@ -231,6 +286,33 @@ impl Buffer {
 
     // --- Internal ---
 
+    /// Materialize a mmap-backed buffer into the gap buffer.
+    ///
+    /// Copies the entire mmap content into `self.data`, releases the mmap,
+    /// and positions the gap at the end of the content.  The line cache
+    /// remains valid because logical byte offsets are unchanged.
+    ///
+    /// Must be called before any `insert`/`delete` on a mmap-backed buffer.
+    fn materialize_mmap(&mut self) {
+        let map = match self.mmap.take() {
+            Some(m) => m,
+            None => return,
+        };
+        let bytes = map.as_bytes();
+        let content_len = bytes.len();
+        let gap_size = INITIAL_GAP.max(content_len / 4);
+
+        let mut data = Vec::with_capacity(content_len + gap_size);
+        data.extend_from_slice(bytes);
+        data.resize(content_len + gap_size, 0);
+
+        self.data = data;
+        self.gap_start = content_len;
+        self.gap_end = content_len + gap_size;
+        // `self.lines` is still valid: the logical offsets built from the mmap
+        // bytes are identical to those in a gap-buffer with the gap at the end.
+    }
+
     fn gap_len(&self) -> usize {
         self.gap_end - self.gap_start
     }
@@ -244,6 +326,9 @@ impl Buffer {
     }
 
     fn byte_at(&self, pos: usize) -> Option<u8> {
+        if let Some(ref map) = self.mmap {
+            return map.as_bytes().get(pos).copied();
+        }
         if pos >= self.len() {
             return None;
         }
@@ -335,6 +420,9 @@ impl Buffer {
     }
 
     pub fn text_bytes(&self) -> Vec<u8> {
+        if let Some(ref map) = self.mmap {
+            return map.as_bytes().to_vec();
+        }
         let total = self.len();
         let mut result = Vec::with_capacity(total);
         result.extend_from_slice(&self.data[..self.gap_start]);
@@ -688,5 +776,129 @@ mod tests {
                 text
             );
         }
+    }
+
+    // ── mmap integration tests ──────────────────────────────────────────────
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static MMAP_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Write `content` to a uniquely-named temp file and return its path.
+    fn write_tmp_file(content: &[u8]) -> std::path::PathBuf {
+        let n = MMAP_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("zedit_buf_mmap_{}_{}.bin", std::process::id(), n));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(content).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_small_file_uses_gap_buffer() {
+        let path = write_tmp_file(b"hello\nworld\n");
+        let buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(!buf.is_mmap_backed(), "small file should use gap buffer");
+        assert_eq!(buf.line_count(), 3);
+        assert_eq!(buf.get_line(0), Some("hello".into()));
+    }
+
+    #[test]
+    fn test_large_file_uses_mmap() {
+        let content = vec![b'a'; MMAP_THRESHOLD + 1];
+        let path = write_tmp_file(&content);
+        let buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buf.is_mmap_backed(), "large file should be mmap-backed");
+        assert_eq!(buf.len(), MMAP_THRESHOLD + 1);
+    }
+
+    #[test]
+    fn test_mmap_byte_at() {
+        let mut content = vec![b'x'; MMAP_THRESHOLD + 4];
+        content[0] = b'H';
+        content[MMAP_THRESHOLD] = b'Z';
+        let path = write_tmp_file(&content);
+        let buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buf.is_mmap_backed());
+        assert_eq!(buf.byte_at(0), Some(b'H'));
+        assert_eq!(buf.byte_at(MMAP_THRESHOLD), Some(b'Z'));
+        assert_eq!(buf.byte_at(MMAP_THRESHOLD + 4), None); // out of bounds
+    }
+
+    #[test]
+    fn test_mmap_line_count() {
+        let mut content = vec![b'a'; MMAP_THRESHOLD + 10];
+        content[100] = b'\n';
+        content[200] = b'\n';
+        content[300] = b'\n';
+        let path = write_tmp_file(&content);
+        let buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buf.is_mmap_backed());
+        assert_eq!(buf.line_count(), 4); // 3 newlines → 4 lines
+    }
+
+    #[test]
+    fn test_mmap_get_line() {
+        // "abc\ndef\n" padded to > MMAP_THRESHOLD
+        let header = b"abc\ndef\n";
+        let mut content = Vec::with_capacity(MMAP_THRESHOLD + 10);
+        content.extend_from_slice(header);
+        content.resize(MMAP_THRESHOLD + 10, b'z');
+        let path = write_tmp_file(&content);
+        let buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buf.is_mmap_backed());
+        assert_eq!(buf.get_line(0), Some("abc".into()));
+        assert_eq!(buf.get_line(1), Some("def".into()));
+    }
+
+    #[test]
+    fn test_mmap_materialize_on_insert() {
+        let content = vec![b'a'; MMAP_THRESHOLD + 1];
+        let path = write_tmp_file(&content);
+        let mut buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buf.is_mmap_backed());
+
+        buf.insert(0, "X");
+
+        assert!(!buf.is_mmap_backed(), "should have materialized on insert");
+        assert_eq!(buf.len(), MMAP_THRESHOLD + 2);
+        assert_eq!(buf.byte_at(0), Some(b'X'));
+        assert_eq!(buf.byte_at(1), Some(b'a'));
+        assert!(buf.is_modified());
+    }
+
+    #[test]
+    fn test_mmap_materialize_on_delete() {
+        let content = vec![b'b'; MMAP_THRESHOLD + 5];
+        let path = write_tmp_file(&content);
+        let mut buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buf.is_mmap_backed());
+
+        buf.delete(0, 3);
+
+        assert!(!buf.is_mmap_backed(), "should have materialized on delete");
+        assert_eq!(buf.len(), MMAP_THRESHOLD + 2);
+        assert_eq!(buf.byte_at(0), Some(b'b'));
+    }
+
+    #[test]
+    fn test_mmap_text_bytes_correct() {
+        let mut content = vec![b'q'; MMAP_THRESHOLD + 1];
+        content[0] = b'A';
+        content[MMAP_THRESHOLD] = b'Z';
+        let path = write_tmp_file(&content);
+        let buf = Buffer::from_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(buf.is_mmap_backed());
+        let bytes = buf.text_bytes();
+        assert_eq!(bytes.len(), MMAP_THRESHOLD + 1);
+        assert_eq!(bytes[0], b'A');
+        assert_eq!(bytes[MMAP_THRESHOLD], b'Z');
     }
 }

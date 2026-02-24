@@ -21,7 +21,7 @@ file-picker path completion, and mmap large-file support.
 | 3 | 25 | Incremental line cache | Medium | High — performance | Medium | `DONE` |
 | 4 | 26 | OKLab color system | Low | Medium — visual quality | Low | `DONE` |
 | 5 | 28 | File picker path completion | High | Medium — UX | Medium | `DONE` |
-| 6 | 29 | Large file mmap support | Very high | Low-Med — scale | High | `TODO` |
+| 6 | 29 | Large file mmap support | Very high | Low-Med — scale | High | `DONE` |
 
 ### Rationale
 
@@ -94,7 +94,7 @@ This must be designed before implementation begins.
 | 3 | 26 | OKLab color system | 250 | Medium — quality | TODO |
 | 4 | 27 | Fuzzy matching upgrade | 150 | Medium — UX | TODO |
 | 5 | 28 | File picker path completion | 350 | Medium — UX | TODO |
-| 6 | 29 | Large file mmap support | 400 | Low — scale | TODO |
+| 6 | 29 | Large file mmap support | 400 | Low — scale | DONE |
 
 Total: ~1,650 new/modified lines across 6 phases.
 
