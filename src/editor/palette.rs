@@ -586,7 +586,7 @@ impl Editor {
         match action {
             Save => self.save(),
             SaveAs => self.start_prompt("Save as: ", PromptAction::SaveAs),
-            OpenFile => self.start_prompt("Open: ", PromptAction::OpenFile),
+            OpenFile => self.start_open_file_prompt(""),
             Quit => self.quit(),
             NewBuffer => self.new_buffer(),
             CloseBuffer => self.close_buffer(),

@@ -387,6 +387,9 @@ impl Editor {
             }
         }
 
+        // File-picker completion dropdown (rendered above the prompt line)
+        self.render_file_completion_dropdown(msg_row, screen_width, screen_height);
+
         // Minimap sidebar overlay — always on the buffer pane (not the terminal pane)
         if self.minimap.visible && self.diff_view.is_none() {
             self.render_minimap();
@@ -3111,6 +3114,97 @@ impl Editor {
             Color::Ansi(0),
             false,
         );
+    }
+
+    /// Render the file-picker completion dropdown above the prompt line.
+    ///
+    /// Shows up to 8 suggestions; the selected one is highlighted with inverse video.
+    /// Directories get a trailing "/". Rendered above `prompt_row` (going upward).
+    pub(super) fn render_file_completion_dropdown(
+        &mut self,
+        prompt_row: usize,
+        screen_width: usize,
+        _screen_height: usize,
+    ) {
+        // Only active for OpenFile prompts that have a completer with matches
+        let (matches_len, selected) = match self.prompt.as_ref() {
+            Some(p) if matches!(p.action, PromptAction::OpenFile) => {
+                match p.completer.as_ref() {
+                    Some(c) if !c.matches.is_empty() => (c.matches.len(), c.selected),
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+
+        const MAX_VISIBLE: usize = 8;
+        let visible_count = matches_len.min(MAX_VISIBLE);
+
+        // Determine the scroll window so that `selected` is always visible
+        let scroll_start = if selected >= MAX_VISIBLE {
+            selected - MAX_VISIBLE + 1
+        } else {
+            0
+        };
+
+        // Dropdown column: align with the input portion of the prompt
+        let input_col = self
+            .prompt
+            .as_ref()
+            .map(|p| 1 + crate::unicode::str_width(&p.label))
+            .unwrap_or(1);
+
+        // Width of the dropdown box (at most 40 cols or half the screen)
+        let dropdown_width = 40usize.min(screen_width.saturating_sub(input_col + 2));
+        if dropdown_width < 4 {
+            return;
+        }
+
+        let bg_normal = Color::Ansi(0);   // black background
+        let fg_normal = Color::Ansi(7);   // white foreground
+        let bg_selected = Color::Ansi(4); // blue background (selected)
+        let fg_selected = Color::Ansi(15); // bright white (selected)
+
+        // Clone the data we need to avoid borrow checker issues with self.screen
+        let entries_data: Vec<(String, bool)> = {
+            let p = self.prompt.as_ref().unwrap();
+            let c = p.completer.as_ref().unwrap();
+            (scroll_start..scroll_start + visible_count)
+                .map(|vis_idx| {
+                    let entry_idx = c.matches[vis_idx];
+                    let e = &c.entries[entry_idx];
+                    let display = if e.is_dir {
+                        format!("{}/", e.name)
+                    } else {
+                        e.name.clone()
+                    };
+                    (display, vis_idx == selected)
+                })
+                .collect()
+        };
+
+        for (i, (name, is_selected)) in entries_data.iter().enumerate() {
+            let row = prompt_row.saturating_sub(visible_count - i);
+            if row >= prompt_row {
+                continue; // safety: don't draw on or below prompt
+            }
+
+            let (fg, bg) = if *is_selected {
+                (fg_selected, bg_selected)
+            } else {
+                (fg_normal, bg_normal)
+            };
+
+            // Fill the dropdown row background
+            for col in input_col..input_col + dropdown_width {
+                self.screen.put_char(row, col, ' ', fg, bg, false);
+            }
+
+            // Render name (truncated to fit)
+            let display = truncate_str(name, dropdown_width.saturating_sub(1));
+            self.screen
+                .put_str(row, input_col + 1, display, fg, bg, false);
+        }
     }
 
 }

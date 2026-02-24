@@ -122,6 +122,7 @@ fn test_prompt_insert_char() {
         input: String::new(),
         cursor_pos: 0,
         action: PromptAction::OpenFile,
+        completer: None,
     };
 
     // Insert 'a'
@@ -154,6 +155,7 @@ fn test_prompt_backspace() {
         input: "hello".to_string(),
         cursor_pos: 5,
         action: PromptAction::OpenFile,
+        completer: None,
     };
 
     // Backspace at end
@@ -175,6 +177,7 @@ fn test_prompt_delete() {
         input: "hello".to_string(),
         cursor_pos: 0,
         action: PromptAction::OpenFile,
+        completer: None,
     };
 
     // Delete at start
@@ -196,6 +199,7 @@ fn test_prompt_cursor_movement() {
         input: "abc".to_string(),
         cursor_pos: 0,
         action: PromptAction::OpenFile,
+        completer: None,
     };
 
     // Right
@@ -230,6 +234,7 @@ fn test_prompt_utf8_navigation() {
         input: "café".to_string(), // c(1) a(1) f(1) é(2) = 5 bytes
         cursor_pos: 5,             // at end
         action: PromptAction::OpenFile,
+        completer: None,
     };
 
     // Left from end — should move back over 'é' (2 bytes)

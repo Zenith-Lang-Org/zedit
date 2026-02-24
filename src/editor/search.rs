@@ -110,6 +110,7 @@ impl Editor {
             input: prefill.clone(),
             cursor_pos: prefill.len(),
             action,
+            completer: None,
         });
         self.message = None;
         // Trigger incremental search if prefill is non-empty
