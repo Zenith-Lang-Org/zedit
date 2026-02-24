@@ -477,12 +477,56 @@ fn write_bg_color(buf: &mut Vec<u8>, color: Color, mode: &ColorMode) {
 fn effective_color(color: Color, mode: &ColorMode) -> Color {
     match (color, mode) {
         (Color::Rgb(r, g, b), ColorMode::Color256) => Color::Color256(rgb_to_ansi256(r, g, b)),
-        (Color::Rgb(r, g, b), ColorMode::Color16) => {
-            Color::Ansi(ansi256_to_ansi16(rgb_to_ansi256(r, g, b)))
+        // Use perceptual OKLab distance for all 24-bit → 16-color downsampling.
+        (Color::Rgb(r, g, b), ColorMode::Color16) => Color::Ansi(rgb_to_ansi16_oklab(r, g, b)),
+        (Color::Color256(n), ColorMode::Color16) => {
+            let (r, g, b) = ansi256_to_rgb(n);
+            Color::Ansi(rgb_to_ansi16_oklab(r, g, b))
         }
-        (Color::Color256(n), ColorMode::Color16) => Color::Ansi(ansi256_to_ansi16(n)),
         _ => color,
     }
+}
+
+/// Map a 24-bit RGB color to the nearest ANSI 16-color index using OKLab
+/// perceptual distance.
+///
+/// This replaces the old rec601-luma heuristic, which caused hue-shifting when
+/// saturated colors (e.g. `#0000FF`) collapsed into the same dark bucket as
+/// neutral grays because luma weights are tuned for video signal levels, not
+/// human color perception.
+fn rgb_to_ansi16_oklab(r: u8, g: u8, b: u8) -> u8 {
+    // Representative sRGB values for the 16 standard ANSI colors.
+    // These must match the `ANSI_BASIC` table in `ansi256_to_rgb` so that
+    // Color256(0..15) round-trips correctly.
+    const ANSI16: [(u8, u8, u8); 16] = [
+        (0, 0, 0),       // 0  black
+        (128, 0, 0),     // 1  red
+        (0, 128, 0),     // 2  green
+        (128, 128, 0),   // 3  yellow
+        (0, 0, 128),     // 4  blue
+        (128, 0, 128),   // 5  magenta
+        (0, 128, 128),   // 6  cyan
+        (192, 192, 192), // 7  white
+        (128, 128, 128), // 8  bright black (gray)
+        (255, 0, 0),     // 9  bright red
+        (0, 255, 0),     // 10 bright green
+        (255, 255, 0),   // 11 bright yellow
+        (0, 0, 255),     // 12 bright blue
+        (255, 0, 255),   // 13 bright magenta
+        (0, 255, 255),   // 14 bright cyan
+        (255, 255, 255), // 15 bright white
+    ];
+
+    let mut best_idx = 0u8;
+    let mut best_dist = f32::MAX;
+    for (i, &(pr, pg, pb)) in ANSI16.iter().enumerate() {
+        let dist = crate::oklab::perceptual_distance(r, g, b, pr, pg, pb);
+        if dist < best_dist {
+            best_dist = dist;
+            best_idx = i as u8;
+        }
+    }
+    best_idx
 }
 
 /// Convert an RGB color to the nearest xterm-256 palette index.
@@ -530,31 +574,6 @@ fn color_cube_index(v: u8) -> u8 {
     }
 }
 
-/// Map a 256-color index to the nearest standard 16-color ANSI index (0-15).
-pub fn ansi256_to_ansi16(n: u8) -> u8 {
-    match n {
-        0..=15 => n,
-        // Color cube and grayscale: approximate via perceived brightness
-        _ => {
-            let (r, g, b) = ansi256_to_rgb(n);
-            // Weighted luminance
-            let luma = (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000;
-
-            // Find the nearest basic color
-            // Simple mapping: use the 8 basic hues + bright variants
-            let ri = if r > 128 { 1u8 } else { 0 };
-            let gi = if g > 128 { 1u8 } else { 0 };
-            let bi = if b > 128 { 1u8 } else { 0 };
-            let base = bi << 2 | gi << 1 | ri; // ANSI color order: BGR
-
-            if luma > 170 {
-                base + 8 // bright variant
-            } else {
-                base
-            }
-        }
-    }
-}
 
 fn ansi256_to_rgb(n: u8) -> (u8, u8, u8) {
     static ANSI_BASIC: [(u8, u8, u8); 16] = [
@@ -719,17 +738,16 @@ mod tests {
     }
 
     #[test]
-    fn ansi256_to_ansi16_passthrough() {
-        for i in 0..=15 {
-            assert_eq!(ansi256_to_ansi16(i), i);
-        }
+    fn rgb_to_ansi16_oklab_black() {
+        // Pure black should map to ANSI color index 0 (black)
+        assert_eq!(rgb_to_ansi16_oklab(0, 0, 0), 0);
     }
 
     #[test]
-    fn ansi256_to_ansi16_cube_color() {
-        let n = ansi256_to_ansi16(196); // bright red
-        // Should map to red (1) or bright red (9)
-        assert!(n == 1 || n == 9);
+    fn rgb_to_ansi16_oklab_red() {
+        // Bright red should map to red (1) or bright red (9)
+        let n = rgb_to_ansi16_oklab(255, 0, 0);
+        assert!(n == 1 || n == 9, "expected red index, got {n}");
     }
 
     #[test]

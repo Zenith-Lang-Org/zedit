@@ -8,6 +8,7 @@ mod editor;
 mod extension;
 mod filetree;
 mod glob;
+mod oklab;
 mod git;
 mod input;
 mod keybindings;

@@ -157,6 +157,56 @@ impl Theme {
     }
 }
 
+// ── Contrast adjustment ──────────────────────────────────────
+
+/// Ensure every `Color::Rgb` foreground in `theme` meets a minimum contrast
+/// ratio of 3.0 against `bg` (measured via OKLab lightness).
+///
+/// Rules with insufficient contrast have their foreground blended toward white
+/// (dark background) or black (light background) until the threshold is met.
+///
+/// Call this once after loading a theme, not on every render frame.
+pub fn ensure_readable_contrast(theme: &mut Theme, bg: (u8, u8, u8)) {
+    for rule in &mut theme.token_rules {
+        if let Some(Color::Rgb(r, g, b)) = rule.foreground {
+            let ratio = crate::oklab::contrast_ratio(r, g, b, bg.0, bg.1, bg.2);
+            if ratio < 3.0 {
+                rule.foreground = Some(adjust_toward_readable(r, g, b, bg));
+            }
+        }
+    }
+}
+
+/// Blend `(r, g, b)` toward white or black until it achieves contrast ≥ 3.0
+/// against `bg`.  Uses eight linear interpolation steps before falling back
+/// to the target pole (pure white or pure black).
+fn adjust_toward_readable(r: u8, g: u8, b: u8, bg: (u8, u8, u8)) -> Color {
+    let (l_bg, _, _) = crate::oklab::srgb_to_oklab(
+        bg.0 as f32 / 255.0,
+        bg.1 as f32 / 255.0,
+        bg.2 as f32 / 255.0,
+    );
+    // Dark background → blend toward white; light background → blend toward black.
+    let (target_r, target_g, target_b): (u8, u8, u8) =
+        if l_bg < 0.5 { (255, 255, 255) } else { (0, 0, 0) };
+
+    for step in 1..=8u8 {
+        let t = step as f32 / 8.0;
+        let nr = lerp_u8(r, target_r, t);
+        let ng = lerp_u8(g, target_g, t);
+        let nb = lerp_u8(b, target_b, t);
+        if crate::oklab::contrast_ratio(nr, ng, nb, bg.0, bg.1, bg.2) >= 3.0 {
+            return Color::Rgb(nr, ng, nb);
+        }
+    }
+    Color::Rgb(target_r, target_g, target_b)
+}
+
+#[inline]
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as u8
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 /// Check if a scope matches a selector.
