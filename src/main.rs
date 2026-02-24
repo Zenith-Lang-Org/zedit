@@ -7,6 +7,7 @@ mod diff_view;
 mod editor;
 mod extension;
 mod filetree;
+mod glob;
 mod git;
 mod input;
 mod keybindings;

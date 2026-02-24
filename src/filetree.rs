@@ -874,28 +874,11 @@ fn scan_dir(path: &Path, depth: usize, ignored: &[String]) -> Vec<TreeNode> {
 }
 
 // ---------------------------------------------------------------------------
-// Glob matching (supports * and ? wildcards)
+// Glob matching — delegates to crate::glob (iterative O(n×m))
 // ---------------------------------------------------------------------------
 
 fn glob_match(pattern: &str, name: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let nam: Vec<char> = name.chars().collect();
-    glob_match_inner(&pat, &nam)
-}
-
-fn glob_match_inner(pat: &[char], name: &[char]) -> bool {
-    match (pat.first(), name.first()) {
-        (None, None) => true,
-        (None, _) => false,
-        (Some('*'), _) => {
-            // * matches zero or more characters
-            glob_match_inner(&pat[1..], name)
-                || (!name.is_empty() && glob_match_inner(pat, &name[1..]))
-        }
-        (Some('?'), Some(_)) => glob_match_inner(&pat[1..], &name[1..]),
-        (Some(p), Some(n)) if p == n => glob_match_inner(&pat[1..], &name[1..]),
-        _ => false,
-    }
+    crate::glob::glob_match(pattern, name)
 }
 
 // ---------------------------------------------------------------------------
