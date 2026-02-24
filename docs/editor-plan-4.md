@@ -18,7 +18,7 @@ file-picker path completion, and mmap large-file support.
 |-------|-------|---------|------------|--------|------|--------|
 | 1 | 27 | Fuzzy matching upgrade | Low | High — daily UX | Very low | `DONE` |
 | 2 | 24 | Glob engine rewrite | Low-Med | High — correctness | Low | `DONE` |
-| 3 | 25 | Incremental line cache | Medium | High — performance | Medium | `TODO` |
+| 3 | 25 | Incremental line cache | Medium | High — performance | Medium | `DONE` |
 | 4 | 26 | OKLab color system | Low | Medium — visual quality | Low | `TODO` |
 | 5 | 28 | File picker path completion | High | Medium — UX | Medium | `TODO` |
 | 6 | 29 | Large file mmap support | Very high | Low-Med — scale | High | `TODO` |
