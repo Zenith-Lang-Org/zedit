@@ -67,6 +67,8 @@ pub enum EditorAction {
     TaskStop,
     // Problem panel
     ToggleProblemPanel,
+    // Diagnostics panel (LSP diagnostics for active buffer)
+    ToggleDiagnosticsPanel,
     // REPL integration (Z ecosystem)
     SendToRepl,
     // Scroll viewport by one line (cursor moves with it at the edge)
@@ -75,6 +77,8 @@ pub enum EditorAction {
     // Copy file path to clipboard
     CopyFilePath,
     CopyFilePathRelative,
+    // Format the active document using an external formatter
+    FormatDocument,
 }
 
 // ---------------------------------------------------------------------------
@@ -390,11 +394,13 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "task_test" => Some(EditorAction::TaskTest),
         "task_stop" => Some(EditorAction::TaskStop),
         "toggle_problem_panel" => Some(EditorAction::ToggleProblemPanel),
+        "toggle_diagnostics_panel" => Some(EditorAction::ToggleDiagnosticsPanel),
         "send_to_repl" => Some(EditorAction::SendToRepl),
         "scroll_line_up" => Some(EditorAction::ScrollLineUp),
         "scroll_line_down" => Some(EditorAction::ScrollLineDown),
         "copy_file_path" => Some(EditorAction::CopyFilePath),
         "copy_file_path_relative" => Some(EditorAction::CopyFilePathRelative),
+        "format_document" => Some(EditorAction::FormatDocument),
         _ => None,
     }
 }
@@ -457,29 +463,33 @@ impl KeyMap {
             ("Alt+Shift+Down", EditorAction::ResizePaneDown),
             // View
             ("F1", EditorAction::ToggleHelp),
+            ("F2", EditorAction::ToggleFileTree),  // dual binding; Ctrl+B remains below
             ("Alt+Z", EditorAction::ToggleWrap),
             ("Ctrl+B", EditorAction::ToggleFileTree),
             ("Ctrl+P", EditorAction::CommandPalette),
-            // Terminal — NEW default: Ctrl+T instead of Ctrl+`
+            // Terminal — Ctrl+T and F5
             ("Ctrl+T", EditorAction::ToggleTerminal),
+            ("F5", EditorAction::ToggleTerminal),
             ("Ctrl+Shift+T", EditorAction::NewTerminal),
+            // Format document
+            ("F4", EditorAction::FormatDocument),
             // LSP interactive
             ("Ctrl+Space", EditorAction::LspComplete),
             ("Alt+K", EditorAction::LspHover),
             ("F12", EditorAction::LspGoToDef),
-            // Diff view
-            ("F7", EditorAction::DiffOpenVsHead),
-            ("F8", EditorAction::DiffNextHunk),
-            ("Shift+F8", EditorAction::DiffPrevHunk),
+            // Diff view — Ctrl+K opens diff; n/N navigate hunks inside the viewer
+            ("Ctrl+K", EditorAction::DiffOpenVsHead),
+            // Diagnostics panel (LSP) — F6
+            ("F6", EditorAction::ToggleDiagnosticsPanel),
+            // Problem panel — F7
+            ("F7", EditorAction::ToggleProblemPanel),
             // Minimap — Alt+M (Ctrl+Shift+M = 0x0D = Enter in all standard terminals)
             ("Alt+M", EditorAction::ToggleMinimap),
-            // Task runner
-            ("F5", EditorAction::TaskRun),
+            // Task runner — F8 runs, Ctrl+F5 builds, Shift+F5 tests, Alt+F5 stops
+            ("F8", EditorAction::TaskRun),
             ("Ctrl+F5", EditorAction::TaskBuild),
             ("Shift+F5", EditorAction::TaskTest),
             ("Alt+F5", EditorAction::TaskStop),
-            // Problem panel
-            ("F6", EditorAction::ToggleProblemPanel),
             // REPL integration (Z ecosystem)
             ("Alt+Enter", EditorAction::SendToRepl),
             // Scroll viewport one line (cursor moves with view at edge)

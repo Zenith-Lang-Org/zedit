@@ -96,6 +96,19 @@ impl Clipboard {
 }
 
 // ---------------------------------------------------------------------------
+// Bottom panel tab
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BottomTab {
+    Terminal,
+    /// LSP diagnostics for the active buffer (rust-analyzer, real-time).
+    Diagnostics,
+    /// cargo check results for the whole workspace (background run).
+    Problems,
+}
+
+// ---------------------------------------------------------------------------
 // Editor
 // ---------------------------------------------------------------------------
 
@@ -155,9 +168,13 @@ pub struct Editor {
     pub(super) ptys: Vec<Pty>,
     terminal_panel_pane: Option<PaneId>,
     terminal_idx: Option<usize>,
+    bottom_tab: BottomTab, // controls which tab is active in the bottom panel
 
     // LSP support
     lsp_manager: Option<lsp::LspManager>,
+    /// Generation counter: incremented when the LSP diagnostics change.
+    /// Used to skip rebuilding problem_panel.lsp_items on frames with no change.
+    lsp_diag_gen: u64,
     completion_menu: Option<completion::CompletionMenu>,
     hover_popup: Option<hover::HoverPopup>,
 
@@ -190,6 +207,12 @@ pub struct Editor {
 
     // Problem panel
     problem_panel: crate::problem_panel::ProblemPanel,
+    /// Background cargo check — receiver delivers full output when done.
+    bg_cargo_rx: Option<std::sync::mpsc::Receiver<String>>,
+
+    // Diagnostics panel navigation (DIAGNOSTICS tab)
+    diag_panel_selected: usize,
+    diag_panel_scroll: usize,
 }
 
 impl Editor {
@@ -265,7 +288,9 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            bottom_tab: BottomTab::Terminal,
             lsp_manager,
+            lsp_diag_gen: 0,
             completion_menu: None,
             hover_popup: None,
             plugin_manager: Self::build_plugin_manager(),
@@ -281,6 +306,9 @@ impl Editor {
             last_task: None,
             task_language: None,
             problem_panel: crate::problem_panel::ProblemPanel::new(),
+            bg_cargo_rx: None,
+            diag_panel_selected: 0,
+            diag_panel_scroll: 0,
         })
     }
 
@@ -322,7 +350,9 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            bottom_tab: BottomTab::Terminal,
             lsp_manager,
+            lsp_diag_gen: 0,
             completion_menu: None,
             hover_popup: None,
             plugin_manager: Self::build_plugin_manager(),
@@ -338,6 +368,9 @@ impl Editor {
             last_task: None,
             task_language: None,
             problem_panel: crate::problem_panel::ProblemPanel::new(),
+            bg_cargo_rx: None,
+            diag_panel_selected: 0,
+            diag_panel_scroll: 0,
         })
     }
 
@@ -504,7 +537,9 @@ impl Editor {
             ptys: Vec::new(),
             terminal_panel_pane: None,
             terminal_idx: None,
+            bottom_tab: BottomTab::Terminal,
             lsp_manager,
+            lsp_diag_gen: 0,
             completion_menu: None,
             hover_popup: None,
             plugin_manager: Self::build_plugin_manager(),
@@ -520,6 +555,9 @@ impl Editor {
             last_task: None,
             task_language: None,
             problem_panel: crate::problem_panel::ProblemPanel::new(),
+            bg_cargo_rx: None,
+            diag_panel_selected: 0,
+            diag_panel_scroll: 0,
         })
     }
 
@@ -609,6 +647,13 @@ impl Editor {
 
     /// Check if the active pane is a terminal pane.
     fn active_pane_is_terminal(&self) -> bool {
+        // If bottom panel is active but showing Problems or Diagnostics tab → NOT a terminal for input purposes
+        if self.terminal_panel_pane == Some(self.active_pane)
+            && (self.bottom_tab == BottomTab::Problems
+                || self.bottom_tab == BottomTab::Diagnostics)
+        {
+            return false;
+        }
         matches!(
             self.layout.pane_content(self.active_pane),
             Some(PaneContent::Terminal(_))
@@ -619,7 +664,10 @@ impl Editor {
     /// If the active pane is a terminal, switch focus to the nearest editor pane.
     /// Returns the pane ID suitable for opening files.
     fn ensure_editor_pane(&mut self) -> PaneId {
-        if !self.active_pane_is_terminal() {
+        // Also treat the bottom panel (Problems OR Terminal tab) as needing a switch,
+        // because set_pane_buffer on it would replace the terminal with a buffer pane.
+        let is_bottom_panel = self.terminal_panel_pane == Some(self.active_pane);
+        if !is_bottom_panel && !self.active_pane_is_terminal() {
             return self.active_pane;
         }
         // Find a buffer pane to switch to
@@ -676,6 +724,9 @@ impl Editor {
 
             // 2c. Drain plugin messages and handle requests
             self.drain_plugin_messages();
+
+            // 2d. Collect background cargo check output when finished
+            self.drain_bg_cargo_check();
 
             // 3. Reap dead children
             for pty in &mut self.ptys {
@@ -870,6 +921,68 @@ impl Editor {
             }
         }
 
+        // Feed LSP diagnostics from ALL workspace files into the problem panel.
+        // Only rebuild when diagnostics actually changed (generation counter).
+        {
+            let current_gen = mgr.diagnostics_generation();
+            if current_gen != self.lsp_diag_gen {
+                self.lsp_diag_gen = current_gen;
+
+                let workspace_diags = mgr.all_diagnostics_owned();
+                crate::dlog!(
+                    "[lsp_diag] gen={} files={}",
+                    current_gen,
+                    workspace_diags.len()
+                );
+                for (u, d) in &workspace_diags {
+                    crate::dlog!("[lsp_diag]   file={} count={}", u, d.len());
+                }
+
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|p| {
+                        let mut s = p.to_string_lossy().into_owned();
+                        if !s.ends_with('/') {
+                            s.push('/');
+                        }
+                        s
+                    })
+                    .unwrap_or_default();
+
+                let mut lsp_problems = Vec::new();
+                for (uri, diags) in workspace_diags {
+                    let abs = lsp::protocol::uri_to_path(&uri).unwrap_or(uri);
+                    // Display relative path when possible (strips CWD prefix).
+                    let file_str = if !cwd.is_empty() && abs.starts_with(&cwd) {
+                        abs[cwd.len()..].to_string()
+                    } else {
+                        abs
+                    };
+                    for d in &diags {
+                        use crate::lsp::protocol::DiagnosticSeverity;
+                        use crate::problem_panel::{Problem, Severity};
+                        let severity = match d.severity {
+                            DiagnosticSeverity::Error => Severity::Error,
+                            DiagnosticSeverity::Warning => Severity::Warning,
+                            DiagnosticSeverity::Info => Severity::Info,
+                            DiagnosticSeverity::Hint => Severity::Note,
+                        };
+                        lsp_problems.push(Problem {
+                            severity,
+                            file: file_str.clone(),
+                            line: d.range.start.line + 1,
+                            col: d.range.start.character + 1,
+                            message: d.message.clone(),
+                            code: None,
+                        });
+                    }
+                }
+                // Sort by file then by line for consistent, readable ordering.
+                lsp_problems.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+                self.problem_panel.set_lsp_items(lsp_problems);
+            }
+        }
+
         // Collect interactive LSP results (NLL ends mgr borrow after last use)
         let new_completion = mgr.take_completion_result();
         let new_hover = mgr.take_hover_result();
@@ -959,8 +1072,14 @@ impl Editor {
         for (uri, text) in buf_infos {
             if let Some(ref mut mgr) = self.lsp_manager {
                 if let Some(client) = mgr.client_mut(lang) {
+                    // Push CARGO_INCREMENTAL=0 config before did_save so flycheck
+                    // re-checks all workspace files (bypasses artifact cache).
+                    client.notify_configuration();
                     client.did_open(&uri, &text);
                     client.request_semantic_tokens(&uri);
+                    // Trigger flycheck so rust-analyzer analyses the whole workspace
+                    // and sends publishDiagnostics for ALL files, not just open ones.
+                    client.did_save(&uri);
                 }
             }
         }
@@ -1430,7 +1549,12 @@ impl Editor {
                 && ti < self.vterms.len()
             {
                 let cols = pane_info.rect.width;
-                let rows = pane_info.rect.height;
+                // If this pane is the bottom panel, subtract 1 row for the tab bar
+                let rows = if self.terminal_panel_pane == Some(pane_info.id) {
+                    pane_info.rect.height.saturating_sub(1)
+                } else {
+                    pane_info.rect.height
+                };
                 if cols > 0 && rows > 0 {
                     self.ptys[ti].resize(cols, rows);
                     self.vterms[ti].resize(cols, rows);
@@ -1462,9 +1586,15 @@ impl Editor {
     }
 
     /// Ensure the terminal panel is open; opens one if needed.
+    /// Always switches to the Terminal tab so task output is visible.
     fn ensure_terminal_panel(&mut self) {
         if self.terminal_panel_pane.is_none() {
+            self.bottom_tab = BottomTab::Terminal;
             self.restore_or_new_terminal_panel();
+        } else {
+            // Panel already open — switch to Terminal tab if needed
+            self.bottom_tab = BottomTab::Terminal;
+            self.problem_panel.focused = false;
         }
     }
 
@@ -1544,18 +1674,384 @@ impl Editor {
         }
     }
 
-    fn toggle_problem_panel(&mut self) {
-        if self.problem_panel.focused {
-            // Second press when focused: unfocus (keep visible)
-            self.problem_panel.focused = false;
-        } else if self.problem_panel.visible {
-            // Panel visible but not focused: focus it
-            self.problem_panel.focused = true;
-        } else {
-            // Panel hidden: show and focus
-            self.problem_panel.visible = true;
-            self.problem_panel.focused = true;
+    /// Format the active buffer using an external formatter (stdin → stdout).
+    fn format_document(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        let file_path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => {
+                self.set_message("Save the file first before formatting", MessageType::Warning);
+                return;
+            }
+        };
+
+        let lang = match self.detect_language_by_ext(&file_path) {
+            Some(l) => l,
+            None => {
+                self.set_message("Unknown file type — no formatter available", MessageType::Warning);
+                return;
+            }
+        };
+
+        // Map language name → (command, args).
+        // Formatters that read stdin and write stdout are preferred.
+        let (cmd, args): (&str, Vec<&str>) = match lang.as_str() {
+            "rust" => ("rustfmt", vec!["--emit", "stdout", &file_path]),
+            "go" => ("gofmt", vec![&file_path]),
+            "javascript" | "typescript" => {
+                ("prettier", vec!["--stdin-filepath", &file_path])
+            }
+            "python" => ("black", vec!["-", "--quiet"]),
+            "c" | "cpp" => ("clang-format", vec![]),
+            _ => {
+                self.set_message(
+                    &format!("No formatter configured for '{}'", lang),
+                    MessageType::Warning,
+                );
+                return;
+            }
+        };
+
+        // Collect current buffer content to feed via stdin.
+        let line_count = self.buffers[buf_idx].buffer.line_count();
+        let mut content = String::new();
+        for i in 0..line_count {
+            if let Some(line) = self.buffers[buf_idx].buffer.get_line(i) {
+                content.push_str(&line);
+                content.push('\n');
+            }
         }
+
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = match Command::new(cmd)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                self.set_message(
+                    &format!("Formatter not available: {}", cmd),
+                    MessageType::Warning,
+                );
+                return;
+            }
+        };
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(content.as_bytes());
+        }
+
+        let output = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(_) => {
+                self.set_message(&format!("Formatter failed: {}", cmd), MessageType::Error);
+                return;
+            }
+        };
+
+        if !output.status.success() {
+            self.set_message(
+                &format!("Formatter exited with error: {}", cmd),
+                MessageType::Warning,
+            );
+            return;
+        }
+
+        let formatted = match String::from_utf8(output.stdout) {
+            Ok(s) => s,
+            Err(_) => {
+                self.set_message("Formatter produced non-UTF-8 output", MessageType::Error);
+                return;
+            }
+        };
+
+        // Replace buffer content with formatted output.
+        {
+            let b = &mut self.buffers[buf_idx];
+            let total_chars = b.buffer.len();
+            b.buffer.delete(0, total_chars);
+            b.buffer.insert(0, &formatted);
+            let primary = b.primary;
+            b.cursors[primary].cursor.line = 0;
+            b.cursors[primary].cursor.col = 0;
+            b.scroll_row = 0;
+            b.scroll_col = 0;
+        }
+
+        self.set_message(&format!("Formatted with {}", cmd), MessageType::Info);
+    }
+
+    fn toggle_problem_panel(&mut self) {
+        if let Some(pane_id) = self.terminal_panel_pane {
+            if self.layout.pane_exists(pane_id) {
+                if self.bottom_tab == BottomTab::Problems {
+                    // Already on Problems tab → close panel
+                    self.close_bottom_panel();
+                } else {
+                    // Switch to Problems tab
+                    self.bottom_tab = BottomTab::Problems;
+                    self.problem_panel.focused = true;
+                    self.problem_panel.visible = true;
+                    self.active_pane = pane_id;
+                    // Auto-run cargo check if no results yet (panel was open on
+                    // a different tab so check was never triggered).
+                    if self.problem_panel.items.is_empty() {
+                        self.auto_cargo_check_if_rust();
+                    }
+                }
+                return;
+            }
+        }
+        // Panel not open → open it on Problems tab.
+        self.bottom_tab = BottomTab::Problems;
+        self.restore_or_new_terminal_panel();
+        self.problem_panel.focused = true;
+        self.problem_panel.visible = true;
+
+        // Auto-run cargo check when opening the Problems panel for a Rust project.
+        // LSP publishDiagnostics only provides native type-checker diagnostics for
+        // open files. Compiler warnings (dead_code, unused, etc.) for ALL workspace
+        // files require running `cargo check 2>&1` and parsing its output.
+        // The output is captured via the terminal PTY → problem_panel.feed_raw().
+        self.auto_cargo_check_if_rust();
+    }
+
+    /// Toggle the Diagnostics panel (LSP diagnostics for the active buffer).
+    fn toggle_diagnostics_panel(&mut self) {
+        if let Some(pane_id) = self.terminal_panel_pane {
+            if self.layout.pane_exists(pane_id) {
+                if self.bottom_tab == BottomTab::Diagnostics {
+                    // Already on Diagnostics tab → close panel
+                    self.close_bottom_panel();
+                } else {
+                    // Switch to Diagnostics tab
+                    self.bottom_tab = BottomTab::Diagnostics;
+                    self.problem_panel.focused = false;
+                    self.active_pane = pane_id;
+                }
+                return;
+            }
+        }
+        // Panel not open → open it on Diagnostics tab.
+        self.bottom_tab = BottomTab::Diagnostics;
+        self.restore_or_new_terminal_panel();
+    }
+
+    /// Return indices (into `problem_panel.lsp_items`) of diagnostics that belong
+    /// to the active buffer's file, normalized to a relative path.
+    fn active_buffer_lsp_items(&self) -> Vec<usize> {
+        let buf_idx = self.active_buffer_index();
+        let active_file = match self.buffers.get(buf_idx) {
+            Some(bs) => bs.buffer.file_path().map(|p| {
+                let abs = p.to_string_lossy().into_owned();
+                // Normalize to relative path (same logic as drain_lsp_messages).
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|cp| {
+                        let mut s = cp.to_string_lossy().into_owned();
+                        if !s.ends_with('/') {
+                            s.push('/');
+                        }
+                        s
+                    })
+                    .unwrap_or_default();
+                if !cwd.is_empty() && abs.starts_with(&cwd) {
+                    abs[cwd.len()..].to_string()
+                } else {
+                    abs
+                }
+            }),
+            None => None,
+        };
+
+        let file = match active_file {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+
+        self.problem_panel
+            .lsp_items
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.file == file)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Returns `(error_count, warning_count)` for LSP diagnostics in the active buffer.
+    fn active_buffer_diag_counts(&self) -> (usize, usize) {
+        let indices = self.active_buffer_lsp_items();
+        indices.iter().fold((0, 0), |(e, w), &i| {
+            match self.problem_panel.lsp_items.get(i).map(|p| p.severity) {
+                Some(crate::problem_panel::Severity::Error) => (e + 1, w),
+                Some(crate::problem_panel::Severity::Warning) => (e, w + 1),
+                _ => (e, w),
+            }
+        })
+    }
+
+    /// Jump to the selected diagnostic item in the Diagnostics panel.
+    fn jump_to_diagnostic_item(&mut self) {
+        let indices = self.active_buffer_lsp_items();
+        let lsp_idx = match indices.get(self.diag_panel_selected) {
+            Some(&i) => i,
+            None => return,
+        };
+        let (file, line, col) = match self.problem_panel.lsp_items.get(lsp_idx) {
+            Some(p) => (
+                p.file.clone(),
+                p.line.saturating_sub(1) as usize,
+                p.col.saturating_sub(1) as usize,
+            ),
+            None => return,
+        };
+
+        self.ensure_editor_pane();
+
+        let existing = self.buffers.iter().position(|bs| {
+            bs.buffer
+                .file_path()
+                .map(|p| p.to_string_lossy() == file.as_str())
+                .unwrap_or(false)
+        });
+
+        if let Some(buf_idx) = existing {
+            self.layout.set_pane_buffer(self.active_pane, buf_idx);
+            self.active_buffer = buf_idx;
+            let b = &mut self.buffers[buf_idx];
+            b.cursors[b.primary]
+                .cursor
+                .set_position(line, col, &b.buffer);
+            b.scroll_row = line.saturating_sub(5);
+        } else {
+            let path = std::path::Path::new(&file);
+            if !path.exists() {
+                self.set_message(&format!("File not found: {}", file), MessageType::Warning);
+                return;
+            }
+            if let Ok(mut new_buf) = BufferState::from_file(
+                path,
+                self.config.line_numbers,
+                &self.config.theme,
+                &self.config.languages,
+            ) {
+                new_buf.cursors[new_buf.primary]
+                    .cursor
+                    .set_position(line, col, &new_buf.buffer);
+                new_buf.scroll_row = line.saturating_sub(5);
+                self.buffers.push(new_buf);
+                let new_idx = self.buffers.len() - 1;
+                self.layout.set_pane_buffer(self.active_pane, new_idx);
+                self.active_buffer = new_idx;
+                self.lsp_notify_open(new_idx);
+            }
+        }
+        self.adjust_viewport();
+    }
+
+    /// If the active buffer is a Rust file with a Cargo.toml ancestor, spawn
+    /// `cargo check` in a background thread and feed its output to the Problems
+    /// panel when it finishes.  The user's terminal is left untouched.
+    fn auto_cargo_check_if_rust(&mut self) {
+        let buf_idx = self.active_buffer_index();
+        let is_rust = self.buffers[buf_idx]
+            .buffer
+            .file_path()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            == Some("rs");
+        if !is_rust {
+            return;
+        }
+
+        // Find the Cargo.toml directory (walk up to 6 levels).
+        // Resolve to absolute first so that relative paths like "src/main.rs"
+        // don't produce an empty parent component that makes current_dir("") fail.
+        let cargo_dir = self.buffers[buf_idx]
+            .buffer
+            .file_path()
+            .map(|p| {
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(p))
+                        .unwrap_or_else(|_| p.to_path_buf())
+                }
+            })
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .and_then(|dir| {
+                let mut d = dir;
+                for _ in 0..6 {
+                    if d.join("Cargo.toml").exists() {
+                        return Some(d);
+                    }
+                    if !d.pop() {
+                        break;
+                    }
+                }
+                None
+            });
+
+        let cargo_dir = match cargo_dir {
+            Some(d) => d,
+            None => return,
+        };
+
+        // Cancel any in-flight check and start fresh.
+        self.bg_cargo_rx = None;
+        self.problem_panel.clear();
+        self.problem_panel.source_cmd = Some("cargo check".to_string());
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        self.bg_cargo_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            use std::process::{Command, Stdio};
+            let result = Command::new("cargo")
+                .arg("check")
+                .arg("--message-format=human")
+                .current_dir(&cargo_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+
+            let output = match result {
+                Ok(o) => {
+                    // cargo check writes human output to stderr; merge both.
+                    let mut merged = String::new();
+                    merged.push_str(&String::from_utf8_lossy(&o.stdout));
+                    merged.push_str(&String::from_utf8_lossy(&o.stderr));
+                    merged
+                }
+                Err(e) => format!("error: failed to run cargo check: {}\n", e),
+            };
+
+            let _ = tx.send(output);
+        });
+
+        crate::dlog!("[problems] background cargo check spawned");
+    }
+
+    /// Poll the background cargo-check receiver.  When output arrives, feed it
+    /// to the Problems panel and clear the receiver.
+    fn drain_bg_cargo_check(&mut self) {
+        let output = match &self.bg_cargo_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(s) => s,
+                Err(_) => return,
+            },
+            None => return,
+        };
+
+        self.bg_cargo_rx = None;
+        self.problem_panel.feed_raw(&output);
+        crate::dlog!("[problems] background cargo check done, {} bytes parsed", output.len());
     }
 
     /// Send selected text (or current line) to the Z ecosystem REPL running in
@@ -1684,7 +2180,37 @@ impl Editor {
 
     fn toggle_terminal_panel(&mut self) {
         if let Some(pane_id) = self.terminal_panel_pane {
-            // Hide terminal panel — keep PTY/VTerm alive via terminal_idx
+            if self.layout.pane_exists(pane_id) {
+                if self.bottom_tab == BottomTab::Terminal {
+                    // Already on Terminal tab → close panel
+                    self.close_bottom_panel();
+                } else {
+                    // Switch to Terminal tab
+                    self.bottom_tab = BottomTab::Terminal;
+                    self.problem_panel.focused = false;
+                    self.active_pane = pane_id;
+                }
+                return;
+            }
+        }
+        // Panel not open → open on Terminal tab
+        self.bottom_tab = BottomTab::Terminal;
+        // Determine if we will restore an existing PTY or spawn a new one
+        let will_restore = self
+            .terminal_idx
+            .map(|idx| idx < self.ptys.len() && !self.ptys[idx].is_dead())
+            .unwrap_or(false);
+        self.restore_or_new_terminal_panel();
+        if will_restore {
+            self.set_message("Terminal restored", MessageType::Info);
+        } else {
+            self.set_message("Terminal opened", MessageType::Info);
+        }
+    }
+
+    /// Close the bottom panel pane (shared helper).
+    fn close_bottom_panel(&mut self) {
+        if let Some(pane_id) = self.terminal_panel_pane.take() {
             if self.layout.pane_exists(pane_id) {
                 let next = self
                     .layout
@@ -1697,12 +2223,9 @@ impl Editor {
                     self.active_buffer = self.active_buffer_index();
                 }
             }
-            self.terminal_panel_pane = None;
             self.resolve_layout();
-            self.set_message("Terminal hidden", MessageType::Info);
-        } else {
-            // Restore existing session or spawn new
-            self.restore_or_new_terminal_panel();
+            self.problem_panel.focused = false;
+            self.problem_panel.visible = false;
         }
     }
 
@@ -1737,7 +2260,6 @@ impl Editor {
                 self.active_pane = new_id;
                 self.resolve_layout();
                 self.sync_pty_sizes();
-                self.set_message("Terminal restored", MessageType::Info);
             }
             return;
         }
@@ -1799,7 +2321,49 @@ impl Editor {
             self.active_pane = new_id;
             self.resolve_layout();
             self.sync_pty_sizes();
-            self.set_message("Terminal opened", MessageType::Info);
+        }
+    }
+
+    /// Handle a click on the bottom panel tab bar.
+    fn handle_bottom_panel_tab_click(&mut self, col: u16, rect: crate::layout::Rect) {
+        let rel_col = col.saturating_sub(rect.x) as usize;
+
+        // Compute tab widths the same way render_bottom_panel_tab_bar does.
+        let term_w = "  TERMINAL  ".len(); // 12
+
+        // DIAGNOSTICS tab width (base label + optional counts badge)
+        let (de, dw) = self.active_buffer_diag_counts();
+        let diag_w = if de > 0 || dw > 0 {
+            format!("  DIAGNOSTICS E:{} W:{}  ", de, dw).len()
+        } else {
+            "  DIAGNOSTICS  ".len()
+        };
+
+        if rel_col < term_w {
+            // Click on TERMINAL tab
+            self.bottom_tab = BottomTab::Terminal;
+            self.problem_panel.focused = false;
+            if let Some(pane_id) = self.terminal_panel_pane {
+                self.active_pane = pane_id;
+            }
+        } else if rel_col < term_w + diag_w {
+            // Click on DIAGNOSTICS tab
+            self.bottom_tab = BottomTab::Diagnostics;
+            self.problem_panel.focused = false;
+            if let Some(pane_id) = self.terminal_panel_pane {
+                self.active_pane = pane_id;
+            }
+        } else {
+            // Click on PROBLEMS tab
+            self.bottom_tab = BottomTab::Problems;
+            self.problem_panel.focused = true;
+            self.problem_panel.visible = true;
+            if let Some(pane_id) = self.terminal_panel_pane {
+                self.active_pane = pane_id;
+            }
+            if self.problem_panel.items.is_empty() {
+                self.auto_cargo_check_if_rust();
+            }
         }
     }
 
@@ -1878,8 +2442,53 @@ impl Editor {
             }
         }
 
-        // When problem panel is focused, route navigation keys to it
-        if self.problem_panel.focused && self.problem_panel.visible {
+        // When diagnostics panel is active, route navigation keys to it
+        if self.terminal_panel_pane == Some(self.active_pane)
+            && self.bottom_tab == BottomTab::Diagnostics
+        {
+            if let Event::Key(ref ke) = event {
+                match &ke.key {
+                    Key::Up => {
+                        if self.diag_panel_selected > 0 {
+                            self.diag_panel_selected -= 1;
+                        }
+                        return;
+                    }
+                    Key::Down => {
+                        let count = self.active_buffer_lsp_items().len();
+                        if self.diag_panel_selected + 1 < count {
+                            self.diag_panel_selected += 1;
+                        }
+                        return;
+                    }
+                    Key::Enter => {
+                        self.jump_to_diagnostic_item();
+                        return;
+                    }
+                    Key::Escape => {
+                        self.close_bottom_panel();
+                        self.ensure_editor_pane();
+                        return;
+                    }
+                    _ => {
+                        // Allow F6/ToggleDiagnosticsPanel and Ctrl+T/ToggleTerminal to fall through
+                        let action = self.config.keybindings.lookup(ke);
+                        if action != Some(EditorAction::ToggleDiagnosticsPanel)
+                            && action != Some(EditorAction::ToggleTerminal)
+                            && action != Some(EditorAction::ToggleProblemPanel)
+                        {
+                            return; // Consume other keys silently
+                        }
+                    }
+                }
+            }
+        }
+
+        // When problem panel is focused (in bottom panel), route navigation keys to it
+        if self.problem_panel.focused
+            && self.terminal_panel_pane == Some(self.active_pane)
+            && self.bottom_tab == BottomTab::Problems
+        {
             if let Event::Key(ref ke) = event {
                 match &ke.key {
                     Key::Up => {
@@ -1891,18 +2500,35 @@ impl Editor {
                         return;
                     }
                     Key::Enter => {
-                        self.jump_to_problem();
+                        // On a header row: toggle collapse. On an item: jump.
+                        use crate::problem_panel::{RowKind, BUILD_GROUP_KEY, CARGO_FILE_PREFIX};
+                        let row = self.problem_panel.get_display_row(self.problem_panel.selected);
+                        match row {
+                            Some(RowKind::CargoSectionHeader) => {
+                                self.problem_panel.toggle_group(BUILD_GROUP_KEY);
+                            }
+                            Some(RowKind::CargoFileHeader(f)) => {
+                                let key = format!("{}{}", CARGO_FILE_PREFIX, f);
+                                self.problem_panel.toggle_group(&key);
+                            }
+                            Some(RowKind::Item(_)) | None => {
+                                self.jump_to_problem();
+                            }
+                        }
                         return;
                     }
                     Key::Escape => {
-                        self.problem_panel.focused = false;
-                        self.problem_panel.visible = false;
+                        // Close the panel entirely and return focus to the editor.
+                        self.close_bottom_panel();
+                        self.ensure_editor_pane();
                         return;
                     }
                     _ => {
-                        // Allow F6 (toggle) to fall through to execute_action
-                        if self.config.keybindings.lookup(ke)
-                            != Some(EditorAction::ToggleProblemPanel)
+                        // Allow F7/F6/Ctrl+T (toggle) to fall through to execute_action
+                        let action = self.config.keybindings.lookup(ke);
+                        if action != Some(EditorAction::ToggleProblemPanel)
+                            && action != Some(EditorAction::ToggleDiagnosticsPanel)
+                            && action != Some(EditorAction::ToggleTerminal)
                         {
                             return; // Consume other keys silently
                         }
@@ -1972,10 +2598,22 @@ impl Editor {
                 Event::Mouse(me) => {
                     // Left-click outside the terminal pane switches focus
                     if me.button == crate::input::MouseButton::Left && me.pressed && !me.motion {
-                        // Tab bar click
+                        // Top tab bar click
                         if (me.row as usize) < self.tab_bar_height {
                             self.handle_mouse(me);
                             return;
+                        }
+                        // Bottom panel tab bar click
+                        if let Some(bp_id) = self.terminal_panel_pane {
+                            if let Some(rect) = self.layout.pane_rect(bp_id) {
+                                if me.row == rect.y
+                                    && me.col >= rect.x
+                                    && me.col < rect.x + rect.width
+                                {
+                                    self.handle_bottom_panel_tab_click(me.col, rect);
+                                    return;
+                                }
+                            }
                         }
                         if let Some(clicked_pane) = self.pane_at_mouse(me.col, me.row)
                             && clicked_pane != self.active_pane
@@ -2002,7 +2640,15 @@ impl Editor {
                             }
                             crate::input::MouseButton::Left => {
                                 if let Some(rect) = self.layout.pane_rect(self.active_pane) {
-                                    let local_row = me.row.saturating_sub(rect.y);
+                                    // Offset by 1 row for the tab bar in the bottom panel
+                                    let tab_bar_offset =
+                                        if self.terminal_panel_pane == Some(self.active_pane) {
+                                            1u16
+                                        } else {
+                                            0u16
+                                        };
+                                    let local_row =
+                                        me.row.saturating_sub(rect.y + tab_bar_offset);
                                     let local_col = me.col.saturating_sub(rect.x);
                                     if me.pressed && !me.motion {
                                         // Start new selection on click
@@ -2311,6 +2957,7 @@ impl Editor {
             EditorAction::TaskTest => self.run_task(tasks::TaskKind::Test),
             EditorAction::TaskStop => self.stop_task(),
             EditorAction::ToggleProblemPanel => self.toggle_problem_panel(),
+            EditorAction::ToggleDiagnosticsPanel => self.toggle_diagnostics_panel(),
             EditorAction::SendToRepl => self.send_to_repl(),
             EditorAction::ScrollLineUp => {
                 let buf_idx = self.active_buffer_index();
@@ -2325,6 +2972,7 @@ impl Editor {
             }
             EditorAction::CopyFilePath => self.copy_file_path(),
             EditorAction::CopyFilePathRelative => self.copy_file_path_relative(),
+            EditorAction::FormatDocument => self.format_document(),
         }
     }
 
@@ -2669,6 +3317,8 @@ impl Editor {
         // Track if we're closing the terminal panel
         if self.terminal_panel_pane == Some(self.active_pane) {
             self.terminal_panel_pane = None;
+            self.problem_panel.focused = false;
+            self.problem_panel.visible = false;
         }
         // Find a neighbor to move focus to before closing
         let next = self

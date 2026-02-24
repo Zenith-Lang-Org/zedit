@@ -83,7 +83,7 @@ fn handle_ext_command(args: &[String]) {
         "install" => {
             let path_str = match args.get(1) {
                 Some(p) => p,
-                None => {
+                _none => {
                     eprintln!("Usage: zedit --ext install <path>");
                     std::process::exit(1);
                 }
@@ -100,7 +100,7 @@ fn handle_ext_command(args: &[String]) {
         "remove" => {
             let id = match args.get(1) {
                 Some(id) => id,
-                None => {
+                _none => {
                     eprintln!("Usage: zedit --ext remove <id>");
                     std::process::exit(1);
                 }
@@ -116,14 +116,14 @@ fn handle_ext_command(args: &[String]) {
         "info" => {
             let id = match args.get(1) {
                 Some(id) => id,
-                None => {
+                _none => {
                     eprintln!("Usage: zedit --ext info <id>");
                     std::process::exit(1);
                 }
             };
             let base = match extension::extension_base_dir() {
                 Some(b) => b,
-                None => {
+                _none => {
                     eprintln!("Error: cannot determine extensions directory");
                     std::process::exit(1);
                 }
@@ -136,7 +136,7 @@ fn handle_ext_command(args: &[String]) {
                     println!("Version:  {}", ext.version);
                     println!("Dir:      {}", ext.dir.display());
                     if ext.languages.is_empty() {
-                        println!("Languages: (none)");
+                        println!("Languages: (_none)");
                     } else {
                         let names: Vec<&str> =
                             ext.languages.iter().map(|l| l.name.as_str()).collect();
@@ -191,7 +191,7 @@ fn main() {
             "--import" => {
                 let arg = match args.get(2) {
                     Some(a) => a,
-                    None => {
+                    _none => {
                         eprintln!("Usage: zedit --import <path|url|publisher.name>");
                         std::process::exit(1);
                     }
@@ -235,7 +235,7 @@ fn main() {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }),
-            None => {
+            _none => {
                 // No session, but check for orphaned untitled swap files
                 let orphans = swap::scan_orphaned_untitled();
                 if !orphans.is_empty() {

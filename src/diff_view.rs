@@ -38,6 +38,7 @@ pub struct AlignRow {
 #[derive(Clone, Debug)]
 pub struct Hunk {
     pub row_start: usize,
+    #[allow(dead_code)]
     pub row_count: usize,
 }
 
@@ -47,51 +48,9 @@ pub struct Hunk {
 
 pub struct DiffBuffer {
     pub lines: Vec<String>,
+    #[allow(dead_code)]
     pub path: Option<std::path::PathBuf>,
     pub label: String,
-}
-
-// ---------------------------------------------------------------------------
-// Inline diff — character-level highlighting for Modified rows
-// ---------------------------------------------------------------------------
-
-/// Returns a vector of (char, is_changed) for the right line vs the left.
-/// Uses LCS on characters, capped at 200 chars to stay fast.
-pub fn inline_diff(left: &str, right: &str) -> Vec<(char, bool)> {
-    let lchars: Vec<char> = left.chars().take(200).collect();
-    let rchars: Vec<char> = right.chars().take(200).collect();
-    let n = lchars.len();
-    let m = rchars.len();
-
-    // LCS DP table
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if lchars[i] == rchars[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-
-    // Backtrack to mark changed characters in right
-    let mut result = Vec::with_capacity(m);
-    let mut i = 0;
-    let mut j = 0;
-    while j < m {
-        if i < n && lchars[i] == rchars[j] {
-            result.push((rchars[j], false));
-            i += 1;
-            j += 1;
-        } else if i < n && (j >= m || dp[i + 1][j] >= dp[i][j + 1]) {
-            i += 1;
-        } else {
-            result.push((rchars[j], true));
-            j += 1;
-        }
-    }
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -263,28 +222,6 @@ impl DiffView {
         Some(Self::build(left, right))
     }
 
-    /// Open a diff between two on-disk files.
-    pub fn open_files(
-        left_path: &Path,
-        left_label: &str,
-        right_path: &Path,
-        right_label: &str,
-    ) -> Option<Self> {
-        let left_text = std::fs::read_to_string(left_path).ok()?;
-        let right_text = std::fs::read_to_string(right_path).ok()?;
-        let left = DiffBuffer {
-            lines: left_text.lines().map(|l| l.to_string()).collect(),
-            path: Some(left_path.to_path_buf()),
-            label: left_label.to_string(),
-        };
-        let right = DiffBuffer {
-            lines: right_text.lines().map(|l| l.to_string()).collect(),
-            path: Some(right_path.to_path_buf()),
-            label: right_label.to_string(),
-        };
-        Some(Self::build(left, right))
-    }
-
     fn build(left: DiffBuffer, right: DiffBuffer) -> Self {
         let rows = compute_edits(&left.lines, &right.lines);
         let hunks = Self::compute_hunks(&rows);
@@ -361,22 +298,6 @@ impl DiffView {
     pub fn row_count(&self) -> usize {
         self.rows.len()
     }
-
-    /// Return a line from the left buffer, or empty string.
-    pub fn left_line(&self, row_idx: usize) -> &str {
-        match self.rows.get(row_idx).and_then(|r| r.left) {
-            Some(li) => self.left.lines.get(li).map(|s| s.as_str()).unwrap_or(""),
-            None => "",
-        }
-    }
-
-    /// Return a line from the right buffer, or empty string.
-    pub fn right_line(&self, row_idx: usize) -> &str {
-        match self.rows.get(row_idx).and_then(|r| r.right) {
-            Some(ri) => self.right.lines.get(ri).map(|s| s.as_str()).unwrap_or(""),
-            None => "",
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,27 +307,6 @@ impl DiffView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_inline_diff_identical() {
-        let r = inline_diff("hello", "hello");
-        assert!(r.iter().all(|(_, changed)| !changed));
-    }
-
-    #[test]
-    fn test_inline_diff_insertion() {
-        let r = inline_diff("helo", "hello");
-        let changed: Vec<char> = r.iter().filter(|(_, c)| *c).map(|(ch, _)| *ch).collect();
-        assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0], 'l');
-    }
-
-    #[test]
-    fn test_inline_diff_empty_left() {
-        let r = inline_diff("", "abc");
-        assert_eq!(r.len(), 3);
-        assert!(r.iter().all(|(_, c)| *c));
-    }
 
     #[test]
     fn test_compute_edits_identical() {

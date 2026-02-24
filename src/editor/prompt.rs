@@ -192,6 +192,27 @@ impl Editor {
         match prompt.action {
             PromptAction::OpenFile => {
                 let path = Path::new(&prompt.input);
+                // Reuse an already-open buffer for the same file (dedup via canonicalize).
+                let canonical =
+                    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                if let Some(i) = self.buffers.iter().position(|bs| {
+                    bs.buffer
+                        .file_path()
+                        .map(|bp| {
+                            std::fs::canonicalize(bp).unwrap_or_else(|_| bp.to_path_buf())
+                                == canonical
+                        })
+                        .unwrap_or(false)
+                }) {
+                    self.ensure_editor_pane();
+                    self.layout.set_pane_buffer(self.active_pane, i);
+                    self.active_buffer = i;
+                    self.set_message(
+                        &format!("Switched to: {}", shorten_path(path)),
+                        MessageType::Info,
+                    );
+                    return;
+                }
                 match BufferState::from_file(
                     path,
                     self.config.line_numbers,

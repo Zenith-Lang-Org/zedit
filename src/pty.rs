@@ -23,6 +23,7 @@ const TIOCSCTTY: u64 = 0x540E;
 const WNOHANG: i32 = 1;
 
 pub const POLLIN: i16 = 0x001;
+#[allow(dead_code)]
 pub const POLLHUP: i16 = 0x010;
 
 const STDIN_FILENO: i32 = 0;

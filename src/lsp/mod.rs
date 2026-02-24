@@ -99,6 +99,29 @@ impl LspManager {
             .map(|(_, c)| c)
     }
 
+    /// Sum of all clients' diagnostics_gen counters.
+    /// Increments whenever any file's diagnostics change.
+    /// Use this to skip rebuilding the problem panel on frames with no change.
+    pub fn diagnostics_generation(&self) -> u64 {
+        self.clients.iter().map(|(_, c)| c.diagnostics_gen).sum()
+    }
+
+    /// Snapshot every diagnostic stored across ALL clients and ALL files as
+    /// owned data. Returns `(uri, diagnostics)` pairs for every file the LSP
+    /// server has ever sent a `publishDiagnostics` notification for — including
+    /// files that are NOT currently open in the editor.
+    pub fn all_diagnostics_owned(&self) -> Vec<(String, Vec<protocol::Diagnostic>)> {
+        let mut result = Vec::new();
+        for (_, c) in &self.clients {
+            for (uri, diags) in &c.diagnostics {
+                if !diags.is_empty() {
+                    result.push((uri.clone(), diags.clone()));
+                }
+            }
+        }
+        result
+    }
+
     /// Collect all stdout fds from alive clients for poll integration.
     pub fn stdout_fds(&self) -> Vec<i32> {
         self.clients
@@ -137,16 +160,6 @@ impl LspManager {
         self.clients.clear();
     }
 
-    /// Reap dead clients.
-    pub fn reap_dead(&mut self) {
-        self.clients.retain(|(_, c)| c.is_alive());
-    }
-
-    /// Check if any LSP server is configured.
-    pub fn has_config(&self) -> bool {
-        !self.config.is_empty()
-    }
-
     /// Send a completion request for the given language.
     pub fn request_completion(&mut self, lang: &str, uri: &str, line: u32, character: u32) {
         if let Some(client) = self.client_mut(lang) {
@@ -165,13 +178,6 @@ impl LspManager {
     pub fn request_definition(&mut self, lang: &str, uri: &str, line: u32, character: u32) {
         if let Some(client) = self.client_mut(lang) {
             client.request_definition(uri, line, character);
-        }
-    }
-
-    /// Send a semantic tokens request for the given language.
-    pub fn request_semantic_tokens(&mut self, lang: &str, uri: &str) {
-        if let Some(client) = self.client_mut(lang) {
-            client.request_semantic_tokens(uri);
         }
     }
 

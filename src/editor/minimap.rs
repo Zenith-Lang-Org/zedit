@@ -80,6 +80,7 @@ pub(super) struct MinimapCell {
 
 pub(super) struct MinimapLine {
     pub cells: Vec<MinimapCell>,
+    #[allow(dead_code)]
     pub in_viewport: bool,
 }
 

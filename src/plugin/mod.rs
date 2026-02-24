@@ -2,6 +2,8 @@
 // Plugin system — discovery, lifecycle, IPC, command palette integration
 // ---------------------------------------------------------------------------
 
+#![allow(dead_code)]
+
 mod api;
 mod bridge;
 

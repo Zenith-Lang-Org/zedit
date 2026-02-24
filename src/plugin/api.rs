@@ -2,6 +2,8 @@
 // Plugin API — types for editor ↔ plugin IPC messages
 // ---------------------------------------------------------------------------
 
+#![allow(dead_code)]
+
 use crate::syntax::json_parser::JsonValue;
 
 // ---------------------------------------------------------------------------

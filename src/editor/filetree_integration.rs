@@ -29,11 +29,22 @@ impl Editor {
     /// Detect the project root by walking up from the first open file's directory
     /// (or cwd) looking for VCS/build markers.
     fn detect_project_root(&self) -> PathBuf {
-        // Start from the first buffer's file path, or cwd
+        // Start from the first buffer's file path, or cwd.
+        // Always resolve to an absolute path before walking so that relative
+        // paths (e.g. "src/main.rs") don't produce an empty parent component
+        // that makes FileTree::new() fail to scan the root directory.
         let start = self
             .buffers
             .iter()
-            .find_map(|bs| bs.buffer.file_path().map(|p| p.to_path_buf()))
+            .find_map(|bs| bs.buffer.file_path().map(|p| {
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(p))
+                        .unwrap_or_else(|_| p.to_path_buf())
+                }
+            }))
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));

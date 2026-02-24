@@ -79,6 +79,7 @@ pub struct PaneInfo {
 
 impl PaneInfo {
     /// Convenience: get buffer_index if this pane holds a buffer.
+    #[allow(dead_code)]
     pub fn buffer_index(&self) -> Option<usize> {
         match self.content {
             PaneContent::Buffer(idx) => Some(idx),
@@ -157,6 +158,7 @@ impl LayoutState {
     }
 
     /// Set the content for a pane.
+    #[allow(dead_code)]
     pub fn set_pane_content(&mut self, id: PaneId, content: PaneContent) {
         set_content_in_node(&mut self.root, id, content);
         if let Some(info) = self.resolved.iter_mut().find(|p| p.id == id) {
@@ -249,6 +251,7 @@ impl LayoutState {
     }
 
     /// Collect all pane ids that reference the given buffer index.
+    #[allow(dead_code)]
     pub fn panes_with_buffer(&self, buffer_index: usize) -> Vec<PaneId> {
         let mut result = Vec::new();
         collect_panes_with_buffer(&self.root, buffer_index, &mut result);
@@ -261,6 +264,7 @@ impl LayoutState {
     }
 
     /// Get buffer index for a pane, if it's a buffer pane.
+    #[allow(dead_code)]
     pub fn pane_buffer_index(&self, id: PaneId) -> Option<usize> {
         self.pane_buffer(id)
     }
@@ -453,6 +457,7 @@ fn set_content_in_node(node: &mut LayoutNode, target: PaneId, new_content: PaneC
     }
 }
 
+#[allow(dead_code)]
 fn collect_panes_with_buffer(node: &LayoutNode, buf_idx: usize, out: &mut Vec<PaneId>) {
     match node {
         LayoutNode::Leaf {

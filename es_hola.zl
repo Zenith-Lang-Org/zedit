@@ -1,0 +1,5 @@
+.:ES:.
+MOSTRAR 'Hola, Mundo!', NUEVA-LINEA
+
+.:EN:.
+DISPLAY 'Hello, World!', NEWLINE

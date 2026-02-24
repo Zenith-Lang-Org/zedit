@@ -3,6 +3,28 @@ use std::path::{Path, PathBuf};
 
 const INITIAL_GAP: usize = 1024;
 
+/// Normalize `path` for storage: if the path is absolute and is located under
+/// the current working directory, strip the CWD prefix so it is stored as a
+/// relative path (e.g. `src/main.rs` instead of `/home/user/project/src/main.rs`).
+///
+/// This ensures that buffers opened from the shell (absolute paths), from the
+/// file-picker prompt, from the file-tree, and from the Problems/Diagnostics
+/// panels all use the same canonical relative path, preventing duplicate buffers
+/// for the same file.
+///
+/// Paths that are already relative, or that point outside the CWD, are returned
+/// unchanged.
+fn normalize_to_relative(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(rel) = path.strip_prefix(&cwd) {
+                return rel.to_path_buf();
+            }
+        }
+    }
+    path.to_path_buf()
+}
+
 pub struct Buffer {
     data: Vec<u8>,
     gap_start: usize,
@@ -39,7 +61,7 @@ impl Buffer {
             gap_end: content_len + gap_size,
             lines: Vec::new(),
             modified: false,
-            file_path: Some(path.to_path_buf()),
+            file_path: Some(normalize_to_relative(path)),
         };
         buf.rebuild_lines();
         Ok(buf)
@@ -55,7 +77,7 @@ impl Buffer {
 
     pub fn save_to(&mut self, path: &Path) -> Result<(), String> {
         fs::write(path, self.text_bytes()).map_err(|e| format!("Failed to write file: {}", e))?;
-        self.file_path = Some(path.to_path_buf());
+        self.file_path = Some(normalize_to_relative(path));
         self.modified = false;
         Ok(())
     }

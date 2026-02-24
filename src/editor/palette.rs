@@ -399,51 +399,83 @@ impl Palette {
 
 /// Case-insensitive fuzzy subsequence match with scoring.
 /// Returns (score, matched_positions) or None if no match.
+///
+/// Two-phase algorithm:
+///   Phase A — greedy forward scan: confirms the query is matchable at all.
+///   Phase B — rightward clustering: pushes each match position as far right
+///              as possible to maximise consecutive runs and word-boundary hits.
 pub fn fuzzy_score(query: &str, target: &str) -> Option<(i32, Vec<usize>)> {
-    let query_lower: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
-    let target_chars: Vec<char> = target.chars().collect();
-    let target_lower: Vec<char> = target.chars().flat_map(|c| c.to_lowercase()).collect();
+    let qc: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
+    let tc: Vec<char> = target.chars().collect();
+    let tc_lower: Vec<char> = target.chars().flat_map(|c| c.to_lowercase()).collect();
 
-    if query_lower.is_empty() {
+    if qc.is_empty() {
         return Some((0, Vec::new()));
     }
-    if query_lower.len() > target_lower.len() {
+    if qc.len() > tc_lower.len() {
         return None;
     }
 
-    // Find best match positions using greedy forward matching
-    let mut positions = Vec::with_capacity(query_lower.len());
+    // Phase A: greedy forward — bail out early if no full match exists.
+    let mut positions = Vec::with_capacity(qc.len());
     let mut qi = 0;
-    for (ti, &tc) in target_lower.iter().enumerate() {
-        if qi < query_lower.len() && tc == query_lower[qi] {
+    for (ti, &ch) in tc_lower.iter().enumerate() {
+        if qi < qc.len() && ch == qc[qi] {
             positions.push(ti);
             qi += 1;
         }
     }
-
-    if qi < query_lower.len() {
-        return None; // not all query chars matched
+    if positions.len() < qc.len() {
+        return None;
     }
 
-    // Score the match
+    // Phase B: push each match rightward to cluster consecutive runs.
+    // Iterating in reverse ensures positions[i+1] is already finalised
+    // when we process positions[i].
+    let n = positions.len();
+    for i in (0..n).rev() {
+        let lower_bound = if i == 0 { 0 } else { positions[i - 1] + 1 };
+        let upper_bound = if i + 1 < n {
+            positions[i + 1].saturating_sub(1)
+        } else {
+            tc_lower.len().saturating_sub(1)
+        };
+
+        let mut best = positions[i];
+        for ti in (lower_bound..=upper_bound).rev() {
+            if tc_lower[ti] == qc[i] {
+                let consec_next = i + 1 < n && ti + 1 == positions[i + 1];
+                let consec_prev = i > 0 && positions[i - 1] + 1 == ti;
+                if consec_next || consec_prev {
+                    best = ti;
+                    break;
+                }
+            }
+        }
+        positions[i] = best;
+    }
+
+    // Scoring
     let mut score: i32 = 0;
-    for (match_idx, &pos) in positions.iter().enumerate() {
+    for (mi, &pos) in positions.iter().enumerate() {
         // Base: +1 per matched char
         score += 1;
 
-        // Consecutive bonus: +5 if previous match was at pos-1
-        if match_idx > 0 && positions[match_idx - 1] + 1 == pos {
+        // Consecutive bonus: +5 if previous match was immediately before this one
+        if mi > 0 && positions[mi - 1] + 1 == pos {
             score += 5;
         }
 
-        // Word boundary bonus: +10 if at start or after space/colon/underscore
-        if pos == 0 || matches!(target_chars[pos - 1], ' ' | ':' | '_' | '-') {
+        // Word boundary bonus: +10 if at start or after a delimiter
+        let at_boundary = pos == 0
+            || matches!(tc[pos - 1], ' ' | ':' | '_' | '-' | '/' | '.');
+        if at_boundary {
             score += 10;
         }
 
-        // Penalty for distance from start
-        if match_idx == 0 {
-            score -= pos as i32;
+        // Mild prefix penalty: discourage matches that start far into the target
+        if mi == 0 {
+            score -= pos as i32 / 2;
         }
     }
 
@@ -680,6 +712,38 @@ mod tests {
         let score_consec = fuzzy_score("sav", "File: Save").unwrap().0;
         let score_scatter = fuzzy_score("fae", "File: Save").unwrap().0;
         assert!(score_consec > score_scatter);
+    }
+
+    #[test]
+    fn test_fuzzy_phase_b_clusters_consecutive() {
+        // "ab" in "xaabb": Phase A finds [1,3], Phase B should pull a to index 2
+        // giving consecutive [2,3] which scores higher.
+        let (score_new, positions) = fuzzy_score("ab", "xaabb").unwrap();
+        assert_eq!(positions, vec![2, 3], "Phase B should cluster to consecutive positions");
+        // Verify score is higher than what Phase A alone would give ([1,3])
+        // [1,3]: base 2, no consecutive bonus = 2;  [2,3]: base 2 + consecutive 5 = 7
+        assert!(score_new > 2, "clustered match should outscore scattered match");
+    }
+
+    #[test]
+    fn test_fuzzy_slash_dot_word_boundary() {
+        // '/' and '.' should trigger the word boundary bonus
+        let score_slash = fuzzy_score("m", "src/main.rs").unwrap().0;
+        let score_dot   = fuzzy_score("r", "main.rs").unwrap().0;
+        // 'm' after '/' and 'r' after '.' are both at boundaries
+        let score_mid   = fuzzy_score("a", "main.rs").unwrap().0;
+        assert!(score_slash > score_mid, "'/' should confer boundary bonus");
+        assert!(score_dot   > score_mid, "'.' should confer boundary bonus");
+    }
+
+    #[test]
+    fn test_fuzzy_prefix_penalty_halved() {
+        // With the halved penalty (pos/2), "s" matching at index 6 costs 3, not 6.
+        // The word boundary bonus (+10) should still dominate.
+        let (score, positions) = fuzzy_score("s", "File: Save").unwrap();
+        assert_eq!(positions, vec![6]);
+        // score = 1 (base) + 10 (boundary) - 3 (penalty 6/2) = 8
+        assert_eq!(score, 8);
     }
 
     #[test]

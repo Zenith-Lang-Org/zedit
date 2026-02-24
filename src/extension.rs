@@ -16,6 +16,7 @@ pub struct ExtLspConfig {
 
 pub struct TaskDef {
     pub cmd: String,
+    #[allow(dead_code)]
     pub cwd: String, // template: {workspace}, {dir}, {file}, {stem}
 }
 

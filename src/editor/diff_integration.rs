@@ -33,7 +33,7 @@ impl Editor {
                     self.set_message("Diff: no changes vs HEAD", MessageType::Info);
                 } else {
                     let msg = format!(
-                        "Diff: {} hunk(s) — F8/Shift+F8 navigate, Esc close",
+                        "Diff: {} hunk(s) — n/N navigate hunks, Esc close",
                         hunk_count
                     );
                     self.set_message(&msg, MessageType::Info);
@@ -94,6 +94,26 @@ impl Editor {
             Key::PageDown => {
                 if let Some(ref mut dv) = self.diff_view {
                     dv.scroll_down(20);
+                }
+            }
+            Key::Home => {
+                if let Some(ref mut dv) = self.diff_view {
+                    dv.scroll = 0;
+                }
+            }
+            Key::End => {
+                if let Some(ref mut dv) = self.diff_view {
+                    dv.scroll = dv.rows.len().saturating_sub(1);
+                }
+            }
+            Key::Char('n') => {
+                if let Some(ref mut dv) = self.diff_view {
+                    dv.next_hunk();
+                }
+            }
+            Key::Char('N') => {
+                if let Some(ref mut dv) = self.diff_view {
+                    dv.prev_hunk();
                 }
             }
             _ => {}

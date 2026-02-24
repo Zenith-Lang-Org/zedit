@@ -153,20 +153,24 @@ impl Editor {
         let screen_width = self.screen.width();
         let screen_height = self.screen.height();
 
-        // Render tab bar at row 0
-        self.render_tab_bar(screen_width);
+        // Sidebar occupies its column range starting at row 0 (title on row 0, tree below).
+        // Tab bar fills only the area to the right of the sidebar on row 0.
+        let sidebar_w = self.sidebar_width() as usize;
 
-        // Render file tree sidebar if visible
+        // Render file tree sidebar first so its row-0 title is drawn before the tab bar
         if let Some(ref mut ft) = self.filetree {
-            let sidebar_height =
-                screen_height.saturating_sub(self.status_height + self.tab_bar_height);
+            // Full height minus status bar; sidebar title sits on row 0.
+            let sidebar_height = screen_height.saturating_sub(self.status_height);
             ft.render(
                 &mut self.screen,
                 sidebar_height,
                 self.filetree_focused,
-                self.tab_bar_height,
+                0, // y_offset = 0: title on row 0, tree content from row 1
             );
         }
+
+        // Render tab bar starting after the sidebar (row 0, cols sidebar_w..screen_width)
+        self.render_tab_bar(sidebar_w, screen_width);
 
         // Render each pane
         let panes: Vec<_> = self.layout.panes().to_vec();
@@ -188,7 +192,29 @@ impl Editor {
                     self.render_editor_pane(pane_info.rect, bi, pane_info.id);
                 }
                 crate::layout::PaneContent::Terminal(ti) => {
-                    self.render_terminal_pane(pane_info.rect, ti, pane_info.id);
+                    if self.terminal_panel_pane == Some(pane_info.id) {
+                        // Bottom panel: draw tab bar, then route content by active tab
+                        self.render_bottom_panel_tab_bar(pane_info.rect);
+                        let content_rect = crate::layout::Rect {
+                            x: pane_info.rect.x,
+                            y: pane_info.rect.y + 1,
+                            width: pane_info.rect.width,
+                            height: pane_info.rect.height.saturating_sub(1),
+                        };
+                        match self.bottom_tab {
+                            crate::editor::BottomTab::Terminal => {
+                                self.render_terminal_pane(content_rect, ti, pane_info.id);
+                            }
+                            crate::editor::BottomTab::Diagnostics => {
+                                self.render_diagnostics_in_pane(content_rect);
+                            }
+                            crate::editor::BottomTab::Problems => {
+                                self.render_problems_in_pane(content_rect);
+                            }
+                        }
+                    } else {
+                        self.render_terminal_pane(pane_info.rect, ti, pane_info.id);
+                    }
                 }
             }
         }
@@ -371,11 +397,6 @@ impl Editor {
             self.render_diff_view();
         }
 
-        // Problem panel overlay (bottom panel)
-        if self.problem_panel.visible {
-            self.render_problem_panel();
-        }
-
         // Help overlay (drawn on top of everything)
         if self.help_visible {
             self.render_help();
@@ -418,26 +439,37 @@ impl Editor {
         } else if let Some(crate::layout::PaneContent::Terminal(ti)) =
             self.layout.pane_content(self.active_pane)
         {
-            // Terminal pane cursor: offset by however many scrollback lines are
-            // shown above the live buffer. If the cursor would land below the
-            // bottom of the pane (scrolled too far up) we simply don't move it.
-            if let Some(rect) = self.layout.pane_rect(self.active_pane)
-                && ti < self.vterms.len()
-                && self.vterms[ti].cursor_visible()
+            // Bottom panel in Problems or Diagnostics tab: don't show terminal cursor
+            if self.terminal_panel_pane == Some(self.active_pane)
+                && (self.bottom_tab == crate::editor::BottomTab::Problems
+                    || self.bottom_tab == crate::editor::BottomTab::Diagnostics)
             {
-                let pane_h = rect.height as usize;
-                let scroll_off = self.vterms[ti].scroll_offset();
-                let sb_lines = scroll_off
-                    .min(self.vterms[ti].scrollback().len())
-                    .min(pane_h);
-                let (vt_row, vt_col) = self.vterms[ti].cursor_pos();
-                let screen_row = rect.y as usize + sb_lines + vt_row as usize;
-                if screen_row < rect.y as usize + pane_h {
-                    let screen_col = rect.x as usize + vt_col as usize;
-                    terminal::move_cursor((screen_row + 1) as u16, (screen_col + 1) as u16);
+                // No cursor for Problems/Diagnostics tab
+            } else {
+                // Terminal pane cursor: offset by however many scrollback lines are
+                // shown above the live buffer. If the cursor would land below the
+                // bottom of the pane (scrolled too far up) we simply don't move it.
+                if let Some(rect) = self.layout.pane_rect(self.active_pane)
+                    && ti < self.vterms.len()
+                    && self.vterms[ti].cursor_visible()
+                {
+                    let pane_h = rect.height as usize;
+                    let scroll_off = self.vterms[ti].scroll_offset();
+                    let sb_lines = scroll_off
+                        .min(self.vterms[ti].scrollback().len())
+                        .min(pane_h);
+                    let (vt_row, vt_col) = self.vterms[ti].cursor_pos();
+                    // Add 1 row offset for the tab bar when this is the bottom panel
+                    let tab_bar_offset =
+                        if self.terminal_panel_pane == Some(self.active_pane) { 1usize } else { 0 };
+                    let screen_row = rect.y as usize + tab_bar_offset + sb_lines + vt_row as usize;
+                    if screen_row < rect.y as usize + pane_h {
+                        let screen_col = rect.x as usize + vt_col as usize;
+                        terminal::move_cursor((screen_row + 1) as u16, (screen_col + 1) as u16);
+                    }
+                    // If screen_row >= pane bottom the cursor is off-screen (viewing
+                    // old scrollback). Don't move the hardware cursor there.
                 }
-                // If screen_row >= pane bottom the cursor is off-screen (viewing
-                // old scrollback). Don't move the hardware cursor there.
             }
         } else if let Some(rect) = self.layout.pane_rect(self.active_pane) {
             let b = self.buf();
@@ -492,7 +524,7 @@ impl Editor {
     }
 
     /// Render the tab bar at row 0 with scroll arrow support.
-    fn render_tab_bar(&mut self, screen_width: usize) {
+    fn render_tab_bar(&mut self, x_offset: usize, screen_width: usize) {
         let tab_bg = Color::Color256(236);
         let active_fg = Color::Ansi(0); // black
         let active_bg = Color::Ansi(7); // white
@@ -500,8 +532,8 @@ impl Editor {
         let arrow_fg = Color::Ansi(6); // cyan for arrows
         let separator = " \u{2502} "; // " │ "
 
-        // Fill row 0 with background
-        for col in 0..screen_width {
+        // Fill only the area to the right of the sidebar on row 0
+        for col in x_offset..screen_width {
             self.screen
                 .put_char(0, col, ' ', inactive_fg, tab_bg, false);
         }
@@ -533,25 +565,23 @@ impl Editor {
             self.tab_scroll_offset = buf_count.saturating_sub(1);
         }
 
-        // Try rendering; if active tab doesn't fit, increment offset and retry
+        // Try rendering; if active tab doesn't fit, increment offset and retry.
+        // col is an absolute screen column; all checks compare against screen_width.
         loop {
             let has_left_arrow = self.tab_scroll_offset > 0;
             let left_arrow_width: usize = if has_left_arrow { 3 } else { 0 };
 
-            let mut col = left_arrow_width;
+            let mut col = x_offset + left_arrow_width;
             let mut active_rendered = false;
 
-            // Check if tabs starting from tab_scroll_offset fit the active tab
             for (i, &(_, tw, _)) in tab_labels.iter().enumerate().skip(self.tab_scroll_offset) {
                 if i > self.tab_scroll_offset {
                     col += 3; // separator
                 }
-                // Reserve space for right arrow if there are more tabs after this
                 let remaining_tabs = i + 1 < buf_count;
                 let right_reserve = if remaining_tabs { 3 } else { 0 };
 
                 if col + tw + right_reserve > screen_width && remaining_tabs {
-                    // This tab doesn't fit and there are more
                     break;
                 }
                 if col + tw > screen_width {
@@ -566,20 +596,20 @@ impl Editor {
             if active_rendered || self.tab_scroll_offset >= active_buf {
                 break;
             }
-            // Active tab wasn't rendered, scroll right
             self.tab_scroll_offset += 1;
         }
 
         let has_left_arrow = self.tab_scroll_offset > 0;
 
-        let mut col = 0;
+        // col starts at x_offset (right edge of sidebar)
+        let mut col = x_offset;
         let mut regions = Vec::new();
 
         // Render left arrow if scrolled
         if has_left_arrow {
-            self.screen.put_str(0, 0, " < ", arrow_fg, tab_bg, true);
-            regions.push((0, 3, usize::MAX)); // sentinel for left arrow
-            col = 3;
+            self.screen.put_str(0, x_offset, " < ", arrow_fg, tab_bg, true);
+            regions.push((x_offset, x_offset + 3, usize::MAX)); // sentinel for left arrow
+            col = x_offset + 3;
         }
 
         let mut has_right_arrow = false;
@@ -589,7 +619,6 @@ impl Editor {
         {
             let label_width = *label_width;
             let buf_idx = *buf_idx;
-            // Add separator between tabs
             if i > self.tab_scroll_offset {
                 if col + 3 <= screen_width {
                     self.screen
@@ -600,18 +629,15 @@ impl Editor {
                 }
             }
 
-            // Check if this tab fits; if not and there are more tabs, show right arrow
             let remaining_tabs = i + 1 < buf_count;
             if col + label_width > screen_width.saturating_sub(if remaining_tabs { 3 } else { 0 })
                 && remaining_tabs
             {
-                // Doesn't fit, render right arrow
                 has_right_arrow = true;
                 break;
             }
 
             if col + label_width > screen_width {
-                // Last tab, truncate what fits
                 let available = screen_width.saturating_sub(col);
                 if available == 0 {
                     break;
@@ -645,13 +671,12 @@ impl Editor {
         // Render right arrow if there are more tabs
         if has_right_arrow {
             let arrow_start = screen_width.saturating_sub(3);
-            // Clear any partial tab content under the arrow
             for c in arrow_start..screen_width {
                 self.screen.put_char(0, c, ' ', arrow_fg, tab_bg, false);
             }
             self.screen
                 .put_str(0, arrow_start, " > ", arrow_fg, tab_bg, true);
-            regions.push((arrow_start, screen_width, usize::MAX - 1)); // sentinel for right arrow
+            regions.push((arrow_start, screen_width, usize::MAX - 1));
         }
 
         self.tab_regions = regions;
@@ -1450,22 +1475,22 @@ impl Editor {
             "  Ctrl+/   Comment                           ",
             "                                              ",
             "  PANES               VIEW                   ",
-            "  Ctrl+\\   Horiz     Ctrl+B  File tree       ",
-            "  Ctrl+\u{21e7}\\  Vert      Ctrl+P  Palette        ",
-            "  Ctrl+\u{21e7}W  Close     Ctrl+T  Terminal       ",
-            "  Alt+\u{2190}\u{2192}\u{2191}\u{2193}  Focus     Alt+Z   Word wrap      ",
-            "  Alt+\u{21e7}\u{2190}\u{2192}  Resize    Alt+M   Minimap        ",
+            "  Ctrl+\\   Horiz     F2/Ctrl+B File tree     ",
+            "  Ctrl+\u{21e7}\\  Vert      Ctrl+P    Palette      ",
+            "  Ctrl+\u{21e7}W  Close     F5/Ctrl+T Terminal     ",
+            "  Alt+\u{2190}\u{2192}\u{2191}\u{2193}  Focus     Alt+Z     Word wrap    ",
+            "  Alt+\u{21e7}\u{2190}\u{2192}  Resize    Alt+M     Minimap      ",
             "                                              ",
-            "  LSP                 DIFF (vs HEAD)         ",
-            "  Ctrl+Spc Complete  F7      Open diff       ",
-            "  Alt+K    Hover doc F8/\u{21e7}F8  Next/Prev hunk  ",
+            "  LSP                 DIFF (Ctrl+K)          ",
+            "  Ctrl+Spc Complete  Ctrl+K  Open diff       ",
+            "  Alt+K    Hover doc n/N     Next/Prev hunk  ",
             "  F12      Go to def Escape  Close diff      ",
             "                                              ",
-            "  TASKS              REPL / PROBLEMS         ",
-            "  F5       Run       F6    Problem panel     ",
-            "  Ctrl+F5  Build     Alt+\u{21b5} Send to REPL  ",
-            "  \u{21e7}F5      Test task                        ",
-            "  Alt+F5   Stop task                         ",
+            "  TASKS              PANELS / FORMAT         ",
+            "  F8       Run       F6    Diagnostics       ",
+            "  Ctrl+F5  Build     F7    Problems          ",
+            "  \u{21e7}F5      Test task F4    Format doc        ",
+            "  Alt+F5   Stop task Alt+\u{21b5} Send to REPL  ",
             "                                              ",
             "       Press Esc or F1 to close              ",
         ];
@@ -1866,6 +1891,535 @@ impl Editor {
             let msg_col = pane_x + pane_w.saturating_sub(msg.len()) / 2;
             self.screen
                 .put_str(msg_row, msg_col, msg, Color::Ansi(3), Color::Default, true);
+        }
+    }
+
+    /// Render the tab bar row at the top of the bottom panel.
+    fn render_bottom_panel_tab_bar(&mut self, rect: Rect) {
+        let y = rect.y as usize;
+        let bar_bg = Color::Color256(236);
+        let active_bg = Color::Color256(37);
+        let inactive_bg = Color::Color256(235);
+        let active_fg = Color::Ansi(15);
+        let inactive_fg = Color::Color256(244);
+        let err_fg = Color::Ansi(9);
+        let warn_fg = Color::Ansi(11);
+
+        // Fill whole row with bar background
+        for c in 0..rect.width as usize {
+            self.screen
+                .put_char(y, rect.x as usize + c, ' ', active_fg, bar_bg, false);
+        }
+
+        // Tab 1: TERMINAL (no badge)
+        let term_label = "  TERMINAL  ";
+        let (t_bg, t_fg, t_bold) = if self.bottom_tab == crate::editor::BottomTab::Terminal {
+            (active_bg, active_fg, true)
+        } else {
+            (inactive_bg, inactive_fg, false)
+        };
+        self.screen
+            .put_str(y, rect.x as usize, term_label, t_fg, t_bg, t_bold);
+        let mut x = rect.x as usize + term_label.len();
+
+        // Tab 2: DIAGNOSTICS (counts for active buffer's lsp_items)
+        let diag_base = "  DIAGNOSTICS";
+        let (de, dw) = self.active_buffer_diag_counts();
+        let (d_bg, d_fg, d_bold) = if self.bottom_tab == crate::editor::BottomTab::Diagnostics {
+            (active_bg, active_fg, true)
+        } else {
+            (inactive_bg, inactive_fg, false)
+        };
+        self.screen
+            .put_str(y, x, diag_base, d_fg, d_bg, d_bold);
+        x += diag_base.len();
+        if de > 0 || dw > 0 {
+            if de > 0 {
+                let badge = format!("  E:{}", de);
+                self.screen.put_str(y, x, &badge, err_fg, d_bg, d_bold);
+                x += badge.len();
+            }
+            if dw > 0 {
+                let badge = format!("  W:{}", dw);
+                self.screen.put_str(y, x, &badge, warn_fg, d_bg, false);
+                x += badge.len();
+            }
+            self.screen.put_str(y, x, "  ", d_fg, d_bg, false);
+            x += 2;
+        } else {
+            self.screen.put_str(y, x, "  ", d_fg, d_bg, false);
+            x += 2;
+        }
+
+        // Tab 3: PROBLEMS (counts for cargo check items)
+        let prob_base = "  PROBLEMS";
+        let (pe, pw) = self.problem_panel.build_counts();
+        let (p_bg, p_fg, p_bold) = if self.bottom_tab == crate::editor::BottomTab::Problems {
+            (active_bg, active_fg, true)
+        } else {
+            (inactive_bg, inactive_fg, false)
+        };
+        self.screen
+            .put_str(y, x, prob_base, p_fg, p_bg, p_bold);
+        x += prob_base.len();
+        if pe > 0 || pw > 0 {
+            if pe > 0 {
+                let badge = format!("  E:{}", pe);
+                self.screen.put_str(y, x, &badge, err_fg, p_bg, p_bold);
+                x += badge.len();
+            }
+            if pw > 0 {
+                let badge = format!("  W:{}", pw);
+                self.screen.put_str(y, x, &badge, warn_fg, p_bg, false);
+                x += badge.len();
+            }
+            self.screen.put_str(y, x, "  ", p_fg, p_bg, false);
+        } else {
+            self.screen.put_str(y, x, "  ", p_fg, p_bg, false);
+        }
+    }
+
+    /// Render the Diagnostics panel (LSP diagnostics for active buffer).
+    fn render_diagnostics_in_pane(&mut self, rect: Rect) {
+        use crate::problem_panel::Severity;
+
+        let pane_x = rect.x as usize;
+        let pane_y = rect.y as usize;
+        let pane_w = rect.width as usize;
+        let pane_h = rect.height as usize;
+
+        if pane_w < 10 || pane_h == 0 {
+            return;
+        }
+
+        // ── Colours ──────────────────────────────────────────
+        let item_bg     = Color::Color256(235);
+        let item_bg_sel = Color::Color256(25);
+        let item_fg     = Color::Ansi(15);
+        let hdr_bg      = Color::Color256(237);
+        let hdr_fg      = Color::Ansi(15);
+        let dim_fg      = Color::Color256(244);
+        let err_fg      = Color::Ansi(9);
+        let warn_fg     = Color::Ansi(11);
+        let info_fg     = Color::Ansi(12);
+        let note_fg     = Color::Ansi(14);
+        let footer_bg   = Color::Color256(238);
+        let footer_fg   = Color::Color256(250);
+
+        #[inline]
+        fn dw(s: &str) -> usize {
+            s.chars()
+                .map(|c| crate::unicode::char_width(c).max(1))
+                .sum()
+        }
+
+        // Collect indices for active buffer's lsp_items.
+        let indices = self.active_buffer_lsp_items();
+        let item_count = indices.len();
+
+        // Clamp selection.
+        let selected = if item_count == 0 {
+            0
+        } else {
+            self.diag_panel_selected.min(item_count - 1)
+        };
+
+        // Reserve 1 row for header, 1 for footer.
+        let list_rows = pane_h.saturating_sub(2);
+
+        // Compute scroll.
+        let scroll = {
+            let mut sc = self.diag_panel_scroll;
+            if item_count > 0 {
+                if selected >= sc + list_rows && list_rows > 0 {
+                    sc = selected + 1 - list_rows;
+                }
+                if selected < sc {
+                    sc = selected;
+                }
+            }
+            sc
+        };
+        self.diag_panel_scroll = scroll;
+
+        // Compute the active file path (relative).
+        let buf_idx = self.active_buffer_index();
+        let active_file: String = self
+            .buffers
+            .get(buf_idx)
+            .and_then(|bs| {
+                bs.buffer.file_path().map(|p| {
+                    let abs = p.to_string_lossy().into_owned();
+                    let cwd = std::env::current_dir()
+                        .ok()
+                        .map(|cp| {
+                            let mut s = cp.to_string_lossy().into_owned();
+                            if !s.ends_with('/') {
+                                s.push('/');
+                            }
+                            s
+                        })
+                        .unwrap_or_default();
+                    if !cwd.is_empty() && abs.starts_with(&cwd) {
+                        abs[cwd.len()..].to_string()
+                    } else {
+                        abs
+                    }
+                })
+            })
+            .unwrap_or_else(|| "[No Name]".to_string());
+
+        // Counts for footer.
+        let (ec, wc) = {
+            let mut e = 0usize;
+            let mut w = 0usize;
+            for &i in &indices {
+                if let Some(p) = self.problem_panel.lsp_items.get(i) {
+                    match p.severity {
+                        Severity::Error => e += 1,
+                        Severity::Warning => w += 1,
+                        _ => {}
+                    }
+                }
+            }
+            (e, w)
+        };
+
+        let right_edge = pane_x + pane_w;
+
+        // ── Header row ───────────────────────────────────────
+        {
+            for c in 0..pane_w {
+                self.screen
+                    .put_char(pane_y, pane_x + c, ' ', hdr_fg, hdr_bg, false);
+            }
+            let lsp_running = self.lsp_manager.is_some();
+            let hdr = if lsp_running {
+                format!(" rust-analyzer — {}", active_file)
+            } else {
+                " rust-analyzer — not running".to_string()
+            };
+            let hdr_t = truncate_str(&hdr, pane_w);
+            self.screen
+                .put_str(pane_y, pane_x, hdr_t, hdr_fg, hdr_bg, true);
+        }
+
+        // ── Item rows ────────────────────────────────────────
+        for row in 0..list_rows {
+            let screen_row = pane_y + 1 + row;
+            let disp_idx = scroll + row;
+
+            let fill_bg = |screen: &mut crate::render::Screen, from: usize, bg: Color| {
+                for c in from..right_edge {
+                    screen.put_char(screen_row, c, ' ', item_fg, bg, false);
+                }
+            };
+
+            if disp_idx >= item_count {
+                fill_bg(&mut self.screen, pane_x, item_bg);
+                continue;
+            }
+
+            let lsp_idx = indices[disp_idx];
+            let p = match self.problem_panel.lsp_items.get(lsp_idx) {
+                Some(p) => p,
+                None => {
+                    fill_bg(&mut self.screen, pane_x, item_bg);
+                    continue;
+                }
+            };
+
+            let is_sel = disp_idx == selected
+                && self.terminal_panel_pane == Some(self.active_pane);
+            let bg = if is_sel { item_bg_sel } else { item_bg };
+            let sev_fg = match p.severity {
+                Severity::Error => err_fg,
+                Severity::Warning => warn_fg,
+                Severity::Info => info_fg,
+                Severity::Note => note_fg,
+            };
+
+            fill_bg(&mut self.screen, pane_x, bg);
+
+            let mut col = pane_x;
+            self.screen
+                .put_str(screen_row, col, "  ", item_fg, bg, false);
+            col += 2;
+
+            let badge = format!("[{}] ", p.severity.label());
+            self.screen
+                .put_str(screen_row, col, &badge, sev_fg, bg, true);
+            col += dw(&badge);
+
+            let loc = format!(":{:<4}  ", p.line);
+            if col < right_edge {
+                let loc_t = truncate_str(&loc, right_edge - col);
+                self.screen
+                    .put_str(screen_row, col, loc_t, dim_fg, bg, false);
+                col += dw(loc_t);
+            }
+
+            if col < right_edge {
+                let msg_t = truncate_str(&p.message, right_edge - col);
+                self.screen
+                    .put_str(screen_row, col, msg_t, item_fg, bg, false);
+            }
+        }
+
+        // Show empty-state message if no items.
+        if item_count == 0 && list_rows > 0 {
+            for c in 0..pane_w {
+                self.screen
+                    .put_char(pane_y + 1, pane_x + c, ' ', item_fg, item_bg, false);
+            }
+            let msg = if self.lsp_manager.is_some() {
+                " No diagnostics for this file"
+            } else {
+                " rust-analyzer not running"
+            };
+            let msg_t = truncate_str(msg, pane_w);
+            self.screen
+                .put_str(pane_y + 1, pane_x, msg_t, dim_fg, item_bg, false);
+        }
+
+        // ── Footer ───────────────────────────────────────────
+        let footer_row = pane_y + 1 + list_rows;
+        if footer_row < pane_y + pane_h {
+            for c in 0..pane_w {
+                self.screen
+                    .put_char(footer_row, pane_x + c, ' ', footer_fg, footer_bg, false);
+            }
+            let footer = format!(" E:{} W:{}  ↑↓ nav  Enter jump  F8 close", ec, wc);
+            let footer_t = truncate_str(&footer, pane_w);
+            self.screen
+                .put_str(footer_row, pane_x, footer_t, footer_fg, footer_bg, false);
+        }
+    }
+
+    /// Render the Problems panel content inside the bottom panel pane.
+    fn render_problems_in_pane(&mut self, rect: Rect) {
+        use crate::problem_panel::{
+            RowKind, Severity, BUILD_GROUP_KEY, CARGO_FILE_PREFIX,
+        };
+
+        let pane_x = rect.x as usize;
+        let pane_y = rect.y as usize;
+        let pane_w = rect.width as usize;
+        let pane_h = rect.height as usize;
+
+        if pane_w < 10 || pane_h == 0 {
+            return;
+        }
+
+        // ── Colours ──────────────────────────────────────────
+        let item_bg     = Color::Color256(235);
+        let item_bg_sel = Color::Color256(25);
+        let item_fg     = Color::Ansi(15);
+        let hdr_bg      = Color::Color256(237);
+        let hdr_bg_sel  = Color::Color256(26);
+        let hdr_fg      = Color::Ansi(15);
+        let dim_fg      = Color::Color256(244);
+        let err_fg      = Color::Ansi(9);
+        let warn_fg     = Color::Ansi(11);
+        let info_fg     = Color::Ansi(12);
+        let note_fg     = Color::Ansi(14);
+        let footer_bg   = Color::Color256(238);
+        let footer_fg   = Color::Color256(250);
+
+        // ── Helper: display-column width of a string ─────────
+        #[inline]
+        fn dw(s: &str) -> usize {
+            s.chars()
+                .map(|c| crate::unicode::char_width(c).max(1))
+                .sum()
+        }
+
+        // Compute rows once for this frame (cargo check only; LSP is in DIAGNOSTICS tab).
+        let rows = self.problem_panel.compute_rows();
+        let row_count = rows.len();
+        let selected = self.problem_panel.selected;
+        let (total_errors, total_warnings) = self.problem_panel.build_counts();
+
+        // Reserve 1 row for footer.
+        let list_rows = pane_h.saturating_sub(1);
+
+        // Clamp scroll (read-only; caller should call clamp_scroll separately).
+        let scroll = {
+            let mut sc = self.problem_panel.scroll;
+            if row_count > 0 {
+                if selected >= sc + list_rows && list_rows > 0 {
+                    sc = selected + 1 - list_rows;
+                }
+                if selected < sc {
+                    sc = selected;
+                }
+            }
+            sc
+        };
+
+        // ── Display rows ─────────────────────────────────────
+        for row in 0..list_rows {
+            let screen_row = pane_y + row;
+            let disp_idx   = scroll + row;
+            let is_sel     = disp_idx == selected;
+            let right_edge = pane_x + pane_w; // exclusive
+
+            // Helper: fill the rest of a row with a background colour.
+            let fill_bg = |screen: &mut crate::render::Screen, from: usize, bg: Color| {
+                for c in from..right_edge {
+                    screen.put_char(screen_row, c, ' ', item_fg, bg, false);
+                }
+            };
+
+            if disp_idx >= row_count {
+                fill_bg(&mut self.screen, pane_x, item_bg);
+                continue;
+            }
+
+            match &rows[disp_idx] {
+                // ── cargo check section header ───────────────
+                RowKind::CargoSectionHeader => {
+                    let bg = if is_sel { hdr_bg_sel } else { hdr_bg };
+                    let collapsed = self.problem_panel.collapsed_groups.contains(BUILD_GROUP_KEY);
+                    let icon = if collapsed { "> " } else { "v " };
+                    let (ec, wc) = self.problem_panel.build_counts();
+
+                    fill_bg(&mut self.screen, pane_x, bg);
+
+                    let mut col = pane_x;
+                    let label = format!(" {}cargo check", icon);
+                    self.screen.put_str(screen_row, col, &label, hdr_fg, bg, true);
+                    col += dw(&label);
+
+                    if ec > 0 && col + 3 < right_edge {
+                        let b = format!("  E:{}", ec);
+                        let bt = truncate_str(&b, right_edge - col);
+                        self.screen.put_str(screen_row, col, bt, err_fg, bg, true);
+                        col += dw(bt);
+                    }
+                    if wc > 0 && col + 3 < right_edge {
+                        let b = format!("  W:{}", wc);
+                        let bt = truncate_str(&b, right_edge - col);
+                        self.screen.put_str(screen_row, col, bt, warn_fg, bg, false);
+                    }
+                }
+
+                // ── cargo check per-file header ──────────────
+                RowKind::CargoFileHeader(file) => {
+                    let bg = if is_sel { hdr_bg_sel } else { hdr_bg };
+                    let cargo_key = format!("{}{}", CARGO_FILE_PREFIX, file);
+                    let collapsed = self.problem_panel.collapsed_groups.contains(&cargo_key);
+                    let icon = if collapsed { "> " } else { "v " };
+                    let (ec, wc) = self.problem_panel.cargo_file_counts(file);
+
+                    let (dir, base) = if let Some(slash) = file.rfind('/') {
+                        (&file[..slash + 1], &file[slash + 1..])
+                    } else {
+                        ("", file.as_str())
+                    };
+
+                    fill_bg(&mut self.screen, pane_x, bg);
+
+                    let mut col = pane_x;
+                    let leader = format!("   {}", icon);
+                    self.screen.put_str(screen_row, col, &leader, dim_fg, bg, false);
+                    col += dw(&leader);
+
+                    let avail = right_edge.saturating_sub(col + 16);
+                    let base_t = truncate_str(base, avail.max(4));
+                    self.screen.put_str(screen_row, col, base_t, hdr_fg, bg, true);
+                    col += dw(base_t);
+
+                    if !dir.is_empty() && col + 3 < right_edge {
+                        let sep = "  ";
+                        self.screen.put_str(screen_row, col, sep, dim_fg, bg, false);
+                        col += dw(sep);
+                        let dir_avail = right_edge.saturating_sub(col + 12);
+                        let dir_t = truncate_str(dir, dir_avail.max(1));
+                        self.screen.put_str(screen_row, col, dir_t, dim_fg, bg, false);
+                        col += dw(dir_t);
+                    }
+
+                    if ec > 0 && col + 3 < right_edge {
+                        let b = format!("  E:{}", ec);
+                        let bt = truncate_str(&b, right_edge - col);
+                        self.screen.put_str(screen_row, col, bt, err_fg, bg, true);
+                        col += dw(bt);
+                    }
+                    if wc > 0 && col + 3 < right_edge {
+                        let b = format!("  W:{}", wc);
+                        let bt = truncate_str(&b, right_edge - col);
+                        self.screen.put_str(screen_row, col, bt, warn_fg, bg, false);
+                    }
+                }
+
+                // ── Problem item ─────────────────────────────
+                RowKind::Item(item_idx) => {
+                    let p = match self.problem_panel.get_item(*item_idx) {
+                        Some(p) => p,
+                        None => {
+                            fill_bg(&mut self.screen, pane_x, item_bg);
+                            continue;
+                        }
+                    };
+                    let bg = if is_sel { item_bg_sel } else { item_bg };
+                    let sev_fg = match p.severity {
+                        Severity::Error => err_fg,
+                        Severity::Warning => warn_fg,
+                        Severity::Info => info_fg,
+                        Severity::Note => note_fg,
+                    };
+
+                    fill_bg(&mut self.screen, pane_x, bg);
+
+                    let mut col = pane_x;
+
+                    // Indentation (deeper than section/file headers)
+                    self.screen.put_str(screen_row, col, "      ", item_fg, bg, false);
+                    col += 6;
+
+                    // Severity badge "[E] " / "[W] "
+                    let badge = format!("[{}] ", p.severity.label());
+                    self.screen.put_str(screen_row, col, &badge, sev_fg, bg, true);
+                    col += dw(&badge);
+
+                    // Location ":line  " — file is always shown in the parent header
+                    let loc = format!(":{}  ", p.line);
+                    if col < right_edge {
+                        let loc_t = truncate_str(&loc, right_edge - col);
+                        self.screen.put_str(screen_row, col, loc_t, dim_fg, bg, false);
+                        col += dw(loc_t);
+                    }
+
+                    // Message
+                    if col < right_edge {
+                        let msg_t = truncate_str(&p.message, right_edge - col);
+                        self.screen.put_str(screen_row, col, msg_t, item_fg, bg, false);
+                    }
+                }
+            }
+        }
+
+        // ── Footer ───────────────────────────────────────────
+        let footer_row = pane_y + list_rows;
+        if footer_row < pane_y + pane_h {
+            for c in 0..pane_w {
+                self.screen
+                    .put_char(footer_row, pane_x + c, ' ', footer_fg, footer_bg, false);
+            }
+            let footer = format!(
+                " E:{} W:{}  {}",
+                total_errors,
+                total_warnings,
+                if self.problem_panel.focused {
+                    "↑↓ nav  Enter jump/fold  F6 close"
+                } else {
+                    "F6 close"
+                }
+            );
+            let footer_t = truncate_str(&footer, pane_w);
+            self.screen
+                .put_str(footer_row, pane_x, footer_t, footer_fg, footer_bg, false);
         }
     }
 
@@ -2559,161 +3113,6 @@ impl Editor {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Problem panel renderer — bottom overlay panel
-    // -----------------------------------------------------------------------
-
-    pub(super) fn render_problem_panel(&mut self) {
-        use crate::problem_panel::Severity;
-
-        let screen_w = self.screen.width();
-        let screen_h = self.screen.height();
-        if screen_w < 10 || screen_h < 5 {
-            return;
-        }
-
-        // Panel geometry: occupy up to 1/3 of screen height, min 5 rows.
-        let pp = &self.problem_panel;
-        let item_count = pp.items.len();
-        let visible_items = (screen_h / 3).max(5).min(item_count + 1);
-        // rows: 1 title + visible_items rows + 1 footer = visible_items + 2
-        let panel_h = (visible_items + 2).min(screen_h);
-        let panel_y = screen_h.saturating_sub(panel_h + self.status_height);
-
-        let title_bg = Color::Color256(25); // dark blue
-        let title_fg = Color::Ansi(15); // white
-        let item_bg = Color::Color256(235); // near-black
-        let item_bg_sel = Color::Color256(24); // selected: blue
-        let item_fg = Color::Ansi(15);
-        let err_fg = Color::Ansi(9); // bright red
-        let warn_fg = Color::Ansi(11); // yellow
-        let info_fg = Color::Ansi(12); // blue
-        let note_fg = Color::Ansi(14); // cyan
-        let footer_bg = Color::Color256(238);
-        let footer_fg = Color::Color256(250);
-
-        // Clamp panel scroll
-        let selected = pp.selected;
-        let scroll = {
-            let list_rows = panel_h.saturating_sub(2); // excluding title + footer
-            let mut sc = pp.scroll;
-            if selected >= sc + list_rows && list_rows > 0 {
-                sc = selected + 1 - list_rows;
-            }
-            if selected < sc {
-                sc = selected;
-            }
-            sc
-        };
-
-        // -- Title row --
-        let source = pp.source_cmd.as_deref().unwrap_or("Build Output");
-        let errors = pp.error_count();
-        let warnings = pp.warning_count();
-        let focus_marker = if pp.focused { "●" } else { "○" };
-        let title = format!(
-            " {} Problems [{}]  E:{} W:{}  {}",
-            focus_marker,
-            source,
-            errors,
-            warnings,
-            if pp.focused {
-                "↑↓ navigate  Enter jump  Esc close"
-            } else {
-                "F6 focus"
-            }
-        );
-        for c in 0..screen_w {
-            self.screen
-                .put_char(panel_y, c, ' ', title_fg, title_bg, false);
-        }
-        let title_trunc = truncate_str(&title, screen_w);
-        self.screen
-            .put_str(panel_y, 0, title_trunc, title_fg, title_bg, false);
-
-        // -- Item rows --
-        let list_rows = panel_h.saturating_sub(2);
-        for row in 0..list_rows {
-            let item_row = panel_y + 1 + row;
-            if item_row >= screen_h {
-                break;
-            }
-            let item_idx = scroll + row;
-            let (bg, fg_sev, text) = if item_idx < pp.items.len() {
-                let p = &pp.items[item_idx];
-                let bg = if item_idx == selected {
-                    item_bg_sel
-                } else {
-                    item_bg
-                };
-                let fg_sev = match p.severity {
-                    Severity::Error => err_fg,
-                    Severity::Warning => warn_fg,
-                    Severity::Info => info_fg,
-                    Severity::Note => note_fg,
-                };
-                let code_part = p
-                    .code
-                    .as_ref()
-                    .map(|c| format!("[{}] ", c))
-                    .unwrap_or_default();
-                let text = format!(
-                    " [{}] {}{}:{}  {}{}",
-                    p.severity.label(),
-                    code_part,
-                    p.file,
-                    p.line,
-                    p.message,
-                    " ".repeat(screen_w)
-                );
-                (bg, fg_sev, text)
-            } else {
-                // Empty row
-                (item_bg, item_fg, " ".repeat(screen_w))
-            };
-
-            // Fill row background
-            for c in 0..screen_w {
-                self.screen.put_char(item_row, c, ' ', item_fg, bg, false);
-            }
-            // Write severity indicator in its color
-            let text_trunc = truncate_str(&text, screen_w);
-            // Write severity char with color
-            if !text_trunc.is_empty() {
-                // First char is space, then [E] / [W] etc — write whole line with item_fg
-                // but the severity letter gets fg_sev color
-                // Split: " [X]" = 4 bytes, rest is normal
-                if text_trunc.len() >= 4 {
-                    self.screen
-                        .put_str(item_row, 0, &text_trunc[..1], item_fg, bg, false);
-                    self.screen
-                        .put_str(item_row, 1, &text_trunc[1..4], fg_sev, bg, false);
-                    self.screen
-                        .put_str(item_row, 4, &text_trunc[4..], item_fg, bg, false);
-                } else {
-                    self.screen
-                        .put_str(item_row, 0, text_trunc, item_fg, bg, false);
-                }
-            }
-        }
-
-        // -- Footer row --
-        let footer_row = panel_y + 1 + list_rows;
-        if footer_row < screen_h {
-            for c in 0..screen_w {
-                self.screen
-                    .put_char(footer_row, c, ' ', footer_fg, footer_bg, false);
-            }
-            let footer = format!(
-                " {}/{} items",
-                if item_count == 0 { 0 } else { selected + 1 },
-                item_count
-            );
-            let footer_trunc = truncate_str(&footer, screen_w);
-            self.screen
-                .put_str(footer_row, 0, footer_trunc, footer_fg, footer_bg, false);
-        }
-    }
 }
 
 /// Truncate a string to at most `max_cols` display columns (ASCII-safe approximation).

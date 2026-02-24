@@ -526,6 +526,154 @@ impl Editor {
             return;
         }
 
+        // Bottom panel tab bar click detection
+        if me.button == MouseButton::Left && me.pressed && !me.motion {
+            if let Some(bp_id) = self.terminal_panel_pane {
+                if let Some(rect) = self.layout.pane_rect(bp_id) {
+                    if me.row == rect.y && me.col >= rect.x && me.col < rect.x + rect.width {
+                        self.handle_bottom_panel_tab_click(me.col, rect);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Mouse interaction in the Diagnostics panel content area
+        if self.bottom_tab == crate::editor::BottomTab::Diagnostics {
+            if let Some(bp_id) = self.terminal_panel_pane {
+                if let Some(rect) = self.layout.pane_rect(bp_id) {
+                    // Row 0 = tab bar, Row 1 = header, Rows 2+ = items, last row = footer
+                    let content_y = rect.y + 2; // skip tab bar + header
+                    let footer_y = rect.y + rect.height.saturating_sub(1);
+                    let in_content = me.row >= content_y
+                        && me.row < footer_y
+                        && me.col >= rect.x
+                        && me.col < rect.x + rect.width;
+                    let in_panel = me.row >= rect.y
+                        && me.row < rect.y + rect.height
+                        && me.col >= rect.x
+                        && me.col < rect.x + rect.width;
+
+                    match me.button {
+                        MouseButton::Left if me.pressed && !me.motion && in_content => {
+                            let click_row = (me.row - content_y) as usize;
+                            let item_idx = self.diag_panel_scroll + click_row;
+                            let count = self.active_buffer_lsp_items().len();
+                            if item_idx < count {
+                                if item_idx == self.diag_panel_selected
+                                    && self.terminal_panel_pane == Some(self.active_pane)
+                                {
+                                    self.jump_to_diagnostic_item();
+                                } else {
+                                    self.diag_panel_selected = item_idx;
+                                    self.active_pane = bp_id;
+                                }
+                            }
+                        }
+                        MouseButton::ScrollUp if in_panel => {
+                            self.diag_panel_scroll = self.diag_panel_scroll.saturating_sub(3);
+                            return;
+                        }
+                        MouseButton::ScrollDown if in_panel => {
+                            let count = self.active_buffer_lsp_items().len();
+                            let max_scroll = count.saturating_sub(1);
+                            self.diag_panel_scroll =
+                                (self.diag_panel_scroll + 3).min(max_scroll);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Mouse interaction in the Problems panel content area
+        if self.bottom_tab == crate::editor::BottomTab::Problems {
+            if let Some(bp_id) = self.terminal_panel_pane {
+                if let Some(rect) = self.layout.pane_rect(bp_id) {
+                    let content_y = rect.y + 1; // skip the tab bar row
+                    let footer_y = rect.y + rect.height.saturating_sub(1); // last row = footer
+                    let in_content = me.row >= content_y
+                        && me.row < footer_y
+                        && me.col >= rect.x
+                        && me.col < rect.x + rect.width;
+                    let in_panel = me.row >= rect.y
+                        && me.row < rect.y + rect.height
+                        && me.col >= rect.x
+                        && me.col < rect.x + rect.width;
+
+                    match me.button {
+                        MouseButton::Left if me.pressed && !me.motion && in_content => {
+                            use crate::problem_panel::RowKind;
+                            let click_row = (me.row - content_y) as usize;
+                            let item_idx = self.problem_panel.scroll + click_row;
+                            if item_idx < self.problem_panel.all_items_count() {
+                                match self.problem_panel.get_display_row(item_idx) {
+                                    Some(RowKind::CargoSectionHeader) => {
+                                        if item_idx == self.problem_panel.selected
+                                            && self.problem_panel.focused
+                                        {
+                                            self.problem_panel.toggle_group(
+                                                crate::problem_panel::BUILD_GROUP_KEY,
+                                            );
+                                        } else {
+                                            self.problem_panel.selected = item_idx;
+                                            self.problem_panel.focused = true;
+                                            self.active_pane = bp_id;
+                                        }
+                                    }
+                                    Some(RowKind::CargoFileHeader(f)) => {
+                                        if item_idx == self.problem_panel.selected
+                                            && self.problem_panel.focused
+                                        {
+                                            let key = format!(
+                                                "{}{}",
+                                                crate::problem_panel::CARGO_FILE_PREFIX,
+                                                f
+                                            );
+                                            self.problem_panel.toggle_group(&key);
+                                        } else {
+                                            self.problem_panel.selected = item_idx;
+                                            self.problem_panel.focused = true;
+                                            self.active_pane = bp_id;
+                                        }
+                                    }
+                                    Some(RowKind::Item(_)) | None => {
+                                        if item_idx == self.problem_panel.selected
+                                            && self.problem_panel.focused
+                                        {
+                                            // Second click on item → jump to source
+                                            self.jump_to_problem();
+                                        } else {
+                                            self.problem_panel.selected = item_idx;
+                                            self.problem_panel.focused = true;
+                                            self.active_pane = bp_id;
+                                        }
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                        MouseButton::ScrollUp if in_panel => {
+                            self.problem_panel.scroll =
+                                self.problem_panel.scroll.saturating_sub(3);
+                            return;
+                        }
+                        MouseButton::ScrollDown if in_panel => {
+                            let max_scroll = self
+                                .problem_panel
+                                .all_items_count()
+                                .saturating_sub(1);
+                            self.problem_panel.scroll =
+                                (self.problem_panel.scroll + 3).min(max_scroll);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         let sidebar_w = self.sidebar_width();
 
         // Handle mouse events in the sidebar area
@@ -533,8 +681,8 @@ impl Editor {
             match me.button {
                 MouseButton::Left if me.pressed && !me.motion => {
                     self.filetree_focused = true;
-                    // Title bar is at row tab_bar_height; tree content starts below
-                    let tree_content_start = (self.tab_bar_height + 1) as u16;
+                    // Sidebar title is at row 0; tree content starts at row 1
+                    let tree_content_start = 1u16;
                     if me.row >= tree_content_start {
                         let open_path = self.filetree.as_mut().and_then(|ft| {
                             let content_row = (me.row - tree_content_start) as usize;

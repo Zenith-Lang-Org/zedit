@@ -301,14 +301,16 @@ impl LspTransport {
         }
 
         // Extract body
-        let body_bytes = &self.read_buf[body_start..total_needed];
-        let body_str = std::str::from_utf8(body_bytes)
+        let body_bytes = self.read_buf[body_start..total_needed].to_vec();
+
+        // ALWAYS consume the message bytes first — this prevents a bad message
+        // from permanently blocking the buffer and dropping all subsequent ones.
+        self.read_buf.drain(..total_needed);
+
+        let body_str = std::str::from_utf8(&body_bytes)
             .map_err(|_| "invalid UTF-8 in LSP message body".to_string())?;
         let value = JsonValue::parse(body_str)
             .map_err(|e| format!("JSON parse error in LSP message: {}", e))?;
-
-        // Remove consumed bytes
-        self.read_buf.drain(..total_needed);
 
         Ok(Some(value))
     }

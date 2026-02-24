@@ -41,6 +41,7 @@ pub struct Diagnostic {
     pub range: Range,
     pub severity: DiagnosticSeverity,
     pub message: String,
+    #[allow(dead_code)]
     pub source: Option<String>,
 }
 
@@ -54,6 +55,7 @@ pub struct CompletionItem {
     /// LSP kind: 1=Text, 3=Function, 6=Variable, 7=Class, 9=Module…
     pub kind: Option<u32>,
     /// Short type hint shown right-aligned in the menu.
+    #[allow(dead_code)]
     pub detail: Option<String>,
     /// Text to insert; falls back to `label` when absent.
     pub insert_text: Option<String>,
@@ -96,6 +98,14 @@ impl Default for ServerCapabilities {
 
 /// Build an initialize request.
 pub fn initialize_request(id: i64, root_uri: &str) -> JsonValue {
+    // Derive workspace folder name from the root URI (last path component).
+    let folder_name = root_uri
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("workspace")
+        .to_string();
+
     json_rpc_request(
         id,
         "initialize",
@@ -105,9 +115,35 @@ pub fn initialize_request(id: i64, root_uri: &str) -> JsonValue {
                 JsonValue::Number(std::process::id() as f64),
             ),
             ("rootUri".into(), JsonValue::String(root_uri.into())),
+            // workspaceFolders lets modern servers (rust-analyzer, clangd…) detect the
+            // project root reliably even when rootUri alone is insufficient.
+            (
+                "workspaceFolders".into(),
+                JsonValue::Array(vec![JsonValue::Object(vec![
+                    ("uri".into(), JsonValue::String(root_uri.into())),
+                    ("name".into(), JsonValue::String(folder_name)),
+                ])]),
+            ),
             (
                 "capabilities".into(),
-                JsonValue::Object(vec![(
+                JsonValue::Object(vec![
+                    // Workspace capabilities — tells the server we support
+                    // configuration requests and file-watching registration.
+                    (
+                        "workspace".into(),
+                        JsonValue::Object(vec![
+                            ("configuration".into(), JsonValue::Bool(true)),
+                            ("workspaceFolders".into(), JsonValue::Bool(true)),
+                            (
+                                "didChangeWatchedFiles".into(),
+                                JsonValue::Object(vec![(
+                                    "dynamicRegistration".into(),
+                                    JsonValue::Bool(false),
+                                )]),
+                            ),
+                        ]),
+                    ),
+                    (
                     "textDocument".into(),
                     JsonValue::Object(vec![
                         (
@@ -185,7 +221,8 @@ pub fn initialize_request(id: i64, root_uri: &str) -> JsonValue {
                             ]),
                         ),
                     ]),
-                )]),
+                    ), // close "textDocument" entry
+                ]), // close capabilities Object
             ),
         ]),
     )
@@ -194,6 +231,32 @@ pub fn initialize_request(id: i64, root_uri: &str) -> JsonValue {
 /// Build an initialized notification (sent after initialize response).
 pub fn initialized_notification() -> JsonValue {
     json_rpc_notification("initialized", JsonValue::Object(vec![]))
+}
+
+/// Build a workspace/didChangeConfiguration notification.
+/// Sends our settings to the server so it applies them before the first
+/// flycheck run. Key setting: CARGO_INCREMENTAL=0 so cargo check always
+/// emits compiler-messages for all workspace files (bypasses artifact cache).
+pub fn did_change_configuration_notification() -> JsonValue {
+    json_rpc_notification(
+        "workspace/didChangeConfiguration",
+        JsonValue::Object(vec![(
+            "settings".into(),
+            JsonValue::Object(vec![(
+                "check".into(),
+                JsonValue::Object(vec![
+                    ("workspace".into(), JsonValue::Bool(true)),
+                    (
+                        "extraEnv".into(),
+                        JsonValue::Object(vec![(
+                            "CARGO_INCREMENTAL".into(),
+                            JsonValue::String("0".into()),
+                        )]),
+                    ),
+                ]),
+            )]),
+        )]),
+    )
 }
 
 /// Build a textDocument/didOpen notification.

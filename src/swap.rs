@@ -20,8 +20,11 @@ const VERSION: u32 = 1;
 #[derive(Debug)]
 pub struct SwapHeader {
     pub pid: u32,
+    #[allow(dead_code)]
     pub timestamp: u64,
+    #[allow(dead_code)]
     pub original_path: String,
+    #[allow(dead_code)]
     pub modified: bool,
 }
 

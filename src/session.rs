@@ -58,6 +58,7 @@ pub fn load_session(working_dir: &Path) -> Option<Session> {
 }
 
 /// Delete the session file for a working directory.
+#[allow(dead_code)]
 pub fn delete_session(working_dir: &Path) {
     let path = session_path(working_dir);
     let _ = fs::remove_file(&path);
