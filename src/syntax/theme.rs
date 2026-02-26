@@ -5,10 +5,13 @@ use crate::syntax::json_parser::JsonValue;
 
 // ── Types ────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 pub struct Theme {
+    #[allow(dead_code)]
     pub name: String,
     pub token_rules: Vec<TokenRule>,
+    /// Background color parsed from `colors["editor.background"]`.
+    /// Used by `ensure_readable_contrast` to correct low-contrast token colors.
+    pub background: (u8, u8, u8),
 }
 
 pub struct TokenRule {
@@ -79,7 +82,25 @@ impl Theme {
             }
         }
 
-        Ok(Theme { name, token_rules })
+        let background = json
+            .get("colors")
+            .and_then(|c| c.get("editor.background"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_hex_color)
+            .and_then(|c| {
+                if let Color::Rgb(r, g, b) = c {
+                    Some((r, g, b))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or((30, 30, 46)); // #1e1e2e dark fallback
+
+        Ok(Theme {
+            name,
+            token_rules,
+            background,
+        })
     }
 
     /// Resolve scopes to a style using the best-matching rule.
@@ -152,7 +173,48 @@ impl Theme {
                     foreground: Some(Color::Color256(222)),
                     bold: false,
                 },
+                TokenRule {
+                    scopes: vec!["markup.heading".to_string()],
+                    foreground: Some(Color::Color256(141)),
+                    bold: true,
+                },
+                TokenRule {
+                    scopes: vec!["entity.name.section".to_string()],
+                    foreground: Some(Color::Color256(141)),
+                    bold: true,
+                },
+                TokenRule {
+                    scopes: vec!["markup.bold".to_string()],
+                    foreground: Some(Color::Color256(215)),
+                    bold: true,
+                },
+                TokenRule {
+                    scopes: vec!["markup.italic".to_string()],
+                    foreground: Some(Color::Color256(229)),
+                    bold: false,
+                },
+                TokenRule {
+                    scopes: vec!["markup.underline.link".to_string()],
+                    foreground: Some(Color::Color256(75)),
+                    bold: false,
+                },
+                TokenRule {
+                    scopes: vec!["markup.raw".to_string()],
+                    foreground: Some(Color::Color256(113)),
+                    bold: false,
+                },
+                TokenRule {
+                    scopes: vec!["markup.quote".to_string()],
+                    foreground: Some(Color::Color256(246)),
+                    bold: false,
+                },
+                TokenRule {
+                    scopes: vec!["markup.list".to_string()],
+                    foreground: Some(Color::Color256(79)),
+                    bold: false,
+                },
             ],
+            background: (30, 30, 46), // #1e1e2e dark default
         }
     }
 }
@@ -181,14 +243,13 @@ pub fn ensure_readable_contrast(theme: &mut Theme, bg: (u8, u8, u8)) {
 /// against `bg`.  Uses eight linear interpolation steps before falling back
 /// to the target pole (pure white or pure black).
 fn adjust_toward_readable(r: u8, g: u8, b: u8, bg: (u8, u8, u8)) -> Color {
-    let (l_bg, _, _) = crate::oklab::srgb_to_oklab(
-        bg.0 as f32 / 255.0,
-        bg.1 as f32 / 255.0,
-        bg.2 as f32 / 255.0,
-    );
+    let (l_bg, _, _) = crate::oklab::srgb_to_oklab_u8(bg.0, bg.1, bg.2);
     // Dark background → blend toward white; light background → blend toward black.
-    let (target_r, target_g, target_b): (u8, u8, u8) =
-        if l_bg < 0.5 { (255, 255, 255) } else { (0, 0, 0) };
+    let (target_r, target_g, target_b): (u8, u8, u8) = if l_bg < 0.5 {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
 
     for step in 1..=8u8 {
         let t = step as f32 / 8.0;
@@ -269,6 +330,7 @@ mod tests {
                 foreground: Some(Color::Rgb(200, 100, 50)),
                 bold: true,
             }],
+            background: (30, 30, 46),
         };
         let style = theme.resolve(&["keyword".to_string()]);
         assert_eq!(style.fg, Color::Rgb(200, 100, 50));
@@ -284,6 +346,7 @@ mod tests {
                 foreground: Some(Color::Rgb(200, 100, 50)),
                 bold: false,
             }],
+            background: (30, 30, 46),
         };
         let style = theme.resolve(&["keyword.control".to_string()]);
         assert_eq!(style.fg, Color::Rgb(200, 100, 50));
@@ -305,6 +368,7 @@ mod tests {
                     bold: true,
                 },
             ],
+            background: (30, 30, 46),
         };
         let style = theme.resolve(&["keyword.control".to_string()]);
         assert_eq!(style.fg, Color::Rgb(200, 200, 200));
@@ -320,6 +384,7 @@ mod tests {
                 foreground: Some(Color::Rgb(200, 100, 50)),
                 bold: true,
             }],
+            background: (30, 30, 46),
         };
         let style = theme.resolve(&["string".to_string()]);
         assert_eq!(style.fg, Color::Default);

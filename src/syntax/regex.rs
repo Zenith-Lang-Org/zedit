@@ -49,6 +49,8 @@ enum Inst {
     AssertEnd,
     AssertWordBoundary,
     AssertNotWordBoundary,
+    /// `\G` — succeeds when the current position equals the g_anchor (begin-match end).
+    AssertG,
     Backref(usize),
     /// Lookahead(negative, skip_to). VM tries body at pc+1; on Match XOR neg => jump to skip_to.
     Lookahead(bool, usize),
@@ -254,6 +256,10 @@ impl<'a> Compiler<'a> {
                 let after = self.program.len();
                 self.program[atom_start] = Inst::Split(atom_start + 1, after);
                 let _ = jump_pc;
+                // Consume trailing '?' (lazy modifier *?) — treat as greedy.
+                if self.peek() == Some(b'?') {
+                    self.pos += 1;
+                }
             }
             Some(b'+') => {
                 self.pos += 1;
@@ -261,6 +267,10 @@ impl<'a> Compiler<'a> {
                 let split_pc = self.emit(Inst::Split(atom_start, 0));
                 let after = self.program.len();
                 self.program[split_pc] = Inst::Split(atom_start, after);
+                // Consume trailing '?' (lazy modifier +?) — treat as greedy.
+                if self.peek() == Some(b'?') {
+                    self.pos += 1;
+                }
             }
             Some(b'?') => {
                 self.pos += 1;
@@ -269,31 +279,45 @@ impl<'a> Compiler<'a> {
                 // atom now at atom_start+1..atom_end+1
                 let after = self.program.len();
                 self.program[atom_start] = Inst::Split(atom_start + 1, after);
+                // Consume trailing '?' (lazy modifier ??) — treat as greedy.
+                if self.peek() == Some(b'?') {
+                    self.pos += 1;
+                }
             }
             Some(b'{') => {
                 self.compile_counted(atom_start, atom_end)?;
+                // Consume trailing '?' (lazy modifier {n,m}?) — treat as greedy.
+                if self.peek() == Some(b'?') {
+                    self.pos += 1;
+                }
             }
             _ => {}
         }
         Ok(())
     }
 
-    /// Insert an instruction before `pos`, shifting all addresses >= pos by +1.
+    /// Insert an instruction before `pos`, shifting all addresses > pos by +1.
+    ///
+    /// Addresses that point exactly to `pos` are NOT bumped: they remain pointing
+    /// at the newly inserted instruction (which now occupies `pos`).  This is
+    /// correct because any forward reference that targeted `pos` before the insert
+    /// was targeting "the next thing to execute after the atom", which is now the
+    /// newly inserted header instruction (e.g. the Split for `?` or `*`).
     fn insert_before(&mut self, pos: usize, inst: Inst) {
         self.program.insert(pos, inst);
-        // Fix all addresses that reference positions >= pos
+        // Fix all addresses that reference positions strictly after the insertion point.
         for i in 0..self.program.len() {
             match &mut self.program[i] {
                 Inst::Split(a, b) => {
-                    if *a > pos || (*a == pos && i != pos) {
+                    if *a > pos {
                         *a += 1;
                     }
-                    if *b > pos || (*b == pos && i != pos) {
+                    if *b > pos {
                         *b += 1;
                     }
                 }
                 Inst::Jump(t) => {
-                    if *t > pos || (*t == pos && i != pos) {
+                    if *t > pos {
                         *t += 1;
                     }
                 }
@@ -425,6 +449,34 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Skip forward until the closing `)` of the current group, respecting
+    /// nesting depth and escape sequences.  The opening `(` has already been
+    /// consumed; this advances past the matching `)`.
+    fn skip_to_close_paren(&mut self) -> Result<(), String> {
+        let mut depth = 1usize;
+        loop {
+            match self.advance() {
+                Some(b'\\') => {
+                    self.pos += 1; // skip escaped character
+                }
+                Some(b'(') => depth += 1,
+                Some(b')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    return Err(format!(
+                        "Regex error at {}: unterminated group",
+                        self.pos
+                    ));
+                }
+            }
+        }
+    }
+
     fn compile_group(&mut self) -> Result<(), String> {
         self.pos += 1; // '('
         if self.peek() == Some(b'?') {
@@ -462,8 +514,49 @@ impl<'a> Compiler<'a> {
                     }
                     Ok(())
                 }
+                Some(b'<') => {
+                    self.pos += 1; // consume '<'
+                    match self.peek() {
+                        Some(b'=') => {
+                            // Positive lookbehind (?<=...) — not supported; skip as zero-width no-op.
+                            self.pos += 1;
+                            self.skip_to_close_paren()?;
+                            Ok(())
+                        }
+                        Some(b'!') => {
+                            // Negative lookbehind (?<!...) — not supported; skip as zero-width no-op.
+                            self.pos += 1;
+                            self.skip_to_close_paren()?;
+                            Ok(())
+                        }
+                        _ => {
+                            // Named group (?<name>...) — skip name, compile body as capturing group.
+                            while self.peek().map(|b| b != b'>').unwrap_or(false) {
+                                self.pos += 1;
+                            }
+                            if self.advance() != Some(b'>') {
+                                return Err(format!(
+                                    "Regex error at {}: expected '>' in named group",
+                                    self.pos
+                                ));
+                            }
+                            self.group_count += 1;
+                            let gid = self.group_count;
+                            self.emit(Inst::SaveStart(gid));
+                            self.compile_alternation()?;
+                            self.emit(Inst::SaveEnd(gid));
+                            if self.advance() != Some(b')') {
+                                return Err(format!(
+                                    "Regex error at {}: expected ')' closing named group",
+                                    self.pos
+                                ));
+                            }
+                            Ok(())
+                        }
+                    }
+                }
                 _ => {
-                    // Inline mode flags: (?i), (?s), (?m), (?i-m), etc.
+                    // Inline mode flags: (?i), (?s), (?m), (?x), (?i-m), etc.
                     // These are zero-length mode modifiers with no body.
                     // We parse past the flags and closing ')' and emit nothing.
                     loop {
@@ -474,7 +567,7 @@ impl<'a> Compiler<'a> {
                                 return Err(format!(
                                     "Regex error at {}: unsupported group modifier",
                                     self.pos
-                                ))
+                                ));
                             }
                         }
                     }
@@ -529,6 +622,7 @@ impl<'a> Compiler<'a> {
             }),
             Some(b'b') => Inst::AssertWordBoundary,
             Some(b'B') => Inst::AssertNotWordBoundary,
+            Some(b'G') => Inst::AssertG,
             Some(b'n') => Inst::Literal('\n'),
             Some(b't') => Inst::Literal('\t'),
             Some(b'r') => Inst::Literal('\r'),
@@ -569,6 +663,58 @@ impl<'a> Compiler<'a> {
                     "Regex error at {}: unterminated character class",
                     self.pos
                 ));
+            }
+            // Handle shorthand escapes that expand to multiple ranges (\s, \d, \w).
+            // These must be handled before class_atom, which returns a single char.
+            if self.peek() == Some(b'\\') {
+                let next = self.pattern.get(self.pos + 1).copied();
+                match next {
+                    Some(b's') => {
+                        self.pos += 2;
+                        ranges.extend_from_slice(&[
+                            (' ', ' '),
+                            ('\t', '\t'),
+                            ('\n', '\n'),
+                            ('\r', '\r'),
+                            ('\x0b', '\x0b'),
+                            ('\x0c', '\x0c'),
+                        ]);
+                        continue;
+                    }
+                    Some(b'S') => {
+                        // \S (non-whitespace) inside a class: skip — complement-of-complement
+                        // is too complex; treat as literal 'S' to avoid mis-coloring.
+                        self.pos += 2;
+                        ranges.push(('S', 'S'));
+                        continue;
+                    }
+                    Some(b'd') => {
+                        self.pos += 2;
+                        ranges.push(('0', '9'));
+                        continue;
+                    }
+                    Some(b'D') => {
+                        // Skip \D (non-digit) inside a class — too complex.
+                        self.pos += 2;
+                        continue;
+                    }
+                    Some(b'w') => {
+                        self.pos += 2;
+                        ranges.extend_from_slice(&[
+                            ('a', 'z'),
+                            ('A', 'Z'),
+                            ('0', '9'),
+                            ('_', '_'),
+                        ]);
+                        continue;
+                    }
+                    Some(b'W') => {
+                        // Skip \W (non-word) inside a class — too complex.
+                        self.pos += 2;
+                        continue;
+                    }
+                    _ => {} // fall through to class_atom for other escapes
+                }
             }
             let lo = self.class_atom()?;
             if self.peek() == Some(b'-') && self.pattern.get(self.pos + 1) != Some(&b']') {
@@ -631,19 +777,131 @@ struct VmState {
     groups: Vec<Option<usize>>,
 }
 
+// ── Extended-mode preprocessing ───────────────────────────────
+
+/// Returns true if the pattern enables extended mode (`(?x)` or similar).
+/// In extended mode, unescaped whitespace and `# …` comments are ignored.
+fn has_extended_flag(pattern: &str) -> bool {
+    // Scan for any `(?...)` group whose flag characters include 'x'.
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'(' && bytes[i + 1] == b'?' {
+            let mut j = i + 2;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if b == b')' {
+                    break;
+                }
+                if b == b'x' {
+                    return true;
+                }
+                if !b.is_ascii_alphabetic() && b != b'-' {
+                    break;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Strip extended-mode noise from a pattern: drop unescaped whitespace and
+/// `# comment` sequences outside of `[...]` character classes.
+fn strip_extended_mode(pattern: &str) -> String {
+    let bytes = pattern.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut in_class = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_class {
+            // Inside [...]: keep everything verbatim.
+            if b == b'\\' && i + 1 < bytes.len() {
+                result.push(b);
+                result.push(bytes[i + 1]);
+                i += 2;
+            } else {
+                if b == b']' {
+                    in_class = false;
+                }
+                result.push(b);
+                i += 1;
+            }
+            continue;
+        }
+        match b {
+            b'[' => {
+                in_class = true;
+                result.push(b);
+                i += 1;
+            }
+            b'\\' => {
+                // Preserve escape sequences.
+                result.push(b);
+                if i + 1 < bytes.len() {
+                    result.push(bytes[i + 1]);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            b'#' => {
+                // Comment: skip to end of line.
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                // Insignificant whitespace: drop.
+                i += 1;
+            }
+            _ => {
+                result.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+// ── Public API ─────────────────────────────────────────────────
+
 impl Regex {
     pub fn new(pattern: &str) -> Result<Self, String> {
-        Compiler::new(pattern).compile()
+        if has_extended_flag(pattern) {
+            let stripped = strip_extended_mode(pattern);
+            Compiler::new(&stripped).compile()
+        } else {
+            Compiler::new(pattern).compile()
+        }
     }
 
     pub fn find(&self, text: &str, start: usize) -> Option<Match> {
-        self.captures(text, start)?.groups[0]
+        self.captures_with_anchor(text, start, start)?.groups[0]
+    }
+
+    /// Like `find`, but `g_anchor` sets the position where `\G` matches.
+    /// Use `g_anchor = begin_end_pos` for end patterns of TextMate regions.
+    pub fn find_with_anchor(&self, text: &str, start: usize, g_anchor: usize) -> Option<Match> {
+        self.captures_with_anchor(text, start, g_anchor)?.groups[0]
     }
 
     pub fn captures(&self, text: &str, start: usize) -> Option<Captures> {
+        self.captures_with_anchor(text, start, start)
+    }
+
+    /// Like `captures`, but `g_anchor` sets the position where `\G` matches.
+    pub fn captures_with_anchor(
+        &self,
+        text: &str,
+        start: usize,
+        g_anchor: usize,
+    ) -> Option<Captures> {
         let mut pos = start;
         while pos <= text.len() {
-            if let Some(caps) = self.try_match(text, pos) {
+            if let Some(caps) = self.try_match(text, pos, g_anchor) {
                 return Some(caps);
             }
             if pos < text.len() {
@@ -655,7 +913,7 @@ impl Regex {
         None
     }
 
-    fn try_match(&self, text: &str, start: usize) -> Option<Captures> {
+    fn try_match(&self, text: &str, start: usize, g_anchor: usize) -> Option<Captures> {
         let n_slots = self.n_groups * 2;
         let mut groups = vec![None; n_slots];
         groups[0] = Some(start);
@@ -802,6 +1060,13 @@ impl Regex {
                     }
                 }
 
+                Inst::AssertG => {
+                    if sp == g_anchor {
+                        pc += 1;
+                        continue;
+                    }
+                }
+
                 Inst::Backref(g) => {
                     let g = *g;
                     let s = groups.get(g * 2).and_then(|x| *x);
@@ -820,7 +1085,7 @@ impl Regex {
                 Inst::Lookahead(negative, skip_to) => {
                     let negative = *negative;
                     let skip_to = *skip_to;
-                    let body_matched = self.try_lookahead(text, sp, pc + 1, skip_to);
+                    let body_matched = self.try_lookahead(text, sp, pc + 1, skip_to, g_anchor);
                     if body_matched ^ negative {
                         pc = skip_to;
                         continue;
@@ -847,6 +1112,7 @@ impl Regex {
         start_sp: usize,
         body_start: usize,
         body_end: usize,
+        g_anchor: usize,
     ) -> bool {
         let mut stack: Vec<(usize, usize)> = Vec::new();
         let mut pc = body_start;
@@ -935,6 +1201,12 @@ impl Regex {
                 }
                 Inst::AssertNotWordBoundary => {
                     if !is_word_boundary(text, sp) {
+                        pc += 1;
+                        continue;
+                    }
+                }
+                Inst::AssertG => {
+                    if sp == g_anchor {
                         pc += 1;
                         continue;
                     }
@@ -1074,6 +1346,65 @@ mod tests {
     fn test_compile_error() {
         assert!(Regex::new("[").is_err());
         assert!(Regex::new("(").is_err());
+    }
+
+    #[test]
+    fn test_extended_mode_x_flag() {
+        // (?x) strips whitespace and # comments — the JSON number pattern must match.
+        let pat = "(?x)\n  -?        # optional minus\n  (?:0|[1-9]\\d*)  # integer part\n";
+        let re = Regex::new(pat).unwrap();
+        assert!(re.find("42", 0).is_some(), "integer should match");
+        assert!(re.find("-7", 0).is_some(), "negative integer should match");
+        assert!(re.find("0", 0).is_some(), "zero should match");
+        // Whitespace/comment literals must NOT match.
+        assert!(re.find("   ", 0).is_none(), "spaces should not match");
+    }
+
+    #[test]
+    fn test_json_number_full_extended_mode() {
+        // Full JSON number pattern (exact text from grammars/json.tmLanguage.json)
+        let pat = "(?x)        # turn on extended mode\n  -?        # an optional minus\n  (?:\n    0       # a zero\n    |       # ...or...\n    [1-9]   # a 1-9 character\n    \\d*     # followed by zero or more digits\n  )\n  (?:\n    (?:\n      \\.    # a period\n      \\d+   # followed by one or more digits\n    )?\n    (?:\n      [eE]  # an e character\n      [+-]? # followed by an option +/-\n      \\d+   # followed by one or more digits\n    )?      # make exponent optional\n  )?        # make decimal portion optional";
+        let re = Regex::new(pat).expect("JSON number (?x) pattern must compile");
+        assert!(re.find("42", 0).is_some(), "42 should match");
+        assert!(re.find("-3.14", 0).is_some(), "-3.14 should match");
+        assert!(re.find("0", 0).is_some(), "0 should match");
+        assert!(re.find("1e10", 0).is_some(), "1e10 should match");
+        // Non-numbers must not match
+        assert!(re.find("abc", 0).is_none(), "abc should not match");
+    }
+
+    #[test]
+    fn test_lazy_quantifiers_compile() {
+        // +?, *?, ?? should all compile (treated as greedy for single-line matching).
+        let re = Regex::new("(.+?)$").unwrap();
+        assert!(re.find("hello", 0).is_some());
+
+        let re2 = Regex::new("(\\w*?)\\s").unwrap();
+        assert!(re2.find("hello world", 0).is_some());
+
+        let re3 = Regex::new("(ab??c)").unwrap();
+        assert!(re3.find("ac", 0).is_some());
+    }
+
+    #[test]
+    fn test_named_group() {
+        // (?<name>...) treated as a capturing group — must compile and match.
+        let re = Regex::new("(?<word>\\w+)").unwrap();
+        assert!(re.find("hello world", 0).is_some());
+        let m = re.find("hello world", 0).unwrap();
+        assert_eq!(&"hello world"[m.start..m.end], "hello");
+    }
+
+    #[test]
+    fn test_lookbehind_skipped() {
+        // (?<=...) and (?<!...) are not supported — they are silently skipped
+        // (treated as zero-width always-true).  The surrounding pattern must
+        // still compile and match.
+        let re_pos = Regex::new("(?<=\\|)\\s*-+\\s*(?=\\|)").unwrap();
+        assert!(re_pos.find("| --- |", 0).is_some());
+
+        let re_neg = Regex::new("(?<!\\w)\\bfoo\\b").unwrap();
+        assert!(re_neg.find("foo bar", 0).is_some());
     }
 
     // ── Matching ──
@@ -1260,5 +1591,54 @@ mod tests {
     fn test_runaway_protection() {
         let re = Regex::new("(a+)+b").unwrap();
         assert!(re.find("aaaaaaaaaa", 0).is_none());
+    }
+
+    // ── \s/\d/\w in character classes ──
+
+    /// Regression: before the fix, `\s` inside `[...]` was compiled as the literal
+    /// character `'s'` (via the class_atom fallthrough).  `[^\s]` should match
+    /// non-whitespace, NOT non-`s` characters.
+    #[test]
+    fn test_class_atom_whitespace_escape() {
+        // [^\s] should match non-whitespace (letters, digits, punctuation)
+        let re = Regex::new(r"[^\s]+").unwrap();
+        assert!(re.find("hello", 0).is_some(), "[^\\s]+ should match 'hello'");
+        assert!(re.find("  \t  ", 0).is_none(), "[^\\s]+ should NOT match pure whitespace");
+
+        // [\s] should match whitespace
+        let re2 = Regex::new(r"[\s]+").unwrap();
+        assert!(re2.find("   ", 0).is_some(), "[\\s]+ should match spaces");
+        assert!(re2.find("abc", 0).is_none(), "[\\s]+ should NOT match letters");
+    }
+
+    #[test]
+    fn test_class_atom_digit_escape() {
+        // [\d] matches digits
+        let re = Regex::new(r"[\d]+").unwrap();
+        assert!(re.find("42", 0).is_some());
+        assert!(re.find("abc", 0).is_none());
+
+        // [^\d] matches non-digits
+        let re2 = Regex::new(r"[^\d]+").unwrap();
+        assert!(re2.find("abc", 0).is_some());
+        assert!(re2.find("123", 0).is_none());
+    }
+
+    /// The JSON grammar uses [^\s\}] and [^\s\]] for "invalid separator" patterns.
+    /// Before the fix these compiled as [^s}] and [^s]], matching almost everything.
+    /// After the fix they correctly exclude whitespace.
+    #[test]
+    fn test_json_invalid_separator_patterns() {
+        // [^\s\}] should NOT match whitespace or '}'
+        let re = Regex::new(r"[^\s\}]").unwrap();
+        assert!(re.find("a", 0).is_some(), "letter should match the pattern");
+        assert!(re.find(" ", 0).is_none(), "space should NOT match");
+        assert!(re.find("}", 0).is_none(), "close-brace should NOT match");
+
+        // [^\s\]] should NOT match whitespace or ']'
+        let re2 = Regex::new(r"[^\s\]]").unwrap();
+        assert!(re2.find("x", 0).is_some(), "letter should match the pattern");
+        assert!(re2.find("\t", 0).is_none(), "tab should NOT match");
+        assert!(re2.find("]", 0).is_none(), "close-bracket should NOT match");
     }
 }

@@ -145,8 +145,19 @@ impl Grammar {
 
 fn parse_repository_entry(json: &JsonValue) -> Vec<Pattern> {
     // A repository entry is either:
-    // 1. An object with a "patterns" array → pattern group
-    // 2. A single pattern object (has "match" or "begin" or "include")
+    // 1. A Region (has "begin") — even if it also has "patterns" (those are child patterns).
+    //    Must be checked FIRST; otherwise an entry like "string" that has both "begin"
+    //    and "patterns" would be misclassified as a pattern group, causing the Region to
+    //    never be created and the begin/end delimiters to be silently ignored.
+    // 2. A pattern group (has "patterns" but NO "begin") → expand inline.
+    // 3. A single pattern object (has "match" or "include").
+    if json.get("begin").is_some() {
+        return if let Some(pat) = parse_pattern(json) {
+            vec![pat]
+        } else {
+            Vec::new()
+        };
+    }
     if let Some(arr) = json.get("patterns").and_then(|v| v.as_array()) {
         parse_pattern_array(arr)
     } else if let Some(pat) = parse_pattern(json) {
@@ -437,5 +448,93 @@ mod tests {
         .unwrap();
         assert_eq!(g.name, "Rust");
         assert_eq!(g.file_types, vec!["rs".to_string()]);
+    }
+
+    /// Regression: repository entry that has both "begin" and "patterns" must be
+    /// parsed as a Region, NOT as a pattern group.
+    ///
+    /// Before the fix, `parse_repository_entry` checked for "patterns" first.
+    /// A JSON "string" entry (which has begin:`"`, end:`"`, patterns:[stringcontent])
+    /// was returned as `[Include(stringcontent)]` instead of `[Region(begin:")]`.
+    /// This caused string/object/array/objectkey regions to never activate.
+    #[test]
+    fn test_repository_region_with_patterns_is_parsed_as_region() {
+        let g = parse_grammar(
+            r##"{
+                "scopeName": "source.test",
+                "patterns": [{"include": "#string"}],
+                "repository": {
+                    "string": {
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted.double",
+                        "patterns": [
+                            {"match": "\\\\.", "name": "constant.character.escape"}
+                        ]
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let repo = g.find_repository("string").unwrap();
+        assert_eq!(repo.len(), 1, "string entry must produce exactly one Region pattern");
+        match &repo[0] {
+            Pattern::Region { name, end_pattern, patterns, .. } => {
+                assert_eq!(name.as_deref(), Some("string.quoted.double"));
+                assert_eq!(end_pattern, "\"");
+                assert_eq!(patterns.len(), 1, "Region must contain child patterns");
+            }
+            other => panic!("expected Region, got {:?}", other),
+        }
+    }
+
+    /// End-to-end: a JSON-like grammar with repository string regions must
+    /// highlight string content (not leave it uncolored).
+    #[test]
+    fn test_string_region_from_repository_tokenizes_content() {
+        use crate::syntax::tokenizer::{LineState, Tokenizer};
+
+        let g = parse_grammar(
+            r##"{
+                "scopeName": "source.test",
+                "patterns": [{"include": "#value"}],
+                "repository": {
+                    "value": {
+                        "patterns": [
+                            {"include": "#string"},
+                            {"include": "#number"}
+                        ]
+                    },
+                    "string": {
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted.double"
+                    },
+                    "number": {
+                        "match": "-?[0-9]+",
+                        "name": "constant.numeric"
+                    }
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let t = Tokenizer::new(&g);
+
+        // String content should carry "string.quoted.double" scope
+        let (tokens, state) = t.tokenize_line(r#""hello""#, &LineState::initial());
+        assert!(state.stack.is_empty(), "string region should close");
+        let str_tok = tokens
+            .iter()
+            .find(|tok| tok.scopes.iter().any(|s| s.starts_with("string")));
+        assert!(str_tok.is_some(), "string content must have string.* scope");
+
+        // Number should be colored too
+        let (tokens2, _) = t.tokenize_line("42", &LineState::initial());
+        let num_tok = tokens2
+            .iter()
+            .find(|tok| tok.scopes.contains(&"constant.numeric".to_string()));
+        assert!(num_tok.is_some(), "42 must match constant.numeric");
     }
 }

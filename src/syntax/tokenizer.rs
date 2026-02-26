@@ -24,6 +24,16 @@ pub struct ActiveRegion {
     pub content_name: Option<String>,
     pub end_pattern: String,
     pub region_id: Option<usize>,
+    /// Byte offset (in the current line) where the begin match ended.
+    /// Used as the `\G` anchor when searching for the end pattern.
+    /// For regions that carry over from a previous line this is the value
+    /// from when the region was originally opened; since it refers to a
+    /// different line it will never equal any `pos` on the new line,
+    /// so `(?!\G)` will match immediately at position 0 — the correct
+    /// behaviour (the region closes at the start of the continuation line).
+    pub begin_end_pos: usize,
+    /// Capture-level scopes applied to the end delimiter token.
+    pub end_captures: Vec<(usize, String)>,
 }
 
 impl PartialEq for ActiveRegion {
@@ -65,6 +75,7 @@ enum MatchKind {
         region_id: usize,
         captures: Option<Captures>,
         capture_scopes: Vec<(usize, String)>,
+        end_capture_scopes: Vec<(usize, String)>,
     },
 }
 
@@ -77,11 +88,42 @@ impl<'a> Tokenizer<'a> {
         let mut tokens: Vec<ScopeToken> = Vec::new();
         let mut stack = state.stack.clone();
         let mut pos = 0;
+        // Cache the end-pattern search to avoid O(n²) rescanning for long lines.
+        // When many child-pattern matches occur before the end delimiter (e.g. escape
+        // sequences inside a 14 000-char JSON string), every iteration would rescan
+        // from `pos` to find the same end `"`.  Instead we reuse the cached result
+        // whenever the cached match is still ahead of the current position.
+        let mut end_cache: Option<(super::regex::Match, Option<Captures>)> = None;
+        let mut end_cache_depth: usize = 0;
+        let mut end_cache_pat = String::new();
 
         while pos < line.len() {
             // If inside a region, try end pattern first
             if let Some(region) = stack.last() {
-                let end_result = try_compile_and_match(&region.end_pattern, line, pos);
+                let cur_depth = stack.len();
+                let g_anchor = region.begin_end_pos;
+                let end_result = if cur_depth == end_cache_depth
+                    && region.end_pattern == end_cache_pat
+                {
+                    match &end_cache {
+                        // Cached match is still ahead — reuse it.
+                        Some((m, _)) if m.start >= pos => end_cache.clone(),
+                        // Cache miss: cached end is behind us or absent.
+                        _ => {
+                            let r =
+                                try_compile_and_match(&region.end_pattern, line, pos, g_anchor);
+                            end_cache = r.clone();
+                            r
+                        }
+                    }
+                } else {
+                    // Region changed — recompute and prime the cache.
+                    end_cache_depth = cur_depth;
+                    end_cache_pat = region.end_pattern.clone();
+                    let r = try_compile_and_match(&region.end_pattern, line, pos, g_anchor);
+                    end_cache = r.clone();
+                    r
+                };
 
                 // Also find earliest child/pattern match
                 let child_patterns = self.active_patterns(&stack);
@@ -99,7 +141,7 @@ impl<'a> Tokenizer<'a> {
 
                 if child_before_end {
                     // Child pattern wins — fall through to process it below
-                } else if let Some((end_m, _end_caps)) = &end_result {
+                } else if let Some((end_m, end_caps)) = &end_result {
                     let end_start = end_m.start;
                     let end_end = end_m.end;
 
@@ -113,14 +155,38 @@ impl<'a> Tokenizer<'a> {
                         });
                     }
 
-                    // Emit end marker token
+                    // Emit end marker token (skip zero-width matches like (?!\G) ends).
                     let region = stack.pop().unwrap();
-                    let scopes = build_scopes_from_stack_with_popped(&stack, &region);
-                    tokens.push(ScopeToken {
-                        start: end_start,
-                        end: end_end,
-                        scopes,
-                    });
+                    if end_start < end_end {
+                        if !region.end_captures.is_empty() {
+                            if let Some(caps) = end_caps {
+                                emit_capture_tokens(
+                                    &mut tokens,
+                                    caps,
+                                    &region.end_captures,
+                                    &stack,
+                                    region.scope_name.as_deref(),
+                                    end_start,
+                                    end_end,
+                                );
+                            } else {
+                                let scopes =
+                                    build_scopes_from_stack_with_popped(&stack, &region);
+                                tokens.push(ScopeToken {
+                                    start: end_start,
+                                    end: end_end,
+                                    scopes,
+                                });
+                            }
+                        } else {
+                            let scopes = build_scopes_from_stack_with_popped(&stack, &region);
+                            tokens.push(ScopeToken {
+                                start: end_start,
+                                end: end_end,
+                                scopes,
+                            });
+                        }
+                    }
 
                     pos = end_end;
                     continue;
@@ -212,6 +278,7 @@ impl<'a> Tokenizer<'a> {
                             region_id,
                             captures,
                             capture_scopes,
+                            end_capture_scopes,
                         } => {
                             // Resolve end pattern with backref substitution
                             let resolved_end = match &captures {
@@ -248,13 +315,16 @@ impl<'a> Tokenizer<'a> {
                                 });
                             }
 
+                            let begin_end = cand.pos + cand.len;
                             stack.push(ActiveRegion {
                                 scope_name: name,
                                 content_name,
                                 end_pattern: resolved_end,
                                 region_id: Some(region_id),
+                                begin_end_pos: begin_end,
+                                end_captures: end_capture_scopes,
                             });
-                            pos = cand.pos + cand.len;
+                            pos = begin_end;
                             // Zero-width guard
                             if cand.len == 0 {
                                 if pos < line.len() {
@@ -284,6 +354,21 @@ impl<'a> Tokenizer<'a> {
                     });
                     pos = line.len();
                 }
+            }
+        }
+
+        // Post-loop: close regions whose end pattern has a zero-width match at end-of-line.
+        // This handles the TextMate `(?!\G)` idiom: the region stays open when its single
+        // child token consumes the rest of the line, because the while loop above exits
+        // before the end pattern is checked at pos == line.len().
+        let eol = line.len();
+        while !stack.is_empty() {
+            let g_anchor = stack.last().unwrap().begin_end_pos;
+            match try_compile_and_match(&stack.last().unwrap().end_pattern, line, eol, g_anchor) {
+                Some((end_m, _)) if end_m.start == eol && end_m.end == eol => {
+                    stack.pop();
+                }
+                _ => break,
             }
         }
 
@@ -343,7 +428,7 @@ impl<'a> Tokenizer<'a> {
                     begin,
                     end_pattern,
                     begin_captures,
-                    end_captures: _,
+                    end_captures,
                     patterns: _child_patterns,
                 } => {
                     if let Some(m) = begin.find(line, pos) {
@@ -362,6 +447,7 @@ impl<'a> Tokenizer<'a> {
                                 region_id: *id,
                                 captures: caps,
                                 capture_scopes: begin_captures.clone(),
+                                end_capture_scopes: end_captures.clone(),
                             },
                         })
                     } else {
@@ -399,18 +485,31 @@ impl<'a> Tokenizer<'a> {
 
 // ── Helper functions ──────────────────────────────────────────
 
+/// Push a TextMate `name` / `contentName` value into `scopes`.
+///
+/// In TextMate grammars a scope field may contain multiple space-separated
+/// scope names (e.g. `"string.json support.type.property-name.json"`).
+/// We split them so each scope is an independent entry that the theme
+/// resolver can match individually.
+#[inline]
+fn push_scope(scopes: &mut Vec<String>, s: &str) {
+    for part in s.split_whitespace() {
+        scopes.push(part.to_string());
+    }
+}
+
 fn build_scopes_from_stack(stack: &[ActiveRegion], leaf: Option<&str>) -> Vec<String> {
     let mut scopes = Vec::new();
     for region in stack {
         if let Some(s) = &region.scope_name {
-            scopes.push(s.clone());
+            push_scope(&mut scopes, s);
         }
         if let Some(s) = &region.content_name {
-            scopes.push(s.clone());
+            push_scope(&mut scopes, s);
         }
     }
     if let Some(leaf) = leaf {
-        scopes.push(leaf.to_string());
+        push_scope(&mut scopes, leaf);
     }
     scopes
 }
@@ -422,14 +521,14 @@ fn build_scopes_from_stack_with_popped(
     let mut scopes = Vec::new();
     for region in stack {
         if let Some(s) = &region.scope_name {
-            scopes.push(s.clone());
+            push_scope(&mut scopes, s);
         }
         if let Some(s) = &region.content_name {
-            scopes.push(s.clone());
+            push_scope(&mut scopes, s);
         }
     }
     if let Some(s) = &popped.scope_name {
-        scopes.push(s.clone());
+        push_scope(&mut scopes, s);
     }
     scopes
 }
@@ -438,13 +537,14 @@ fn try_compile_and_match(
     pattern: &str,
     line: &str,
     pos: usize,
+    g_anchor: usize,
 ) -> Option<(super::regex::Match, Option<Captures>)> {
     let re = Regex::new(pattern).ok()?;
-    let m = re.find(line, pos)?;
+    let m = re.find_with_anchor(line, pos, g_anchor)?;
     if m.start < pos {
         return None; // only accept matches at or after pos
     }
-    let caps = re.captures(line, pos);
+    let caps = re.captures_with_anchor(line, pos, g_anchor);
     Some((m, caps))
 }
 
@@ -534,7 +634,7 @@ fn emit_capture_tokens(
             });
         }
         let mut scopes = build_scopes_from_stack(stack, cap0_scope);
-        scopes.push(cscope.to_string());
+        push_scope(&mut scopes, cscope);
         tokens.push(ScopeToken {
             start: *cstart,
             end: *cend,
@@ -843,6 +943,8 @@ mod tests {
                 content_name: None,
                 end_pattern: "\\*/".to_string(),
                 region_id: None,
+                begin_end_pos: 0,
+                end_captures: vec![],
             }],
         };
         let s2 = LineState {
@@ -851,6 +953,8 @@ mod tests {
                 content_name: None,
                 end_pattern: "\\*/".to_string(),
                 region_id: None,
+                begin_end_pos: 0,
+                end_captures: vec![],
             }],
         };
         let s3 = LineState {
@@ -859,6 +963,8 @@ mod tests {
                 content_name: None,
                 end_pattern: "\"".to_string(),
                 region_id: None,
+                begin_end_pos: 0,
+                end_captures: vec![],
             }],
         };
         assert_eq!(s1, s2);
@@ -966,6 +1072,133 @@ mod tests {
         assert_eq!(resolved, "EOF");
     }
 
+    /// Regression: JSON number pattern uses (?x) extended mode.
+    /// Before the fix, strip_extended_mode was not called and the whitespace/
+    /// comment characters were compiled as literals → the pattern never matched.
+    #[test]
+    fn test_json_number_extended_mode() {
+        // This is the exact (?x) number pattern from grammars/json.tmLanguage.json
+        let json_number_pat = "(?x)        # turn on extended mode\n  -?        # an optional minus\n  (?:\n    0       # a zero\n    |       # ...or...\n    [1-9]   # a 1-9 character\n    \\d*     # followed by zero or more digits\n  )\n  (?:\n    (?:\n      \\.    # a period\n      \\d+   # followed by one or more digits\n    )?\n    (?:\n      [eE]  # an e character\n      [+-]? # followed by an option +/-\n      \\d+   # followed by one or more digits\n    )?      # make exponent optional\n  )?        # make decimal portion optional";
+        let g = make_grammar(&format!(
+            r#"{{
+                "scopeName": "source.json",
+                "patterns": [
+                    {{"match": {}, "name": "constant.numeric.json"}},
+                    {{"match": "\\btrue\\b", "name": "constant.language.json"}}
+                ]
+            }}"#,
+            serde_json_string(json_number_pat)
+        ));
+        let t = Tokenizer::new(&g);
+
+        // Integer
+        let (tokens, _) = t.tokenize_line("42", &LineState::initial());
+        let num_tok = tokens
+            .iter()
+            .find(|tok| tok.scopes.contains(&"constant.numeric.json".to_string()));
+        assert!(num_tok.is_some(), "42 should match as constant.numeric.json");
+        assert_eq!(num_tok.unwrap().start, 0);
+        assert_eq!(num_tok.unwrap().end, 2);
+
+        // Negative decimal
+        let (tokens2, _) = t.tokenize_line("-3.14", &LineState::initial());
+        let num_tok2 = tokens2
+            .iter()
+            .find(|tok| tok.scopes.contains(&"constant.numeric.json".to_string()));
+        assert!(num_tok2.is_some(), "-3.14 should match as constant.numeric.json");
+
+        // Boolean should NOT match number pattern
+        let (tokens3, _) = t.tokenize_line("true", &LineState::initial());
+        let lang_tok = tokens3
+            .iter()
+            .find(|tok| tok.scopes.contains(&"constant.language.json".to_string()));
+        assert!(lang_tok.is_some(), "true should match constant.language.json");
+        let num_in_bool = tokens3
+            .iter()
+            .any(|tok| tok.scopes.contains(&"constant.numeric.json".to_string()));
+        assert!(!num_in_bool, "true should NOT match the number pattern");
+    }
+
+    /// JSON string escape pattern also uses (?x). Verify it compiles and matches.
+    #[test]
+    fn test_json_string_escape_extended_mode() {
+        let escape_pat = "(?x)                # turn on extended mode\n  \\\\                # a literal backslash\n  (?:               # ...followed by...\n    [\"\\\\/bfnrt]     # one of these characters\n    |               # ...or...\n    u               # a u\n    [0-9a-fA-F]{4}) # and four hex digits";
+        let g = make_grammar(&format!(
+            r#"{{
+                "scopeName": "source.json",
+                "patterns": [
+                    {{
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted.double.json",
+                        "patterns": [
+                            {{"match": {}, "name": "constant.character.escape.json"}}
+                        ]
+                    }}
+                ]
+            }}"#,
+            serde_json_string(escape_pat)
+        ));
+        let t = Tokenizer::new(&g);
+
+        let (tokens, state) = t.tokenize_line(r#""hello\nworld""#, &LineState::initial());
+        assert!(state.stack.is_empty());
+        let esc = tokens
+            .iter()
+            .find(|tok| tok.scopes.contains(&"constant.character.escape.json".to_string()));
+        assert!(esc.is_some(), "\\n should be a constant.character.escape.json token");
+    }
+
+    /// Markdown heading pattern should produce markup.heading.markdown scope.
+    #[test]
+    fn test_markdown_heading_scope() {
+        // Simplified version of the markdown heading pattern (from the grammar)
+        let g = make_grammar(
+            r##"{
+                "scopeName": "text.html.markdown",
+                "patterns": [
+                    {
+                        "match": "^(#{1,6})\\s+(.+?)$",
+                        "name": "markup.heading.markdown",
+                        "captures": {
+                            "2": {"name": "entity.name.section.markdown"}
+                        }
+                    }
+                ]
+            }"##,
+        );
+        let t = Tokenizer::new(&g);
+
+        let (tokens, _) = t.tokenize_line("## My Title", &LineState::initial());
+        let heading_tok = tokens
+            .iter()
+            .find(|tok| tok.scopes.contains(&"markup.heading.markdown".to_string()));
+        assert!(heading_tok.is_some(), "## should produce markup.heading.markdown");
+
+        let section_tok = tokens
+            .iter()
+            .find(|tok| tok.scopes.contains(&"entity.name.section.markdown".to_string()));
+        assert!(section_tok.is_some(), "heading text should have entity.name.section.markdown");
+    }
+
+    // Minimal JSON serializer for embedding a string literal inside a JSON grammar.
+    fn serde_json_string(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for b in s.bytes() {
+            match b {
+                b'"' => out.push_str("\\\""),
+                b'\\' => out.push_str("\\\\"),
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                b'\t' => out.push_str("\\t"),
+                _ => out.push(b as char),
+            }
+        }
+        out.push('"');
+        out
+    }
+
     #[test]
     fn test_captures_with_numbered_groups() {
         let g = make_grammar(
@@ -993,5 +1226,139 @@ mod tests {
             .any(|t| t.scopes.contains(&"support.function".to_string()));
         assert!(has_entity);
         assert!(has_function);
+    }
+
+    /// Regression: end-pattern cache must survive many child matches on a long line.
+    ///
+    /// A JSON-like grammar has a string region `"..."` with an escape child `\\.`.
+    /// A line containing 200 escape sequences inside a string must produce the
+    /// correct tokens and NOT hang (the cache avoids O(n²) rescanning).
+    #[test]
+    fn test_end_pattern_cache_long_line() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {
+                        "begin": "\"",
+                        "end": "\"",
+                        "name": "string.quoted",
+                        "patterns": [
+                            {"match": "\\\\.", "name": "constant.character.escape"}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+
+        // Build a string with 200 escape sequences: "\\a\\a\\a...\\a"
+        let mut line = String::from("\"");
+        for _ in 0..200 {
+            line.push_str("\\a");
+        }
+        line.push('"');
+
+        let (tokens, state) = t.tokenize_line(&line, &LineState::initial());
+        // Region must be closed at end of line.
+        assert!(state.stack.is_empty(), "string region should be closed");
+        // All 200 escape sequences should be highlighted.
+        let esc_count = tokens
+            .iter()
+            .filter(|tok| tok.scopes.contains(&"constant.character.escape".to_string()))
+            .count();
+        assert_eq!(esc_count, 200, "expected 200 escape tokens, got {}", esc_count);
+    }
+
+    /// Regression: `(?!\G)` end pattern must close the region immediately after
+    /// the first child-pattern match — it must NOT leak to the next line.
+    ///
+    /// The R grammar uses this idiom for `$accessor` and `::namespace` regions:
+    ///   begin: `(\$)(?=identifier)`  end: `(?!\G)`
+    /// After the begin match at pos P, the child identifier is matched and the
+    /// region must close before any subsequent characters.
+    #[test]
+    fn test_not_g_anchor_region_closes_after_child() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {
+                        "begin": "(\\$)(?=[a-z])",
+                        "beginCaptures": {"1": {"name": "punctuation.accessor"}},
+                        "end": "(?!\\G)",
+                        "patterns": [
+                            {"match": "[a-z]+", "name": "entity.name.identifier"}
+                        ]
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+
+        // The identifier after $ should get entity.name.identifier scope.
+        let (tokens, state) = t.tokenize_line("$foo", &LineState::initial());
+        // Region must be CLOSED at end of line (no leak to next line).
+        assert!(
+            state.stack.is_empty(),
+            "(?!\\G) region must close before end of line, stack={:?}",
+            state.stack
+        );
+        // $ gets punctuation.accessor.
+        let accessor_tok = tokens
+            .iter()
+            .find(|tok| tok.scopes.contains(&"punctuation.accessor".to_string()));
+        assert!(accessor_tok.is_some(), "$ should be punctuation.accessor");
+        // identifier gets entity.name.identifier.
+        let ident_tok = tokens
+            .iter()
+            .find(|tok| tok.scopes.contains(&"entity.name.identifier".to_string()));
+        assert!(ident_tok.is_some(), "foo should be entity.name.identifier");
+        assert_eq!(ident_tok.unwrap().start, 1);
+        assert_eq!(ident_tok.unwrap().end, 4);
+    }
+
+    /// Regression: `endCaptures` must be applied to the end delimiter token.
+    #[test]
+    fn test_end_captures_applied_to_closing_delimiter() {
+        let g = make_grammar(
+            r#"{
+                "scopeName": "source.test",
+                "patterns": [
+                    {
+                        "begin": "\\(",
+                        "beginCaptures": {"0": {"name": "punctuation.open"}},
+                        "end": "\\)",
+                        "endCaptures": {"0": {"name": "punctuation.close"}}
+                    }
+                ]
+            }"#,
+        );
+        let t = Tokenizer::new(&g);
+
+        let (tokens, state) = t.tokenize_line("(x)", &LineState::initial());
+        assert!(state.stack.is_empty());
+
+        // Opening ( must have punctuation.open.
+        let open_tok = tokens
+            .iter()
+            .find(|tok| tok.start == 0 && tok.end == 1);
+        assert!(open_tok.is_some());
+        assert!(
+            open_tok.unwrap().scopes.contains(&"punctuation.open".to_string()),
+            "( should have punctuation.open, got {:?}",
+            open_tok.unwrap().scopes
+        );
+
+        // Closing ) must have punctuation.close (endCaptures group 0).
+        let close_tok = tokens
+            .iter()
+            .find(|tok| tok.start == 2 && tok.end == 3);
+        assert!(close_tok.is_some(), "no token for closing )");
+        assert!(
+            close_tok.unwrap().scopes.contains(&"punctuation.close".to_string()),
+            ") should have punctuation.close, got {:?}",
+            close_tok.unwrap().scopes
+        );
     }
 }

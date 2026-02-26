@@ -6,7 +6,7 @@ use crate::config::LanguageDef;
 use crate::render::Color;
 use crate::syntax::grammar::Grammar;
 use crate::syntax::json_parser;
-use crate::syntax::theme::Theme;
+use crate::syntax::theme::{Theme, ensure_readable_contrast};
 use crate::syntax::tokenizer::{LineState, Tokenizer};
 
 // ── Types ────────────────────────────────────────────────────
@@ -59,6 +59,11 @@ impl Highlighter {
 
     pub fn language(&self) -> Option<&str> {
         self.lang.as_deref()
+    }
+
+    /// First line whose cached state is not yet valid.
+    pub fn valid_until(&self) -> usize {
+        self.valid_until
     }
 
     /// Invalidate cached states from the given line onward.
@@ -278,10 +283,12 @@ pub fn load_theme(theme_name: &str) -> Theme {
     if let Ok(home) = std::env::var("HOME") {
         let path = format!("{}/.config/zedit/themes/{}.json", home, theme_name);
         if let Ok(json_str) = std::fs::read_to_string(&path)
-            && let Some(theme) = json_parser::JsonValue::parse(&json_str)
+            && let Some(mut theme) = json_parser::JsonValue::parse(&json_str)
                 .ok()
                 .and_then(|val| Theme::from_json(&val).ok())
         {
+            let bg = theme.background;
+            ensure_readable_contrast(&mut theme, bg);
             return theme;
         }
     }
@@ -292,13 +299,18 @@ pub fn load_theme(theme_name: &str) -> Theme {
         _ => None,
     };
     if let Some(json_str) = json_str
-        && let Some(theme) = json_parser::JsonValue::parse(json_str)
+        && let Some(mut theme) = json_parser::JsonValue::parse(json_str)
             .ok()
             .and_then(|val| Theme::from_json(&val).ok())
     {
+        let bg = theme.background;
+        ensure_readable_contrast(&mut theme, bg);
         return theme;
     }
-    Theme::default_theme()
+    let mut theme = Theme::default_theme();
+    let bg = theme.background;
+    ensure_readable_contrast(&mut theme, bg);
+    theme
 }
 
 // ── Comment prefix lookup ────────────────────────────────────
@@ -525,15 +537,13 @@ mod tests {
         // Simulates: 'HELLO' where the whole span (including delimiters) has string scope.
         // LSP sends a "variable" token for HELLO (chars 1-5 inside the string).
         // The render loop should NOT apply the semantic token there.
-        let spans = vec![
-            StyledSpan {
-                start: 0,
-                end: 7, // 'HELLO'  (7 bytes)
-                fg: Color::Rgb(166, 227, 161), // green string color
-                bold: false,
-                is_string_or_comment: true, // ← the whole region is protected
-            },
-        ];
+        let spans = vec![StyledSpan {
+            start: 0,
+            end: 7,                        // 'HELLO'  (7 bytes)
+            fg: Color::Rgb(166, 227, 161), // green string color
+            bold: false,
+            is_string_or_comment: true, // ← the whole region is protected
+        }];
         // All bytes in the string are protected
         assert!(is_in_string_or_comment(&spans, 0)); // opening quote
         assert!(is_in_string_or_comment(&spans, 1)); // H
@@ -775,6 +785,48 @@ mod tests {
                 "byte {i} inside Zenith string literal should be protected from LSP override"
             );
         }
+    }
+
+    /// Regression: JSON string/object/array regions were never activated because
+    /// `parse_repository_entry` returned child patterns instead of the Region when
+    /// the entry had both "begin" and "patterns" keys.
+    /// After the fix, string values must carry string.* scope and numbers must
+    /// carry constant.numeric.* scope.
+    #[test]
+    fn test_json_highlighting_end_to_end() {
+        let langs = builtin_languages();
+        let grammar = match load_grammar("json", &langs) {
+            Some(g) => g,
+            None => return, // grammar file not in test environment
+        };
+        let theme = load_theme("zedit-dark");
+        let mut hl = Highlighter::new(grammar, theme);
+
+        // String value: every byte inside the quoted string must have a non-default color.
+        let line_str = r#""hello""#;
+        let spans = hl.style_line(0, line_str, |_| None);
+        let has_string_color = spans.iter().any(|s| {
+            s.start <= 1 && s.end >= 2 && s.fg != Color::Default
+        });
+        assert!(
+            has_string_color,
+            "string content must be colored (string.* scope); spans: {:?}",
+            spans.iter().map(|s| (s.start, s.end, &s.fg)).collect::<Vec<_>>()
+        );
+
+        // Number: "42" must be constant.numeric colored.
+        let line_num = "42";
+        let spans2 = hl.style_line(1, line_num, |_| Some(r#""hello""#.to_string()));
+        let num_colored = spans2.iter().any(|s| s.fg != Color::Default);
+        assert!(num_colored, "42 must be colored as constant.numeric");
+
+        // Constant: true must be colored.
+        let line_bool = "true";
+        let spans3 = hl.style_line(2, line_bool, |l| {
+            [r#""hello""#, "42"].get(l).map(|s| s.to_string())
+        });
+        let bool_colored = spans3.iter().any(|s| s.fg != Color::Default);
+        assert!(bool_colored, "true must be colored as constant.language");
     }
 
     #[test]
