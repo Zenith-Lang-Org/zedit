@@ -463,7 +463,7 @@ impl KeyMap {
             ("Alt+Shift+Down", EditorAction::ResizePaneDown),
             // View
             ("F1", EditorAction::ToggleHelp),
-            ("F2", EditorAction::ToggleFileTree),  // dual binding; Ctrl+B remains below
+            ("F2", EditorAction::ToggleFileTree), // dual binding; Ctrl+B remains below
             ("Alt+Z", EditorAction::ToggleWrap),
             ("Ctrl+B", EditorAction::ToggleFileTree),
             ("Ctrl+P", EditorAction::CommandPalette),

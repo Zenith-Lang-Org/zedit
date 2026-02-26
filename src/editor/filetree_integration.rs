@@ -36,15 +36,17 @@ impl Editor {
         let start = self
             .buffers
             .iter()
-            .find_map(|bs| bs.buffer.file_path().map(|p| {
-                if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    std::env::current_dir()
-                        .map(|cwd| cwd.join(p))
-                        .unwrap_or_else(|_| p.to_path_buf())
-                }
-            }))
+            .find_map(|bs| {
+                bs.buffer.file_path().map(|p| {
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        std::env::current_dir()
+                            .map(|cwd| cwd.join(p))
+                            .unwrap_or_else(|_| p.to_path_buf())
+                    }
+                })
+            })
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));

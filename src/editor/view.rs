@@ -159,13 +159,28 @@ impl Editor {
 
         // Render file tree sidebar first so its row-0 title is drawn before the tab bar
         if let Some(ref mut ft) = self.filetree {
-            // Full height minus status bar; sidebar title sits on row 0.
+            // Build a map of open file paths → modified flag for the tree renderer.
+            // Canonicalize every path so relative buffer paths match absolute tree paths.
+            let mut open_paths: std::collections::HashMap<std::path::PathBuf, bool> =
+                std::collections::HashMap::new();
+            for bs in &self.buffers {
+                if let Some(path) = bs.buffer.file_path() {
+                    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| {
+                        std::env::current_dir()
+                            .map(|cwd| cwd.join(path))
+                            .unwrap_or_else(|_| path.to_path_buf())
+                    });
+                    open_paths.insert(canon, bs.buffer.is_modified());
+                }
+            }
+
             let sidebar_height = screen_height.saturating_sub(self.status_height);
             ft.render(
                 &mut self.screen,
                 sidebar_height,
                 self.filetree_focused,
                 0, // y_offset = 0: title on row 0, tree content from row 1
+                &open_paths,
             );
         }
 
@@ -340,6 +355,26 @@ impl Editor {
         }
 
         // -- Message line --
+        // When a file-change notice is active it overrides the normal message.
+        let notice_text: Option<String> = self.file_change_notice.as_ref().map(|n| {
+            if n.buffer_modified {
+                " [!] Disk version changed (unsaved edits)   [D] Diff   [R] Reload   [I] Ignore"
+                    .to_string()
+            } else {
+                " [!] File updated externally   [R] Reload   [I] Ignore".to_string()
+            }
+        });
+        let active_msg: Option<&str> = if notice_text.is_some() {
+            notice_text.as_deref()
+        } else {
+            self.message.as_deref()
+        };
+        let active_msg_type = if self.file_change_notice.is_some() {
+            MessageType::Warning
+        } else {
+            self.message_type
+        };
+
         let msg_row = h + 1;
         if msg_row < screen_height {
             // Fill with spaces first
@@ -348,7 +383,13 @@ impl Editor {
                     .put_char(msg_row, col, ' ', Color::Default, Color::Default, false);
             }
 
-            if let Some(ref prompt) = self.prompt {
+            if self.file_change_notice.is_some() {
+                // Notice always shown on its own (no prompt overlay)
+                if let Some(ref msg) = active_msg {
+                    self.screen
+                        .put_str(msg_row, 0, msg, Color::Ansi(3), Color::Default, true);
+                }
+            } else if let Some(ref prompt) = self.prompt {
                 // Render prompt: label (yellow) + input (default)
                 let label_fg = Color::Ansi(3); // yellow
                 self.screen
@@ -376,8 +417,8 @@ impl Editor {
                             .put_str(msg_row, err_start, msg, msg_fg, Color::Default, false);
                     }
                 }
-            } else if let Some(ref msg) = self.message {
-                let msg_fg = match self.message_type {
+            } else if let Some(ref msg) = active_msg {
+                let msg_fg = match active_msg_type {
                     MessageType::Info => Color::Ansi(2),    // green
                     MessageType::Error => Color::Ansi(1),   // red
                     MessageType::Warning => Color::Ansi(3), // yellow
@@ -416,6 +457,19 @@ impl Editor {
         }
         if self.hover_popup.is_some() {
             self.render_hover_popup();
+        }
+
+        // Update terminal window/tab title when the active file changes.
+        // Only emit the OSC sequence when the title actually changes to avoid
+        // unnecessary output on every frame.
+        let new_title = {
+            let idx = self.active_buffer_index();
+            let name = self.buffer_display_name(idx);
+            format!("zedit - {}", name)
+        };
+        if new_title != self.last_title {
+            crate::terminal::set_title(&new_title);
+            self.last_title = new_title;
         }
 
         // Flush the screen
@@ -463,8 +517,11 @@ impl Editor {
                         .min(pane_h);
                     let (vt_row, vt_col) = self.vterms[ti].cursor_pos();
                     // Add 1 row offset for the tab bar when this is the bottom panel
-                    let tab_bar_offset =
-                        if self.terminal_panel_pane == Some(self.active_pane) { 1usize } else { 0 };
+                    let tab_bar_offset = if self.terminal_panel_pane == Some(self.active_pane) {
+                        1usize
+                    } else {
+                        0
+                    };
                     let screen_row = rect.y as usize + tab_bar_offset + sb_lines + vt_row as usize;
                     if screen_row < rect.y as usize + pane_h {
                         let screen_col = rect.x as usize + vt_col as usize;
@@ -550,9 +607,9 @@ impl Editor {
             let name = self.buffer_display_name(i);
             let modified = self.buffers[i].buffer.is_modified();
             let label = if modified {
-                format!(" {} [+] ", name)
+                format!(" * {} ", name)
             } else {
-                format!(" {} ", name)
+                format!("   {} ", name)
             };
             let width = crate::unicode::str_width(&label);
             tab_labels.push((label, width, i));
@@ -610,7 +667,8 @@ impl Editor {
 
         // Render left arrow if scrolled
         if has_left_arrow {
-            self.screen.put_str(0, x_offset, " < ", arrow_fg, tab_bg, true);
+            self.screen
+                .put_str(0, x_offset, " < ", arrow_fg, tab_bg, true);
             regions.push((x_offset, x_offset + 3, usize::MAX)); // sentinel for left arrow
             col = x_offset + 3;
         }
@@ -833,10 +891,28 @@ impl Editor {
 
                 // Syntax highlighting spans
                 let spans = {
+                    use std::cell::Cell;
                     let bs = &mut self.buffers[buffer_idx];
                     bs.highlighter.as_mut().map(|hl| {
+                        // Compute start byte once via checkpoint, then advance linearly
+                        // through each line O(line_len) instead of O(checkpoint_dist) per
+                        // line — changes warmup from O(n²) to O(total_bytes).
+                        let warmup_start = if hl.valid_until() == 0 {
+                            0
+                        } else {
+                            bs.buffer.line_start(hl.valid_until()).unwrap_or(0)
+                        };
+                        let next_byte = Cell::new(warmup_start);
                         let buf_ref = &bs.buffer;
-                        hl.style_line(file_line, &line_text, |l| buf_ref.get_line(l))
+                        hl.style_line(file_line, &line_text, |_l| {
+                            let pos = next_byte.get();
+                            if let Some((text, nxt)) = buf_ref.line_at_byte(pos) {
+                                next_byte.set(nxt);
+                                Some(text)
+                            } else {
+                                None
+                            }
+                        })
                     })
                 };
 
@@ -876,7 +952,12 @@ impl Editor {
                 let mut display_col: usize = 0;
                 let mut byte_offset_in_line: usize = 0;
                 for ch in line_text.chars() {
-                    let cw = crate::unicode::char_width(ch);
+                    let cw = if ch == '\t' {
+                        let tw = crate::unicode::TAB_WIDTH;
+                        tw - (display_col % tw)
+                    } else {
+                        crate::unicode::char_width(ch)
+                    };
                     if display_col >= scroll_col {
                         let screen_col = pane_x + display_col - scroll_col + gutter_width;
                         if screen_col >= pane_x + pane_w {
@@ -893,9 +974,7 @@ impl Editor {
                         // string literals (e.g., 'HELLO' → LSP says HELLO is a variable).
                         let is_str_or_comment = spans
                             .as_ref()
-                            .map(|s| {
-                                highlight::is_in_string_or_comment(s, byte_offset_in_line)
-                            })
+                            .map(|s| highlight::is_in_string_or_comment(s, byte_offset_in_line))
                             .unwrap_or(false);
 
                         let (fg, bg, bold) = if is_selected {
@@ -966,7 +1045,14 @@ impl Editor {
                             })
                             .map(|(_, sev, _)| *sev);
 
-                        if let Some(sev) = diag_underline {
+                        if ch == '\t' {
+                            for i in 0..cw {
+                                let sc = screen_col + i;
+                                if sc < pane_x + pane_w {
+                                    self.screen.put_char(screen_row, sc, ' ', fg, bg, bold);
+                                }
+                            }
+                        } else if let Some(sev) = diag_underline {
                             let underline_fg = match sev {
                                 crate::lsp::protocol::DiagnosticSeverity::Error => Color::Ansi(1),
                                 crate::lsp::protocol::DiagnosticSeverity::Warning => Color::Ansi(3),
@@ -1245,10 +1331,25 @@ impl Editor {
 
             // Syntax highlighting spans
             let spans = {
+                use std::cell::Cell;
                 let bs = &mut self.buffers[buffer_idx];
                 bs.highlighter.as_mut().map(|hl| {
+                    let warmup_start = if hl.valid_until() == 0 {
+                        0
+                    } else {
+                        bs.buffer.line_start(hl.valid_until()).unwrap_or(0)
+                    };
+                    let next_byte = Cell::new(warmup_start);
                     let buf_ref = &bs.buffer;
-                    hl.style_line(file_line, &line_text, |l| buf_ref.get_line(l))
+                    hl.style_line(file_line, &line_text, |_l| {
+                        let pos = next_byte.get();
+                        if let Some((text, nxt)) = buf_ref.line_at_byte(pos) {
+                            next_byte.set(nxt);
+                            Some(text)
+                        } else {
+                            None
+                        }
+                    })
                 })
             };
 
@@ -1261,7 +1362,12 @@ impl Editor {
 
             for ch in line_text.chars() {
                 let char_len = ch.len_utf8();
-                let cw = crate::unicode::char_width(ch);
+                let cw = if ch == '\t' {
+                    let tw = crate::unicode::TAB_WIDTH;
+                    tw - (display_col % tw)
+                } else {
+                    crate::unicode::char_width(ch)
+                };
 
                 // Only render chars within this segment
                 if byte_offset_in_line >= seg_start && byte_offset_in_line < seg_end_clamped {
@@ -1282,9 +1388,7 @@ impl Editor {
                     // string literals (e.g., 'HELLO' → LSP says HELLO is a variable).
                     let is_str_or_comment = spans
                         .as_ref()
-                        .map(|s| {
-                            highlight::is_in_string_or_comment(s, byte_offset_in_line)
-                        })
+                        .map(|s| highlight::is_in_string_or_comment(s, byte_offset_in_line))
                         .unwrap_or(false);
 
                     let (fg, bg, bold) = if is_selected {
@@ -1338,8 +1442,17 @@ impl Editor {
                             None => (Color::Default, Color::Default, false),
                         }
                     };
-                    self.screen
-                        .put_char(screen_row, screen_col, ch, fg, bg, bold);
+                    if ch == '\t' {
+                        for i in 0..cw {
+                            let sc = screen_col + i;
+                            if sc < pane_x + pane_w {
+                                self.screen.put_char(screen_row, sc, ' ', fg, bg, bold);
+                            }
+                        }
+                    } else {
+                        self.screen
+                            .put_char(screen_row, screen_col, ch, fg, bg, bold);
+                    }
                     display_col += cw;
                 }
 
@@ -1834,14 +1947,23 @@ impl Editor {
                             .put_cell_styled(screen_row, screen_col, cell.ch, style);
                     } else {
                         let style = crate::render::CellStyle {
-                            fg: if selected { Color::Default } else { Color::Default },
-                            bg: if selected { Color::Ansi(7) } else { Color::Default },
+                            fg: if selected {
+                                Color::Default
+                            } else {
+                                Color::Default
+                            },
+                            bg: if selected {
+                                Color::Ansi(7)
+                            } else {
+                                Color::Default
+                            },
                             bold: false,
                             underline: false,
                             inverse: false,
                             italic: false,
                         };
-                        self.screen.put_cell_styled(screen_row, screen_col, ' ', style);
+                        self.screen
+                            .put_cell_styled(screen_row, screen_col, ' ', style);
                     }
                 } else {
                     // Render from live screen buffer
@@ -1861,13 +1983,18 @@ impl Editor {
                     } else {
                         let style = crate::render::CellStyle {
                             fg: Color::Default,
-                            bg: if selected { Color::Ansi(7) } else { Color::Default },
+                            bg: if selected {
+                                Color::Ansi(7)
+                            } else {
+                                Color::Default
+                            },
                             bold: false,
                             underline: false,
                             inverse: false,
                             italic: false,
                         };
-                        self.screen.put_cell_styled(screen_row, screen_col, ' ', style);
+                        self.screen
+                            .put_cell_styled(screen_row, screen_col, ' ', style);
                     }
                 }
             }
@@ -1933,8 +2060,7 @@ impl Editor {
         } else {
             (inactive_bg, inactive_fg, false)
         };
-        self.screen
-            .put_str(y, x, diag_base, d_fg, d_bg, d_bold);
+        self.screen.put_str(y, x, diag_base, d_fg, d_bg, d_bold);
         x += diag_base.len();
         if de > 0 || dw > 0 {
             if de > 0 {
@@ -1962,8 +2088,7 @@ impl Editor {
         } else {
             (inactive_bg, inactive_fg, false)
         };
-        self.screen
-            .put_str(y, x, prob_base, p_fg, p_bg, p_bold);
+        self.screen.put_str(y, x, prob_base, p_fg, p_bg, p_bold);
         x += prob_base.len();
         if pe > 0 || pw > 0 {
             if pe > 0 {
@@ -1996,18 +2121,18 @@ impl Editor {
         }
 
         // ── Colours ──────────────────────────────────────────
-        let item_bg     = Color::Color256(235);
+        let item_bg = Color::Color256(235);
         let item_bg_sel = Color::Color256(25);
-        let item_fg     = Color::Ansi(15);
-        let hdr_bg      = Color::Color256(237);
-        let hdr_fg      = Color::Ansi(15);
-        let dim_fg      = Color::Color256(244);
-        let err_fg      = Color::Ansi(9);
-        let warn_fg     = Color::Ansi(11);
-        let info_fg     = Color::Ansi(12);
-        let note_fg     = Color::Ansi(14);
-        let footer_bg   = Color::Color256(238);
-        let footer_fg   = Color::Color256(250);
+        let item_fg = Color::Ansi(15);
+        let hdr_bg = Color::Color256(237);
+        let hdr_fg = Color::Ansi(15);
+        let dim_fg = Color::Color256(244);
+        let err_fg = Color::Ansi(9);
+        let warn_fg = Color::Ansi(11);
+        let info_fg = Color::Ansi(12);
+        let note_fg = Color::Ansi(14);
+        let footer_bg = Color::Color256(238);
+        let footer_fg = Color::Color256(250);
 
         #[inline]
         fn dw(s: &str) -> usize {
@@ -2132,8 +2257,7 @@ impl Editor {
                 }
             };
 
-            let is_sel = disp_idx == selected
-                && self.terminal_panel_pane == Some(self.active_pane);
+            let is_sel = disp_idx == selected && self.terminal_panel_pane == Some(self.active_pane);
             let bg = if is_sel { item_bg_sel } else { item_bg };
             let sev_fg = match p.severity {
                 Severity::Error => err_fg,
@@ -2201,9 +2325,7 @@ impl Editor {
 
     /// Render the Problems panel content inside the bottom panel pane.
     fn render_problems_in_pane(&mut self, rect: Rect) {
-        use crate::problem_panel::{
-            RowKind, Severity, BUILD_GROUP_KEY, CARGO_FILE_PREFIX,
-        };
+        use crate::problem_panel::{BUILD_GROUP_KEY, CARGO_FILE_PREFIX, RowKind, Severity};
 
         let pane_x = rect.x as usize;
         let pane_y = rect.y as usize;
@@ -2215,19 +2337,19 @@ impl Editor {
         }
 
         // ── Colours ──────────────────────────────────────────
-        let item_bg     = Color::Color256(235);
+        let item_bg = Color::Color256(235);
         let item_bg_sel = Color::Color256(25);
-        let item_fg     = Color::Ansi(15);
-        let hdr_bg      = Color::Color256(237);
-        let hdr_bg_sel  = Color::Color256(26);
-        let hdr_fg      = Color::Ansi(15);
-        let dim_fg      = Color::Color256(244);
-        let err_fg      = Color::Ansi(9);
-        let warn_fg     = Color::Ansi(11);
-        let info_fg     = Color::Ansi(12);
-        let note_fg     = Color::Ansi(14);
-        let footer_bg   = Color::Color256(238);
-        let footer_fg   = Color::Color256(250);
+        let item_fg = Color::Ansi(15);
+        let hdr_bg = Color::Color256(237);
+        let hdr_bg_sel = Color::Color256(26);
+        let hdr_fg = Color::Ansi(15);
+        let dim_fg = Color::Color256(244);
+        let err_fg = Color::Ansi(9);
+        let warn_fg = Color::Ansi(11);
+        let info_fg = Color::Ansi(12);
+        let note_fg = Color::Ansi(14);
+        let footer_bg = Color::Color256(238);
+        let footer_fg = Color::Color256(250);
 
         // ── Helper: display-column width of a string ─────────
         #[inline]
@@ -2263,8 +2385,8 @@ impl Editor {
         // ── Display rows ─────────────────────────────────────
         for row in 0..list_rows {
             let screen_row = pane_y + row;
-            let disp_idx   = scroll + row;
-            let is_sel     = disp_idx == selected;
+            let disp_idx = scroll + row;
+            let is_sel = disp_idx == selected;
             let right_edge = pane_x + pane_w; // exclusive
 
             // Helper: fill the rest of a row with a background colour.
@@ -2283,7 +2405,10 @@ impl Editor {
                 // ── cargo check section header ───────────────
                 RowKind::CargoSectionHeader => {
                     let bg = if is_sel { hdr_bg_sel } else { hdr_bg };
-                    let collapsed = self.problem_panel.collapsed_groups.contains(BUILD_GROUP_KEY);
+                    let collapsed = self
+                        .problem_panel
+                        .collapsed_groups
+                        .contains(BUILD_GROUP_KEY);
                     let icon = if collapsed { "> " } else { "v " };
                     let (ec, wc) = self.problem_panel.build_counts();
 
@@ -2291,7 +2416,8 @@ impl Editor {
 
                     let mut col = pane_x;
                     let label = format!(" {}cargo check", icon);
-                    self.screen.put_str(screen_row, col, &label, hdr_fg, bg, true);
+                    self.screen
+                        .put_str(screen_row, col, &label, hdr_fg, bg, true);
                     col += dw(&label);
 
                     if ec > 0 && col + 3 < right_edge {
@@ -2325,12 +2451,14 @@ impl Editor {
 
                     let mut col = pane_x;
                     let leader = format!("   {}", icon);
-                    self.screen.put_str(screen_row, col, &leader, dim_fg, bg, false);
+                    self.screen
+                        .put_str(screen_row, col, &leader, dim_fg, bg, false);
                     col += dw(&leader);
 
                     let avail = right_edge.saturating_sub(col + 16);
                     let base_t = truncate_str(base, avail.max(4));
-                    self.screen.put_str(screen_row, col, base_t, hdr_fg, bg, true);
+                    self.screen
+                        .put_str(screen_row, col, base_t, hdr_fg, bg, true);
                     col += dw(base_t);
 
                     if !dir.is_empty() && col + 3 < right_edge {
@@ -2339,7 +2467,8 @@ impl Editor {
                         col += dw(sep);
                         let dir_avail = right_edge.saturating_sub(col + 12);
                         let dir_t = truncate_str(dir, dir_avail.max(1));
-                        self.screen.put_str(screen_row, col, dir_t, dim_fg, bg, false);
+                        self.screen
+                            .put_str(screen_row, col, dir_t, dim_fg, bg, false);
                         col += dw(dir_t);
                     }
 
@@ -2378,26 +2507,30 @@ impl Editor {
                     let mut col = pane_x;
 
                     // Indentation (deeper than section/file headers)
-                    self.screen.put_str(screen_row, col, "      ", item_fg, bg, false);
+                    self.screen
+                        .put_str(screen_row, col, "      ", item_fg, bg, false);
                     col += 6;
 
                     // Severity badge "[E] " / "[W] "
                     let badge = format!("[{}] ", p.severity.label());
-                    self.screen.put_str(screen_row, col, &badge, sev_fg, bg, true);
+                    self.screen
+                        .put_str(screen_row, col, &badge, sev_fg, bg, true);
                     col += dw(&badge);
 
                     // Location ":line  " — file is always shown in the parent header
                     let loc = format!(":{}  ", p.line);
                     if col < right_edge {
                         let loc_t = truncate_str(&loc, right_edge - col);
-                        self.screen.put_str(screen_row, col, loc_t, dim_fg, bg, false);
+                        self.screen
+                            .put_str(screen_row, col, loc_t, dim_fg, bg, false);
                         col += dw(loc_t);
                     }
 
                     // Message
                     if col < right_edge {
                         let msg_t = truncate_str(&p.message, right_edge - col);
-                        self.screen.put_str(screen_row, col, msg_t, item_fg, bg, false);
+                        self.screen
+                            .put_str(screen_row, col, msg_t, item_fg, bg, false);
                     }
                 }
             }
@@ -3128,12 +3261,10 @@ impl Editor {
     ) {
         // Only active for OpenFile prompts that have a completer with matches
         let (matches_len, selected) = match self.prompt.as_ref() {
-            Some(p) if matches!(p.action, PromptAction::OpenFile) => {
-                match p.completer.as_ref() {
-                    Some(c) if !c.matches.is_empty() => (c.matches.len(), c.selected),
-                    _ => return,
-                }
-            }
+            Some(p) if matches!(p.action, PromptAction::OpenFile) => match p.completer.as_ref() {
+                Some(c) if !c.matches.is_empty() => (c.matches.len(), c.selected),
+                _ => return,
+            },
             _ => return,
         };
 
@@ -3160,8 +3291,8 @@ impl Editor {
             return;
         }
 
-        let bg_normal = Color::Ansi(0);   // black background
-        let fg_normal = Color::Ansi(7);   // white foreground
+        let bg_normal = Color::Ansi(0); // black background
+        let fg_normal = Color::Ansi(7); // white foreground
         let bg_selected = Color::Ansi(4); // blue background (selected)
         let fg_selected = Color::Ansi(15); // bright white (selected)
 
@@ -3206,7 +3337,6 @@ impl Editor {
                 .put_str(row, input_col + 1, display, fg, bg, false);
         }
     }
-
 }
 
 /// Truncate a string to at most `max_cols` display columns (ASCII-safe approximation).

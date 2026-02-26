@@ -144,83 +144,88 @@ pub fn initialize_request(id: i64, root_uri: &str) -> JsonValue {
                         ]),
                     ),
                     (
-                    "textDocument".into(),
-                    JsonValue::Object(vec![
-                        (
-                            "synchronization".into(),
-                            JsonValue::Object(vec![
-                                ("didSave".into(), JsonValue::Bool(true)),
-                                ("dynamicRegistration".into(), JsonValue::Bool(false)),
-                            ]),
-                        ),
-                        (
-                            "publishDiagnostics".into(),
-                            JsonValue::Object(vec![(
-                                "relatedInformation".into(),
-                                JsonValue::Bool(false),
-                            )]),
-                        ),
-                        (
-                            "semanticTokens".into(),
-                            JsonValue::Object(vec![
-                                ("dynamicRegistration".into(), JsonValue::Bool(false)),
-                                (
-                                    "requests".into(),
-                                    JsonValue::Object(vec![("full".into(), JsonValue::Bool(true))]),
-                                ),
-                                (
-                                    "tokenTypes".into(),
-                                    JsonValue::Array(
-                                        [
-                                            "keyword",
-                                            "type",
-                                            "variable",
-                                            "function",
-                                            "struct",
-                                            "property",
-                                            "number",
-                                            "string",
-                                            "comment",
-                                            "operator",
-                                            "directive",
-                                            "constraint",
-                                            "boolean",
-                                            // standard VSCode extras for forward-compat:
-                                            "namespace",
-                                            "class",
-                                            "enum",
-                                            "interface",
-                                            "typeParameter",
-                                            "enumMember",
-                                            "event",
-                                            "method",
-                                            "macro",
-                                            "parameter",
-                                            "decorator",
-                                            "regexp",
-                                        ]
-                                        .iter()
-                                        .map(|s| JsonValue::String(s.to_string()))
-                                        .collect(),
+                        "textDocument".into(),
+                        JsonValue::Object(vec![
+                            (
+                                "synchronization".into(),
+                                JsonValue::Object(vec![
+                                    ("didSave".into(), JsonValue::Bool(true)),
+                                    ("dynamicRegistration".into(), JsonValue::Bool(false)),
+                                ]),
+                            ),
+                            (
+                                "publishDiagnostics".into(),
+                                JsonValue::Object(vec![(
+                                    "relatedInformation".into(),
+                                    JsonValue::Bool(false),
+                                )]),
+                            ),
+                            (
+                                "semanticTokens".into(),
+                                JsonValue::Object(vec![
+                                    ("dynamicRegistration".into(), JsonValue::Bool(false)),
+                                    (
+                                        "requests".into(),
+                                        JsonValue::Object(vec![(
+                                            "full".into(),
+                                            JsonValue::Bool(true),
+                                        )]),
                                     ),
-                                ),
-                                (
-                                    "tokenModifiers".into(),
-                                    JsonValue::Array(vec![
-                                        JsonValue::String("declaration".into()),
-                                        JsonValue::String("definition".into()),
-                                        JsonValue::String("readonly".into()),
-                                    ]),
-                                ),
-                                (
-                                    "formats".into(),
-                                    JsonValue::Array(vec![JsonValue::String("relative".into())]),
-                                ),
-                                ("overlappingTokenSupport".into(), JsonValue::Bool(false)),
-                                ("multilineTokenSupport".into(), JsonValue::Bool(false)),
-                            ]),
-                        ),
-                    ]),
+                                    (
+                                        "tokenTypes".into(),
+                                        JsonValue::Array(
+                                            [
+                                                "keyword",
+                                                "type",
+                                                "variable",
+                                                "function",
+                                                "struct",
+                                                "property",
+                                                "number",
+                                                "string",
+                                                "comment",
+                                                "operator",
+                                                "directive",
+                                                "constraint",
+                                                "boolean",
+                                                // standard VSCode extras for forward-compat:
+                                                "namespace",
+                                                "class",
+                                                "enum",
+                                                "interface",
+                                                "typeParameter",
+                                                "enumMember",
+                                                "event",
+                                                "method",
+                                                "macro",
+                                                "parameter",
+                                                "decorator",
+                                                "regexp",
+                                            ]
+                                            .iter()
+                                            .map(|s| JsonValue::String(s.to_string()))
+                                            .collect(),
+                                        ),
+                                    ),
+                                    (
+                                        "tokenModifiers".into(),
+                                        JsonValue::Array(vec![
+                                            JsonValue::String("declaration".into()),
+                                            JsonValue::String("definition".into()),
+                                            JsonValue::String("readonly".into()),
+                                        ]),
+                                    ),
+                                    (
+                                        "formats".into(),
+                                        JsonValue::Array(vec![JsonValue::String(
+                                            "relative".into(),
+                                        )]),
+                                    ),
+                                    ("overlappingTokenSupport".into(), JsonValue::Bool(false)),
+                                    ("multilineTokenSupport".into(), JsonValue::Bool(false)),
+                                ]),
+                            ),
+                        ]),
                     ), // close "textDocument" entry
                 ]), // close capabilities Object
             ),

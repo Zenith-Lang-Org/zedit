@@ -52,6 +52,15 @@ pub(super) enum MessageType {
 }
 
 // ---------------------------------------------------------------------------
+// File change detection
+// ---------------------------------------------------------------------------
+
+struct FileChangeNotice {
+    buf_idx: usize,
+    buffer_modified: bool, // true → user has unsaved edits
+}
+
+// ---------------------------------------------------------------------------
 // Clipboard — multi-line aware clipboard with line-mode support
 // ---------------------------------------------------------------------------
 
@@ -191,6 +200,10 @@ pub struct Editor {
     swap_timer: std::time::Instant,
     swap_interval_ms: u64,
 
+    // Disk-change detection timer and pending notice
+    disk_check_timer: std::time::Instant,
+    file_change_notice: Option<FileChangeNotice>,
+
     // Stable counter for untitled buffer IDs (NewBuffer01, NewBuffer02, ...)
     next_untitled_id: usize,
 
@@ -213,6 +226,9 @@ pub struct Editor {
     // Diagnostics panel navigation (DIAGNOSTICS tab)
     diag_panel_selected: usize,
     diag_panel_scroll: usize,
+
+    // Terminal window title — cached to avoid emitting OSC on every frame.
+    last_title: String,
 }
 
 impl Editor {
@@ -298,6 +314,8 @@ impl Editor {
             minimap: minimap::Minimap::new(),
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
+            disk_check_timer: std::time::Instant::now(),
+            file_change_notice: None,
             next_untitled_id: 2,
             tab_bar_height: 1,
             tab_regions: Vec::new(),
@@ -309,6 +327,7 @@ impl Editor {
             bg_cargo_rx: None,
             diag_panel_selected: 0,
             diag_panel_scroll: 0,
+            last_title: String::new(),
         })
     }
 
@@ -360,6 +379,8 @@ impl Editor {
             minimap: minimap::Minimap::new(),
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
+            disk_check_timer: std::time::Instant::now(),
+            file_change_notice: None,
             next_untitled_id: 1,
             tab_bar_height: 1,
             tab_regions: Vec::new(),
@@ -371,6 +392,7 @@ impl Editor {
             bg_cargo_rx: None,
             diag_panel_selected: 0,
             diag_panel_scroll: 0,
+            last_title: String::new(),
         })
     }
 
@@ -547,6 +569,8 @@ impl Editor {
             minimap: minimap::Minimap::new(),
             swap_timer: std::time::Instant::now(),
             swap_interval_ms: 2000,
+            disk_check_timer: std::time::Instant::now(),
+            file_change_notice: None,
             next_untitled_id: max_untitled + 1,
             tab_bar_height: 1,
             tab_regions: Vec::new(),
@@ -558,6 +582,7 @@ impl Editor {
             bg_cargo_rx: None,
             diag_panel_selected: 0,
             diag_panel_scroll: 0,
+            last_title: String::new(),
         })
     }
 
@@ -581,6 +606,109 @@ impl Editor {
         } else if status == swap::SwapStatus::Corrupt {
             // Remove corrupt swap
             swap::remove_swap(path);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Disk-change detection
+    // -----------------------------------------------------------------------
+
+    /// Check all open file-backed buffers for on-disk mtime changes.
+    /// Called once per main loop iteration; throttled to every 2 seconds.
+    fn check_disk_changes(&mut self) {
+        if self.disk_check_timer.elapsed().as_millis() < 2000 {
+            return;
+        }
+        self.disk_check_timer = std::time::Instant::now();
+
+        // Don't raise a new notice while one is already being shown.
+        if self.file_change_notice.is_some() {
+            return;
+        }
+
+        for buf_idx in 0..self.buffers.len() {
+            let path = match self.buffers[buf_idx].buffer.file_path() {
+                Some(p) => p.to_path_buf(),
+                None => continue,
+            };
+            let current_mtime = match std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+            {
+                Some(t) => t,
+                None => continue,
+            };
+            if let Some(stored) = self.buffers[buf_idx].disk_mtime {
+                if current_mtime != stored {
+                    let modified = self.buffers[buf_idx].buffer.is_modified();
+                    self.file_change_notice = Some(FileChangeNotice {
+                        buf_idx,
+                        buffer_modified: modified,
+                    });
+                    break; // one notice at a time
+                }
+            }
+        }
+    }
+
+    /// Replace the buffer contents with the current on-disk version.
+    fn reload_buffer_from_disk(&mut self, buf_idx: usize) {
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_path_buf(),
+            None => return,
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.set_message(&format!("Reload failed: {}", e), MessageType::Error);
+                return;
+            }
+        };
+        let b = &mut self.buffers[buf_idx];
+        let total = b.buffer.len();
+        b.buffer.delete(0, total);
+        b.buffer.insert(0, &text);
+        b.buffer.mark_saved();
+        // Clamp cursor to valid range
+        let primary = b.primary;
+        let old_line = b.cursors[primary].cursor.line;
+        let lines = b.buffer.line_count();
+        b.cursors[primary].cursor.line = old_line.min(lines.saturating_sub(1));
+        b.cursors[primary].cursor.col = 0;
+        b.scroll_row = b.scroll_row.min(b.cursors[primary].cursor.line);
+        // Update stored mtime so we don't re-trigger immediately
+        b.update_disk_mtime(&path);
+        self.set_message("Buffer reloaded from disk", MessageType::Info);
+    }
+
+    /// Handle a key when the file-change notice overlay is active.
+    fn handle_file_change_key(&mut self, key: KeyEvent) {
+        let notice = match self.file_change_notice.take() {
+            Some(n) => n,
+            None => return,
+        };
+        match key.key {
+            Key::Char('r') | Key::Char('R') => {
+                self.reload_buffer_from_disk(notice.buf_idx);
+            }
+            Key::Char('d') | Key::Char('D') if notice.buffer_modified => {
+                self.open_diff_vs_disk(notice.buf_idx);
+            }
+            Key::Char('i') | Key::Char('I') | Key::Escape => {
+                // Ignore: advance stored mtime so we don't re-trigger immediately.
+                let path = self.buffers[notice.buf_idx]
+                    .buffer
+                    .file_path()
+                    .map(|p| p.to_path_buf());
+                if let Some(p) = path {
+                    self.buffers[notice.buf_idx].update_disk_mtime(&p);
+                }
+                self.set_message("File change ignored", MessageType::Info);
+            }
+            _ => {
+                // Any other key: restore the notice so it remains visible.
+                self.file_change_notice = Some(notice);
+            }
         }
     }
 
@@ -649,8 +777,7 @@ impl Editor {
     fn active_pane_is_terminal(&self) -> bool {
         // If bottom panel is active but showing Problems or Diagnostics tab → NOT a terminal for input purposes
         if self.terminal_panel_pane == Some(self.active_pane)
-            && (self.bottom_tab == BottomTab::Problems
-                || self.bottom_tab == BottomTab::Diagnostics)
+            && (self.bottom_tab == BottomTab::Problems || self.bottom_tab == BottomTab::Diagnostics)
         {
             return false;
         }
@@ -727,6 +854,9 @@ impl Editor {
 
             // 2d. Collect background cargo check output when finished
             self.drain_bg_cargo_check();
+
+            // 2e. Check for on-disk file changes
+            self.check_disk_changes();
 
             // 3. Reap dead children
             for pty in &mut self.ptys {
@@ -1241,6 +1371,9 @@ impl Editor {
         if let Some(ref mut mgr) = self.lsp_manager {
             if let Some(client) = mgr.client_mut(&lang) {
                 client.did_change(&uri, &text);
+                // Re-request semantic tokens so directive-based language sections
+                // (.:ES:. / .:EN:.) stay highlighted after edits, not just after save.
+                client.request_semantic_tokens(&uri);
             }
         }
     }
@@ -1680,7 +1813,10 @@ impl Editor {
         let file_path = match self.buffers[buf_idx].buffer.file_path() {
             Some(p) => p.to_string_lossy().into_owned(),
             None => {
-                self.set_message("Save the file first before formatting", MessageType::Warning);
+                self.set_message(
+                    "Save the file first before formatting",
+                    MessageType::Warning,
+                );
                 return;
             }
         };
@@ -1688,19 +1824,31 @@ impl Editor {
         let lang = match self.detect_language_by_ext(&file_path) {
             Some(l) => l,
             None => {
-                self.set_message("Unknown file type — no formatter available", MessageType::Warning);
+                self.set_message(
+                    "Unknown file type — no formatter available",
+                    MessageType::Warning,
+                );
                 return;
             }
         };
+
+        // Zenith and Zymbol use an in-place external formatter:
+        //   save → `zenith --format {file}` / `zymbol --format {file}` → reload.
+        if let Some(fmt_cmd) = match lang.as_str() {
+            "zenith" => Some("zenith"),
+            "zymbol" => Some("zymbol"),
+            _ => None,
+        } {
+            self.format_document_inplace(buf_idx, &file_path, fmt_cmd);
+            return;
+        }
 
         // Map language name → (command, args).
         // Formatters that read stdin and write stdout are preferred.
         let (cmd, args): (&str, Vec<&str>) = match lang.as_str() {
             "rust" => ("rustfmt", vec!["--emit", "stdout", &file_path]),
             "go" => ("gofmt", vec![&file_path]),
-            "javascript" | "typescript" => {
-                ("prettier", vec!["--stdin-filepath", &file_path])
-            }
+            "javascript" | "typescript" => ("prettier", vec!["--stdin-filepath", &file_path]),
             "python" => ("black", vec!["-", "--quiet"]),
             "c" | "cpp" => ("clang-format", vec![]),
             _ => {
@@ -1784,6 +1932,80 @@ impl Editor {
         }
 
         self.set_message(&format!("Formatted with {}", cmd), MessageType::Info);
+    }
+
+    /// Format a Zenith or Zymbol file using its external CLI formatter.
+    ///
+    /// Flow: save pending changes → `<cmd> --format <file>` (in-place) →
+    /// read formatted content from disk → replace buffer via delete+insert →
+    /// mark buffer as saved.
+    fn format_document_inplace(&mut self, buf_idx: usize, file_path: &str, fmt_cmd: &str) {
+        use std::process::Command;
+
+        // Flush unsaved edits to disk so the formatter sees the latest content.
+        if self.buffers[buf_idx].buffer.is_modified() {
+            if let Err(e) = self.buffers[buf_idx].buffer.save() {
+                self.set_message(
+                    &format!("Save failed before format: {}", e),
+                    MessageType::Error,
+                );
+                return;
+            }
+        }
+
+        let status = match Command::new(fmt_cmd).args(["--format", file_path]).status() {
+            Ok(s) => s,
+            Err(_) => {
+                self.set_message(
+                    &format!("Formatter not found: {} (is it on $PATH?)", fmt_cmd),
+                    MessageType::Warning,
+                );
+                return;
+            }
+        };
+
+        if !status.success() {
+            self.set_message(
+                &format!("{} --format exited with error", fmt_cmd),
+                MessageType::Error,
+            );
+            return;
+        }
+
+        // Read the formatted file from disk.
+        let formatted = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_message(
+                    &format!("Reload failed after format: {}", e),
+                    MessageType::Error,
+                );
+                return;
+            }
+        };
+
+        // Replace buffer content using the same delete+insert pattern used by
+        // the stdin/stdout formatters so syntax highlighting re-tokenizes correctly.
+        {
+            let b = &mut self.buffers[buf_idx];
+            let total_len = b.buffer.len();
+            b.buffer.delete(0, total_len);
+            b.buffer.insert(0, &formatted);
+            b.buffer.mark_saved();
+            // Preserve cursor line (clamped), reset column to 0.
+            let primary = b.primary;
+            let old_line = b.cursors[primary].cursor.line;
+            let line_count = b.buffer.line_count();
+            let new_line = old_line.min(line_count.saturating_sub(1));
+            b.cursors[primary].cursor.line = new_line;
+            b.cursors[primary].cursor.col = 0;
+            b.scroll_row = b.scroll_row.min(new_line);
+        }
+
+        self.set_message(
+            &format!("Formatted with {} --format", fmt_cmd),
+            MessageType::Info,
+        );
     }
 
     fn toggle_problem_panel(&mut self) {
@@ -2051,7 +2273,10 @@ impl Editor {
 
         self.bg_cargo_rx = None;
         self.problem_panel.feed_raw(&output);
-        crate::dlog!("[problems] background cargo check done, {} bytes parsed", output.len());
+        crate::dlog!(
+            "[problems] background cargo check done, {} bytes parsed",
+            output.len()
+        );
     }
 
     /// Send selected text (or current line) to the Z ecosystem REPL running in
@@ -2501,8 +2726,10 @@ impl Editor {
                     }
                     Key::Enter => {
                         // On a header row: toggle collapse. On an item: jump.
-                        use crate::problem_panel::{RowKind, BUILD_GROUP_KEY, CARGO_FILE_PREFIX};
-                        let row = self.problem_panel.get_display_row(self.problem_panel.selected);
+                        use crate::problem_panel::{BUILD_GROUP_KEY, CARGO_FILE_PREFIX, RowKind};
+                        let row = self
+                            .problem_panel
+                            .get_display_row(self.problem_panel.selected);
                         match row {
                             Some(RowKind::CargoSectionHeader) => {
                                 self.problem_panel.toggle_group(BUILD_GROUP_KEY);
@@ -2647,8 +2874,7 @@ impl Editor {
                                         } else {
                                             0u16
                                         };
-                                    let local_row =
-                                        me.row.saturating_sub(rect.y + tab_bar_offset);
+                                    let local_row = me.row.saturating_sub(rect.y + tab_bar_offset);
                                     let local_col = me.col.saturating_sub(rect.x);
                                     if me.pressed && !me.motion {
                                         // Start new selection on click
@@ -2682,6 +2908,14 @@ impl Editor {
         // Hover popup: any key or mouse event dismisses it (processing continues)
         if self.hover_popup.is_some() && matches!(&event, Event::Key(_) | Event::Mouse(_)) {
             self.hover_popup = None;
+        }
+
+        // File-change notice overlay: consume all key events
+        if self.file_change_notice.is_some() {
+            if let Event::Key(ke) = event {
+                self.handle_file_change_key(ke);
+            }
+            return;
         }
 
         // Diff view overlay: consume all key events
@@ -2775,7 +3009,8 @@ impl Editor {
                 }
                 EditorAction::Paste => {
                     // Prefer system clipboard, fall back to internal clipboard.
-                    let text = self.sys_clip_get()
+                    let text = self
+                        .sys_clip_get()
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| self.clipboard.text());
                     if !text.is_empty() {
@@ -2821,7 +3056,9 @@ impl Editor {
         }
 
         // Advance the active (moving) end one cell in the arrow direction.
-        let (row, col) = self.vterms[idx].sel_active.unwrap_or((anchor_row, anchor_col));
+        let (row, col) = self.vterms[idx]
+            .sel_active
+            .unwrap_or((anchor_row, anchor_col));
         let (new_row, new_col) = match ke.key {
             Key::Right => (row, (col + 1).min(pane_w.saturating_sub(1) as u16)),
             Key::Left => (row, col.saturating_sub(1)),

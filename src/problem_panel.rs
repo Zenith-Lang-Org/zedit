@@ -6,7 +6,6 @@
 ///   - GCC / Clang   (`file:line:col: error: msg`)
 ///   - Python        (`File "file", line N\n  SyntaxError: msg`)
 ///   - Generic       (`file:line:col: msg`)
-
 use std::collections::HashSet;
 
 // ── Types ────────────────────────────────────────────────────
@@ -290,46 +289,50 @@ impl ProblemPanel {
     /// Returns `(error_count, warning_count)`.
     #[allow(dead_code)]
     pub fn file_counts(&self, file: &str) -> (usize, usize) {
-        self.lsp_items.iter().filter(|p| p.file == file).fold(
-            (0, 0),
-            |(e, w), p| match p.severity {
+        self.lsp_items
+            .iter()
+            .filter(|p| p.file == file)
+            .fold((0, 0), |(e, w), p| match p.severity {
                 Severity::Error => (e + 1, w),
                 Severity::Warning => (e, w + 1),
                 _ => (e, w),
-            },
-        )
+            })
     }
 
     /// Count errors and warnings for a given file path within `items` (cargo check).
     /// Returns `(error_count, warning_count)`.
     pub fn cargo_file_counts(&self, file: &str) -> (usize, usize) {
-        self.items.iter().filter(|p| p.file == file).fold(
-            (0, 0),
-            |(e, w), p| match p.severity {
+        self.items
+            .iter()
+            .filter(|p| p.file == file)
+            .fold((0, 0), |(e, w), p| match p.severity {
                 Severity::Error => (e + 1, w),
                 Severity::Warning => (e, w + 1),
                 _ => (e, w),
-            },
-        )
+            })
     }
 
     /// Count errors and warnings across the entire LSP section.
     #[allow(dead_code)]
     pub fn lsp_counts(&self) -> (usize, usize) {
-        self.lsp_items.iter().fold((0, 0), |(e, w), p| match p.severity {
-            Severity::Error => (e + 1, w),
-            Severity::Warning => (e, w + 1),
-            _ => (e, w),
-        })
+        self.lsp_items
+            .iter()
+            .fold((0, 0), |(e, w), p| match p.severity {
+                Severity::Error => (e + 1, w),
+                Severity::Warning => (e, w + 1),
+                _ => (e, w),
+            })
     }
 
     /// Count errors and warnings within `items` (build output).
     pub fn build_counts(&self) -> (usize, usize) {
-        self.items.iter().fold((0, 0), |(e, w), p| match p.severity {
-            Severity::Error => (e + 1, w),
-            Severity::Warning => (e, w + 1),
-            _ => (e, w),
-        })
+        self.items
+            .iter()
+            .fold((0, 0), |(e, w), p| match p.severity {
+                Severity::Error => (e + 1, w),
+                Severity::Warning => (e, w + 1),
+                _ => (e, w),
+            })
     }
 
     /// Count errors from build output only (used by status bar to avoid
@@ -821,16 +824,21 @@ mod tests {
         // These are the actual zedit src files that cargo build reports warnings
         // for — proves we handle real-world multi-file LSP data, not just main.rs.
         let files = vec![
-            ("src/diff_view.rs",      Severity::Warning, 48,  "unused variable"),
-            ("src/editor/minimap.rs", Severity::Warning, 81,  "dead code"),
-            ("src/extension.rs",      Severity::Warning, 17,  "unused import"),
-            ("src/layout.rs",         Severity::Warning, 80,  "unused variable"),
-            ("src/layout.rs",         Severity::Warning, 100, "unused variable"),
-            ("src/lsp/client.rs",     Severity::Warning, 67,  "unused field"),
-            ("src/lsp/mod.rs",        Severity::Warning, 34,  "dead code"),
-            ("src/plugin/mod.rs",     Severity::Warning, 21,  "unused variable"),
-            ("src/plugin/mod.rs",     Severity::Warning, 96,  "dead code"),
-            ("src/main.rs",           Severity::Warning, 10,  "unused import"),
+            ("src/diff_view.rs", Severity::Warning, 48, "unused variable"),
+            ("src/editor/minimap.rs", Severity::Warning, 81, "dead code"),
+            ("src/extension.rs", Severity::Warning, 17, "unused import"),
+            ("src/layout.rs", Severity::Warning, 80, "unused variable"),
+            ("src/layout.rs", Severity::Warning, 100, "unused variable"),
+            ("src/lsp/client.rs", Severity::Warning, 67, "unused field"),
+            ("src/lsp/mod.rs", Severity::Warning, 34, "dead code"),
+            (
+                "src/plugin/mod.rs",
+                Severity::Warning,
+                21,
+                "unused variable",
+            ),
+            ("src/plugin/mod.rs", Severity::Warning, 96, "dead code"),
+            ("src/main.rs", Severity::Warning, 10, "unused import"),
         ];
 
         let problems: Vec<Problem> = files
@@ -870,7 +878,11 @@ mod tests {
         }
 
         // Total lsp_items must equal total problems fed in.
-        assert_eq!(pp.lsp_items.len(), 10, "all 10 problem items must be stored in lsp_items");
+        assert_eq!(
+            pp.lsp_items.len(),
+            10,
+            "all 10 problem items must be stored in lsp_items"
+        );
 
         // Global counts must be correct.
         assert_eq!(pp.total_warning_count(), 10);
@@ -885,7 +897,9 @@ mod tests {
         use std::path::Path;
 
         fn collect_rs_files(dir: &Path, out: &mut Vec<String>) {
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {

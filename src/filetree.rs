@@ -575,12 +575,15 @@ impl FileTree {
     // Rendering
     // -----------------------------------------------------------------------
 
+    /// `open_paths` maps each file path that is currently open in a buffer to
+    /// whether that buffer has unsaved changes.
     pub fn render(
         &mut self,
         screen: &mut Screen,
         height: usize,
         is_focused: bool,
         y_offset: usize,
+        open_paths: &std::collections::HashMap<std::path::PathBuf, bool>,
     ) {
         let w = self.width as usize;
         if w == 0 || height == 0 {
@@ -709,11 +712,21 @@ impl FileTree {
                         }
                     }
 
-                    // Name
+                    // Name — annotate open / modified files with `*` marker
                     let name_display = if node.kind == NodeKind::Directory {
                         format!("{}/", node.name)
                     } else {
-                        node.name.clone()
+                        let canon =
+                            std::fs::canonicalize(&node.path).unwrap_or_else(|_| node.path.clone());
+                        if let Some(&modified) = open_paths.get(&canon) {
+                            if modified {
+                                format!("<*> {}", node.name)
+                            } else {
+                                format!("</> {}", node.name)
+                            }
+                        } else {
+                            format!("·•· {}", node.name)
+                        }
                     };
 
                     let max_name = w.saturating_sub(1).saturating_sub(col);

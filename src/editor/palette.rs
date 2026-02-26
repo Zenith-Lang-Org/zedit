@@ -467,8 +467,7 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<(i32, Vec<usize>)> {
         }
 
         // Word boundary bonus: +10 if at start or after a delimiter
-        let at_boundary = pos == 0
-            || matches!(tc[pos - 1], ' ' | ':' | '_' | '-' | '/' | '.');
+        let at_boundary = pos == 0 || matches!(tc[pos - 1], ' ' | ':' | '_' | '-' | '/' | '.');
         if at_boundary {
             score += 10;
         }
@@ -719,21 +718,28 @@ mod tests {
         // "ab" in "xaabb": Phase A finds [1,3], Phase B should pull a to index 2
         // giving consecutive [2,3] which scores higher.
         let (score_new, positions) = fuzzy_score("ab", "xaabb").unwrap();
-        assert_eq!(positions, vec![2, 3], "Phase B should cluster to consecutive positions");
+        assert_eq!(
+            positions,
+            vec![2, 3],
+            "Phase B should cluster to consecutive positions"
+        );
         // Verify score is higher than what Phase A alone would give ([1,3])
         // [1,3]: base 2, no consecutive bonus = 2;  [2,3]: base 2 + consecutive 5 = 7
-        assert!(score_new > 2, "clustered match should outscore scattered match");
+        assert!(
+            score_new > 2,
+            "clustered match should outscore scattered match"
+        );
     }
 
     #[test]
     fn test_fuzzy_slash_dot_word_boundary() {
         // '/' and '.' should trigger the word boundary bonus
         let score_slash = fuzzy_score("m", "src/main.rs").unwrap().0;
-        let score_dot   = fuzzy_score("r", "main.rs").unwrap().0;
+        let score_dot = fuzzy_score("r", "main.rs").unwrap().0;
         // 'm' after '/' and 'r' after '.' are both at boundaries
-        let score_mid   = fuzzy_score("a", "main.rs").unwrap().0;
+        let score_mid = fuzzy_score("a", "main.rs").unwrap().0;
         assert!(score_slash > score_mid, "'/' should confer boundary bonus");
-        assert!(score_dot   > score_mid, "'.' should confer boundary bonus");
+        assert!(score_dot > score_mid, "'.' should confer boundary bonus");
     }
 
     #[test]

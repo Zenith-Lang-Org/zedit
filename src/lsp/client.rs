@@ -332,10 +332,10 @@ impl LspClient {
     }
 
     fn handle_message(&mut self, msg: JsonValue) {
-        let has_id     = msg.get("id").is_some();
+        let has_id = msg.get("id").is_some();
         let has_method = msg.get("method").is_some();
         let has_result = msg.get("result").is_some();
-        let has_error  = msg.get("error").is_some();
+        let has_error = msg.get("error").is_some();
 
         crate::dlog!(
             "[lsp_client] msg: id={:?} method={:?} has_result={} has_error={}",
@@ -393,9 +393,7 @@ impl LspClient {
             // Also set check.workspace = true so flycheck covers the whole workspace
             // (not per-file) when cargo check does run after an actual file save.
             "workspace/configuration" => {
-                let items = msg
-                    .get("params")
-                    .and_then(|p| p.get("items"));
+                let items = msg.get("params").and_then(|p| p.get("items"));
 
                 let item_list: Vec<&JsonValue> = match items {
                     Some(JsonValue::Array(arr)) => arr.iter().collect(),
@@ -444,9 +442,7 @@ impl LspClient {
                             .and_then(|v| v.get("section"))
                             .and_then(|s| s.as_str())
                             .unwrap_or("");
-                        if section == "rust-analyzer"
-                            || section.starts_with("rust-analyzer.")
-                        {
+                        if section == "rust-analyzer" || section.starts_with("rust-analyzer.") {
                             ra_config.clone()
                         } else {
                             JsonValue::Null
@@ -1068,9 +1064,7 @@ mod tests {
             .arg("rust-analyzer")
             .output()
         {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => {
                 eprintln!("[SKIP] rust-analyzer not found in PATH");
                 return;
@@ -1082,8 +1076,8 @@ mod tests {
         let root_uri = format!("file://{}", PROJECT_ROOT);
         let main_uri = format!("file://{}", MAIN_RS);
 
-        let transport = LspTransport::spawn("rust-analyzer", &[])
-            .expect("failed to spawn rust-analyzer");
+        let transport =
+            LspTransport::spawn("rust-analyzer", &[]).expect("failed to spawn rust-analyzer");
         let mut client = LspClient::new(transport, &root_uri, "rust");
 
         // ── 3. Send initialize ────────────────────────────────────────────
@@ -1096,15 +1090,17 @@ mod tests {
         // If we send did_save before rust-analyzer gets our config response, flycheck
         // runs with default settings (no CARGO_INCREMENTAL=0) and uses cached
         // artifacts → 0 compiler-messages for non-open workspace files.
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(TIMEOUT_INIT_S);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TIMEOUT_INIT_S);
         let mut init_msg_n = 0usize;
         let mut got_workspace_config = false;
         // After initialized=true, wait up to this long for workspace/configuration.
         let mut wait_config_until: Option<std::time::Instant> = None;
         loop {
             if std::time::Instant::now() > deadline {
-                panic!("rust-analyzer did not respond to initialize within {}s", TIMEOUT_INIT_S);
+                panic!(
+                    "rust-analyzer did not respond to initialize within {}s",
+                    TIMEOUT_INIT_S
+                );
             }
             match client.transport.try_recv() {
                 Ok(Some(msg)) => {
@@ -1112,12 +1108,18 @@ mod tests {
                     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
                     let has_id = msg.get("id").is_some();
                     if !method.is_empty() && has_id {
-                        eprintln!("[init #{:02}] SERVER REQUEST  method={}", init_msg_n, method);
+                        eprintln!(
+                            "[init #{:02}] SERVER REQUEST  method={}",
+                            init_msg_n, method
+                        );
                         if method == "workspace/configuration" {
                             got_workspace_config = true;
                         }
                     } else if !method.is_empty() {
-                        eprintln!("[init #{:02}] notification    method={}", init_msg_n, method);
+                        eprintln!(
+                            "[init #{:02}] notification    method={}",
+                            init_msg_n, method
+                        );
                     } else {
                         let id = msg.get("id").and_then(|v| v.as_f64()).unwrap_or(-1.0) as i64;
                         eprintln!("[init #{:02}] response        id={}", init_msg_n, id);
@@ -1125,9 +1127,8 @@ mod tests {
                     client.handle_message(msg);
                     // After getting initialized, start a grace window for workspace/configuration.
                     if client.initialized && wait_config_until.is_none() {
-                        wait_config_until = Some(
-                            std::time::Instant::now() + std::time::Duration::from_secs(5),
-                        );
+                        wait_config_until =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
                     }
                 }
                 Ok(None) => {
@@ -1149,8 +1150,10 @@ mod tests {
                 Err(e) => eprintln!("[init] bad message: {}", e),
             }
         }
-        eprintln!("[info] initialized OK after {} message(s) (got_workspace_config={})",
-                  init_msg_n, got_workspace_config);
+        eprintln!(
+            "[info] initialized OK after {} message(s) (got_workspace_config={})",
+            init_msg_n, got_workspace_config
+        );
 
         // ── 5. Open ALL workspace .rs files + run cargo check ────────────
         //
@@ -1175,18 +1178,29 @@ mod tests {
         client.notify_configuration();
 
         fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
             let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
                 let p = e.path();
-                if p.is_dir() { collect_rs_files(&p, out); }
-                else if p.extension().and_then(|x| x.to_str()) == Some("rs") { out.push(p); }
+                if p.is_dir() {
+                    collect_rs_files(&p, out);
+                } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                    out.push(p);
+                }
             }
         }
         let mut rs_files = Vec::new();
-        collect_rs_files(std::path::Path::new(PROJECT_ROOT).join("src").as_path(), &mut rs_files);
-        eprintln!("[info] opening {} .rs files for native LSP diagnostics", rs_files.len());
+        collect_rs_files(
+            std::path::Path::new(PROJECT_ROOT).join("src").as_path(),
+            &mut rs_files,
+        );
+        eprintln!(
+            "[info] opening {} .rs files for native LSP diagnostics",
+            rs_files.len()
+        );
 
         for path in &rs_files {
             let uri = format!("file://{}", path.display());
@@ -1196,8 +1210,8 @@ mod tests {
         eprintln!("[info] did_open sent for all {} .rs files", rs_files.len());
 
         // ── 6. Poll: intercept EVERY message to log what rust-analyzer sends ─
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(TIMEOUT_FLYCHECK_S);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(TIMEOUT_FLYCHECK_S);
         let mut msg_count = 0usize;
 
         loop {
@@ -1206,11 +1220,12 @@ mod tests {
                 Ok(Some(msg)) => {
                     msg_count += 1;
                     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                    let has_id  = msg.get("id").is_some();
+                    let has_id = msg.get("id").is_some();
 
                     // Log every message with its method/kind.
                     if method == "textDocument/publishDiagnostics" {
-                        let uri = msg.get("params")
+                        let uri = msg
+                            .get("params")
                             .and_then(|p| p.get("uri"))
                             .and_then(|u| u.as_str())
                             .unwrap_or("?");
@@ -1218,9 +1233,15 @@ mod tests {
                         let short = short.strip_prefix(PROJECT_ROOT).unwrap_or(short);
                         eprintln!("[msg #{:03}] publishDiagnostics  uri={}", msg_count, short);
                     } else if !method.is_empty() && has_id {
-                        eprintln!("[msg #{:03}] SERVER REQUEST        method={}", msg_count, method);
+                        eprintln!(
+                            "[msg #{:03}] SERVER REQUEST        method={}",
+                            msg_count, method
+                        );
                     } else if !method.is_empty() {
-                        eprintln!("[msg #{:03}] notification          method={}", msg_count, method);
+                        eprintln!(
+                            "[msg #{:03}] notification          method={}",
+                            msg_count, method
+                        );
                     } else if has_id {
                         let id = msg.get("id").and_then(|v| v.as_f64()).unwrap_or(-1.0) as i64;
                         eprintln!("[msg #{:03}] response              id={}", msg_count, id);
@@ -1243,7 +1264,10 @@ mod tests {
                 }
             }
         }
-        eprintln!("[info] total messages received from rust-analyzer: {}", msg_count);
+        eprintln!(
+            "[info] total messages received from rust-analyzer: {}",
+            msg_count
+        );
 
         // ── 7. Report results ─────────────────────────────────────────────
         client.shutdown();

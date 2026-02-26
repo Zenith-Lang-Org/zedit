@@ -152,7 +152,8 @@ impl VTerm {
             let delta = (old_rows - rows) as usize;
             for r in 0..delta {
                 let row_start = r * old_cols as usize;
-                let row: Vec<VTermCell> = self.cells[row_start..row_start + old_cols as usize].to_vec();
+                let row: Vec<VTermCell> =
+                    self.cells[row_start..row_start + old_cols as usize].to_vec();
                 self.scrollback.push(row);
                 if self.scrollback.len() > self.scrollback_max {
                     self.scrollback.remove(0);
@@ -189,8 +190,7 @@ impl VTerm {
             }
             self.scrollback.truncate(sb_base);
             // Adjust cursor: moves down by the number of pulled rows.
-            self.cursor_row = (self.cursor_row as usize + pull)
-                .min(rows as usize - 1) as u16;
+            self.cursor_row = (self.cursor_row as usize + pull).min(rows as usize - 1) as u16;
         } else {
             // Same height: just reflow columns.
             for r in 0..old_rows as usize {
@@ -326,7 +326,8 @@ impl VTerm {
             let col_start = if row == r1 { c1 } else { 0 };
             let col_end = if row == r2 { c2 + 1 } else { pane_w as u16 };
             let row_chars: String = if (row as usize) < scrollback_lines {
-                let sb_idx = self.scrollback.len().saturating_sub(self.scroll_offset) + row as usize;
+                let sb_idx =
+                    self.scrollback.len().saturating_sub(self.scroll_offset) + row as usize;
                 (col_start..col_end)
                     .map(|c| {
                         if sb_idx < self.scrollback.len()
@@ -356,7 +357,11 @@ impl VTerm {
                 text.push('\n');
             }
         }
-        if text.trim().is_empty() { None } else { Some(text) }
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
     }
 
     // -- Internal byte processing --
@@ -413,7 +418,13 @@ impl VTerm {
                 // UTF-8 lead byte: start new sequence
                 self.utf8_buf.clear();
                 self.utf8_buf.push(byte);
-                self.utf8_remaining = if byte >= 0xf0 { 3 } else if byte >= 0xe0 { 2 } else { 1 };
+                self.utf8_remaining = if byte >= 0xf0 {
+                    3
+                } else if byte >= 0xe0 {
+                    2
+                } else {
+                    1
+                };
             }
             _ => {
                 // UTF-8 continuation byte (0x80-0xBF)

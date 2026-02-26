@@ -241,9 +241,18 @@ mod file_completer_tests {
         let mut comp = FileCompleter::new();
         // Seed entries directly to avoid filesystem dependency
         comp.entries = vec![
-            DirEntry { name: "editor".to_string(), is_dir: true },
-            DirEntry { name: "extension.rs".to_string(), is_dir: false },
-            DirEntry { name: "render.rs".to_string(), is_dir: false },
+            DirEntry {
+                name: "editor".to_string(),
+                is_dir: true,
+            },
+            DirEntry {
+                name: "extension.rs".to_string(),
+                is_dir: false,
+            },
+            DirEntry {
+                name: "render.rs".to_string(),
+                is_dir: false,
+            },
         ];
         comp.last_dir = "FAKE".to_string(); // prevent re-read
 
@@ -265,7 +274,10 @@ mod file_completer_tests {
     #[test]
     fn test_file_completer_tab_complete_single_dir() {
         let mut comp = FileCompleter::new();
-        comp.entries = vec![DirEntry { name: "src".to_string(), is_dir: true }];
+        comp.entries = vec![DirEntry {
+            name: "src".to_string(),
+            is_dir: true,
+        }];
         comp.last_dir = "./".to_string();
         comp.matches = vec![0];
         comp.selected = 0;
@@ -278,8 +290,14 @@ mod file_completer_tests {
     fn test_file_completer_tab_complete_common_prefix() {
         let mut comp = FileCompleter::new();
         comp.entries = vec![
-            DirEntry { name: "editor".to_string(), is_dir: true },
-            DirEntry { name: "extension.rs".to_string(), is_dir: false },
+            DirEntry {
+                name: "editor".to_string(),
+                is_dir: true,
+            },
+            DirEntry {
+                name: "extension.rs".to_string(),
+                is_dir: false,
+            },
         ];
         comp.last_dir = "src/".to_string();
         comp.matches = vec![0, 1];
@@ -292,7 +310,10 @@ mod file_completer_tests {
     #[test]
     fn test_file_completer_selected_path_file() {
         let mut comp = FileCompleter::new();
-        comp.entries = vec![DirEntry { name: "main.rs".to_string(), is_dir: false }];
+        comp.entries = vec![DirEntry {
+            name: "main.rs".to_string(),
+            is_dir: false,
+        }];
         comp.last_dir = "src/".to_string();
         comp.matches = vec![0];
         comp.selected = 0;
@@ -305,8 +326,14 @@ mod file_completer_tests {
     fn test_file_completer_is_selected_dir() {
         let mut comp = FileCompleter::new();
         comp.entries = vec![
-            DirEntry { name: "editor".to_string(), is_dir: true },
-            DirEntry { name: "main.rs".to_string(), is_dir: false },
+            DirEntry {
+                name: "editor".to_string(),
+                is_dir: true,
+            },
+            DirEntry {
+                name: "main.rs".to_string(),
+                is_dir: false,
+            },
         ];
         comp.last_dir = "src/".to_string();
         comp.matches = vec![0, 1];
@@ -596,8 +623,7 @@ impl Editor {
             PromptAction::OpenFile => {
                 let path = Path::new(&prompt.input);
                 // Reuse an already-open buffer for the same file (dedup via canonicalize).
-                let canonical =
-                    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
                 if let Some(i) = self.buffers.iter().position(|bs| {
                     bs.buffer
                         .file_path()
@@ -717,6 +743,8 @@ impl Editor {
                                     Highlighter::new(grammar, theme).with_lang(&lang)
                                 })
                             });
+                        // Refresh stored mtime so disk-change detection doesn't re-trigger
+                        self.buffers[buf_idx].update_disk_mtime(path);
                         // Remove swap file after successful save
                         self.cleanup_swap(buf_idx);
                         self.set_message(&format!("Saved: {}", display_name), MessageType::Info);

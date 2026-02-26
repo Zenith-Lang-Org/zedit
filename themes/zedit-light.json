@@ -12,6 +12,7 @@
   },
   "tokenColors": [
     { "scope": "comment", "settings": { "foreground": "#9ca0b0", "fontStyle": "italic" } },
+    { "scope": "support.type.property-name", "settings": { "foreground": "#04a5e5" } },
     { "scope": "string", "settings": { "foreground": "#40a02b" } },
     { "scope": "keyword", "settings": { "foreground": "#8839ef", "fontStyle": "bold" } },
     { "scope": "constant.numeric", "settings": { "foreground": "#fe640b" } },
@@ -22,6 +23,17 @@
     { "scope": "variable", "settings": { "foreground": "#4c4f69" } },
     { "scope": "support.function", "settings": { "foreground": "#ea76cb" } },
     { "scope": "punctuation", "settings": { "foreground": "#6c6f85" } },
-    { "scope": "invalid", "settings": { "foreground": "#d20f39", "fontStyle": "bold" } }
+    { "scope": "invalid", "settings": { "foreground": "#d20f39", "fontStyle": "bold" } },
+    { "scope": "entity.name.tag", "settings": { "foreground": "#179299" } },
+    { "scope": "keyword.operator", "settings": { "foreground": "#04a5e5" } },
+    { "scope": "storage.modifier", "settings": { "foreground": "#1e66f5" } },
+    { "scope": "markup.heading", "settings": { "foreground": "#8839ef", "fontStyle": "bold" } },
+    { "scope": "entity.name.section", "settings": { "foreground": "#8839ef", "fontStyle": "bold" } },
+    { "scope": "markup.bold", "settings": { "foreground": "#fe640b", "fontStyle": "bold" } },
+    { "scope": "markup.italic", "settings": { "foreground": "#df8e1d", "fontStyle": "italic" } },
+    { "scope": "markup.underline.link", "settings": { "foreground": "#1e66f5" } },
+    { "scope": "markup.raw", "settings": { "foreground": "#40a02b" } },
+    { "scope": "markup.quote", "settings": { "foreground": "#8c8fa1", "fontStyle": "italic" } },
+    { "scope": "markup.list", "settings": { "foreground": "#179299" } }
   ]
 }

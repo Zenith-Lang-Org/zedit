@@ -382,6 +382,14 @@ impl Editor {
                 {
                     gi.reload_head(&path);
                 }
+                // Refresh stored mtime so disk-change detection doesn't re-trigger
+                if let Some(path) = self.buffers[buf_idx]
+                    .buffer
+                    .file_path()
+                    .map(|p| p.to_path_buf())
+                {
+                    self.buffers[buf_idx].update_disk_mtime(&path);
+                }
                 // Remove swap file after successful save
                 self.cleanup_swap(buf_idx);
                 self.set_message("Saved!", MessageType::Info);
@@ -577,8 +585,7 @@ impl Editor {
                         MouseButton::ScrollDown if in_panel => {
                             let count = self.active_buffer_lsp_items().len();
                             let max_scroll = count.saturating_sub(1);
-                            self.diag_panel_scroll =
-                                (self.diag_panel_scroll + 3).min(max_scroll);
+                            self.diag_panel_scroll = (self.diag_panel_scroll + 3).min(max_scroll);
                             return;
                         }
                         _ => {}
@@ -655,15 +662,11 @@ impl Editor {
                             return;
                         }
                         MouseButton::ScrollUp if in_panel => {
-                            self.problem_panel.scroll =
-                                self.problem_panel.scroll.saturating_sub(3);
+                            self.problem_panel.scroll = self.problem_panel.scroll.saturating_sub(3);
                             return;
                         }
                         MouseButton::ScrollDown if in_panel => {
-                            let max_scroll = self
-                                .problem_panel
-                                .all_items_count()
-                                .saturating_sub(1);
+                            let max_scroll = self.problem_panel.all_items_count().saturating_sub(1);
                             self.problem_panel.scroll =
                                 (self.problem_panel.scroll + 3).min(max_scroll);
                             return;

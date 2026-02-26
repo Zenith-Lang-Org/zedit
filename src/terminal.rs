@@ -231,6 +231,15 @@ pub fn flush() {
     let _ = std::io::stdout().flush();
 }
 
+/// Set the terminal window/tab title using OSC 0.
+/// Supported by xterm, alacritty, kitty, tmux, WezTerm, and most modern emulators.
+pub fn set_title(title: &str) {
+    // OSC 0 ; <title> BEL — sets both icon name and window title.
+    // BEL (\x07) is used as string terminator for maximum compatibility.
+    let seq = format!("\x1b]0;{}\x07", title);
+    write_all(seq.as_bytes());
+}
+
 fn query_terminal_size() -> Result<(u16, u16), String> {
     let mut ws = Winsize {
         ws_row: 0,

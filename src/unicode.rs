@@ -1,4 +1,10 @@
+/// Number of columns per tab stop (used for `\t` rendering).
+pub const TAB_WIDTH: usize = 4;
+
 /// Return the display width (in terminal columns) of a single character.
+///
+/// Note: `\t` returns 1 here; callers that track the current column should
+/// use `tab_stop_width(current_col)` instead for accurate tab expansion.
 ///
 /// - 0 for combining marks, zero-width chars (ZWJ, ZWNJ, ZWS, BOM, etc.)
 /// - 2 for CJK ideographs, Hangul syllables, fullwidth forms, and related blocks

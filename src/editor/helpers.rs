@@ -18,15 +18,23 @@ pub(super) fn shorten_path(path: &Path) -> String {
 }
 
 /// Convert a byte column offset into a display column (sum of char widths).
+/// Tabs are expanded to the next tab stop (`TAB_WIDTH` columns).
 pub(super) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
     let clamped = byte_col.min(line.len());
-    line[..clamped]
-        .chars()
-        .map(crate::unicode::char_width)
-        .sum()
+    let mut col = 0usize;
+    for ch in line[..clamped].chars() {
+        if ch == '\t' {
+            let tw = crate::unicode::TAB_WIDTH;
+            col = (col / tw + 1) * tw;
+        } else {
+            col += crate::unicode::char_width(ch);
+        }
+    }
+    col
 }
 
 /// Convert a display column (visual column) back to a byte offset.
+/// Tabs are expanded to the next tab stop (`TAB_WIDTH` columns).
 pub(super) fn display_col_to_byte_col(line: &str, display_col: usize) -> usize {
     let mut byte_offset = 0;
     let mut visual_col = 0;
@@ -34,8 +42,14 @@ pub(super) fn display_col_to_byte_col(line: &str, display_col: usize) -> usize {
         if visual_col >= display_col {
             break;
         }
+        let cw = if ch == '\t' {
+            let tw = crate::unicode::TAB_WIDTH;
+            (visual_col / tw + 1) * tw - visual_col
+        } else {
+            crate::unicode::char_width(ch)
+        };
         byte_offset += ch.len_utf8();
-        visual_col += crate::unicode::char_width(ch);
+        visual_col += cw;
     }
     byte_offset
 }
