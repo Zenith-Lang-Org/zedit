@@ -5,9 +5,39 @@
 use crate::input::{Key, KeyEvent};
 use crate::keybindings::EditorAction;
 
-use super::{Editor, MessageType};
+use super::{Editor, FileChangeNotice, MessageType};
 
 impl Editor {
+    /// Open a diff comparing the buffer at `buf_idx` against its current on-disk version.
+    pub(super) fn open_diff_vs_disk(&mut self, buf_idx: usize) {
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_path_buf(),
+            None => {
+                self.set_message("Buffer has no file path", MessageType::Warning);
+                return;
+            }
+        };
+        let line_count = self.buffers[buf_idx].buffer.line_count();
+        let lines: Vec<String> = (0..line_count)
+            .map(|i| self.buffers[buf_idx].buffer.get_line(i).unwrap_or_default())
+            .collect();
+        match crate::diff_view::DiffView::open_vs_disk(&path, lines) {
+            Ok(mut dv) => {
+                dv.from_file_change = Some(buf_idx);
+                let hunk_count = dv.hunks.len();
+                self.diff_view = Some(dv);
+                self.set_message(
+                    &format!(
+                        "Diff (buffer vs disk): {} hunk(s) — n/N navigate, Esc: back to options",
+                        hunk_count
+                    ),
+                    MessageType::Info,
+                );
+            }
+            Err(e) => self.set_message(&format!("Diff failed: {}", e), MessageType::Error),
+        }
+    }
+
     /// Open a diff of the active buffer vs its HEAD version.
     pub(super) fn open_diff_vs_head(&mut self) {
         let buf_idx = self.active_buffer_index();
@@ -74,7 +104,19 @@ impl Editor {
 
         match ke.key {
             Key::Escape | Key::Char('q') => {
+                let from_fc = self.diff_view.as_ref().and_then(|d| d.from_file_change);
                 self.diff_view = None;
+                if let Some(buf_idx) = from_fc {
+                    let modified = self.buffers[buf_idx].buffer.is_modified();
+                    self.file_change_notice = Some(FileChangeNotice {
+                        buf_idx,
+                        buffer_modified: modified,
+                    });
+                    self.set_message(
+                        "File changed on disk  [R] Reload   [I] Ignore",
+                        MessageType::Warning,
+                    );
+                }
             }
             Key::Up => {
                 if let Some(ref mut dv) = self.diff_view {

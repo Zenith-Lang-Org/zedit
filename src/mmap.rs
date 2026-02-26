@@ -22,8 +22,7 @@ const MAP_FAILED: usize = usize::MAX;
 // ── Inline FFI declarations ───────────────────────────────────────
 
 unsafe extern "C" {
-    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64)
-        -> *mut u8;
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }

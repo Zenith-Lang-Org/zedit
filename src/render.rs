@@ -56,6 +56,68 @@ pub struct CellStyle {
 }
 
 // ---------------------------------------------------------------------------
+// Color hash cache — memoises RGB → ANSI-16 conversions across frames
+// ---------------------------------------------------------------------------
+//
+// A theme typically uses < 20 distinct colours.  Without caching, every
+// changed cell in Color16 mode pays the full OKLab distance computation:
+// 16 × `srgb_to_oklab_u8` calls ≈ 160 ns.  With a 256-slot direct-mapped
+// cache the common case is two 32-bit comparisons and a branch ≈ 1 ns.
+//
+// Design (identical to microsoft/edit's colour cache):
+//   - 256 slots, direct-mapped (one slot per hash value, no chaining).
+//   - Collision policy: evict.  False evictions are harmless — they cause
+//     a recomputation of the correct value, not a wrong result.
+//   - Hash: Knuth multiplicative hash, top 8 bits.
+//   - The cache is NOT cleared on terminal resize; theme colours are
+//     independent of screen dimensions so it stays warm across resizes.
+//   - Only the expensive RGB → ANSI-16 path (OKLab) is cached.
+//     RGB → ANSI-256 is already O(1) arithmetic and needs no caching.
+
+struct ColorCache {
+    keys: [u32; 256],  // packed RGB: r | (g << 8) | (b << 16)
+    vals: [u8; 256],   // computed ANSI-16 index
+    used: [bool; 256], // whether slot has been written
+}
+
+impl ColorCache {
+    const fn new() -> Self {
+        Self {
+            keys: [0; 256],
+            vals: [0; 256],
+            used: [false; 256],
+        }
+    }
+
+    #[inline]
+    fn slot(r: u8, g: u8, b: u8) -> usize {
+        let key: u32 = r as u32 | ((g as u32) << 8) | ((b as u32) << 16);
+        // Knuth multiplicative hash — top 8 bits carry the best entropy.
+        (key.wrapping_mul(2_654_435_761) >> 24) as usize
+    }
+
+    #[inline]
+    fn get(&self, r: u8, g: u8, b: u8) -> Option<u8> {
+        let s = Self::slot(r, g, b);
+        let key: u32 = r as u32 | ((g as u32) << 8) | ((b as u32) << 16);
+        if self.used[s] && self.keys[s] == key {
+            Some(self.vals[s])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, r: u8, g: u8, b: u8, val: u8) {
+        let s = Self::slot(r, g, b);
+        let key: u32 = r as u32 | ((g as u32) << 8) | ((b as u32) << 16);
+        self.keys[s] = key;
+        self.vals[s] = val;
+        self.used[s] = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Screen — flat Vec<Cell> with double-buffer swap
 // ---------------------------------------------------------------------------
 
@@ -65,6 +127,9 @@ pub struct Screen {
     cells: Vec<Cell>,
     prev_cells: Vec<Cell>,
     first_frame: bool,
+    /// Memoisation table for the expensive RGB → ANSI-16 OKLab conversion.
+    /// Persists across frames and terminal resizes; cleared only on drop.
+    color_cache: ColorCache,
 }
 
 impl Screen {
@@ -76,6 +141,7 @@ impl Screen {
             cells: vec![Cell::default(); size],
             prev_cells: vec![Cell::default(); size],
             first_frame: true,
+            color_cache: ColorCache::new(),
         }
     }
 
@@ -291,7 +357,35 @@ impl Screen {
 
     // -- Internal ----------------------------------------------------------
 
-    fn build_diff_output(&self, color_mode: &ColorMode) -> Vec<u8> {
+    /// Look up the ANSI-16 index for `(r, g, b)` from the cache, computing
+    /// and storing it on miss.  Amortises the 16 OKLab calls to 1 per unique
+    /// colour per process lifetime (cache survives terminal resizes).
+    #[inline]
+    fn cached_ansi16(&mut self, r: u8, g: u8, b: u8) -> u8 {
+        if let Some(v) = self.color_cache.get(r, g, b) {
+            return v;
+        }
+        let v = rgb_to_ansi16_oklab(r, g, b);
+        self.color_cache.set(r, g, b, v);
+        v
+    }
+
+    /// Downgrade `color` for the current `ColorMode`, using the cache for
+    /// the expensive RGB → ANSI-16 OKLab path.
+    #[inline]
+    fn effective_color_cached(&mut self, color: Color, mode: &ColorMode) -> Color {
+        match (color, mode) {
+            (Color::Rgb(r, g, b), ColorMode::Color256) => Color::Color256(rgb_to_ansi256(r, g, b)),
+            (Color::Rgb(r, g, b), ColorMode::Color16) => Color::Ansi(self.cached_ansi16(r, g, b)),
+            (Color::Color256(n), ColorMode::Color16) => {
+                let (r, g, b) = ansi256_to_rgb(n);
+                Color::Ansi(self.cached_ansi16(r, g, b))
+            }
+            _ => color,
+        }
+    }
+
+    fn build_diff_output(&mut self, color_mode: &ColorMode) -> Vec<u8> {
         let mut buf = Vec::with_capacity(4096);
         let mut cur_fg = Color::Default;
         let mut cur_bg = Color::Default;
@@ -304,7 +398,8 @@ impl Screen {
         for row in 0..self.height {
             for col in 0..self.width {
                 let i = self.idx(row, col);
-                let cell = &self.cells[i];
+                // Cell is Copy — copy out so &mut self is free for cache calls
+                let cell = self.cells[i];
 
                 // Skip continuation cells — the terminal advances 2 cols for wide chars
                 if cell.wide_cont {
@@ -314,7 +409,7 @@ impl Screen {
                 let changed = if full_redraw {
                     true
                 } else {
-                    self.prev_cells[i] != *cell
+                    self.prev_cells[i] != cell
                 };
                 if !changed {
                     continue;
@@ -357,11 +452,16 @@ impl Screen {
                     cur_inverse = cell.inverse;
                 }
                 if cell.fg != cur_fg {
-                    write_fg_color(&mut buf, cell.fg, color_mode);
+                    // Pre-resolve through cache, then write the already-effective color.
+                    // write_fg_color calls effective_color internally, which is a no-op
+                    // for already-downgraded Ansi / Color256 values.
+                    let eff_fg = self.effective_color_cached(cell.fg, color_mode);
+                    write_fg_color(&mut buf, eff_fg, color_mode);
                     cur_fg = cell.fg;
                 }
                 if cell.bg != cur_bg {
-                    write_bg_color(&mut buf, cell.bg, color_mode);
+                    let eff_bg = self.effective_color_cached(cell.bg, color_mode);
+                    write_bg_color(&mut buf, eff_bg, color_mode);
                     cur_bg = cell.bg;
                 }
 
@@ -573,7 +673,6 @@ fn color_cube_index(v: u8) -> u8 {
         5
     }
 }
-
 
 fn ansi256_to_rgb(n: u8) -> (u8, u8, u8) {
     static ANSI_BASIC: [(u8, u8, u8); 16] = [
@@ -824,5 +923,91 @@ mod tests {
         // Verify flat indexing: row 3, col 7 = index 3*10+7 = 37
         assert_eq!(s.cells[37].ch, 'Q');
         assert_eq!(s.cell_at(3, 7).ch, 'Q');
+    }
+
+    // -- ColorCache tests --------------------------------------------------
+
+    #[test]
+    fn color_cache_miss_on_empty() {
+        let cache = ColorCache::new();
+        assert_eq!(cache.get(255, 0, 0), None);
+        assert_eq!(cache.get(0, 255, 0), None);
+        assert_eq!(cache.get(0, 0, 255), None);
+    }
+
+    #[test]
+    fn color_cache_store_and_retrieve() {
+        let mut cache = ColorCache::new();
+        cache.set(255, 0, 0, 9);
+        assert_eq!(cache.get(255, 0, 0), Some(9));
+    }
+
+    #[test]
+    fn color_cache_different_keys_independent() {
+        let mut cache = ColorCache::new();
+        cache.set(255, 0, 0, 9);
+        cache.set(0, 255, 0, 10);
+        cache.set(0, 0, 255, 12);
+        // Each key should be found independently (no cross-slot pollution)
+        assert_eq!(cache.get(255, 0, 0), Some(9));
+        assert_eq!(cache.get(0, 255, 0), Some(10));
+        assert_eq!(cache.get(0, 0, 255), Some(12));
+    }
+
+    #[test]
+    fn color_cache_overwrite_same_key() {
+        let mut cache = ColorCache::new();
+        cache.set(128, 64, 32, 7);
+        assert_eq!(cache.get(128, 64, 32), Some(7));
+        cache.set(128, 64, 32, 15);
+        assert_eq!(cache.get(128, 64, 32), Some(15));
+    }
+
+    #[test]
+    fn cached_ansi16_is_stable() {
+        let mut s = Screen::new(5, 3);
+        // Three calls for the same color must return identical values.
+        let v1 = s.cached_ansi16(255, 0, 0);
+        let v2 = s.cached_ansi16(255, 0, 0);
+        let v3 = s.cached_ansi16(255, 0, 0);
+        assert_eq!(v1, v2);
+        assert_eq!(v2, v3);
+        assert!(v1 <= 15, "ANSI-16 index out of range: {v1}");
+    }
+
+    #[test]
+    fn cached_ansi16_matches_direct() {
+        let mut s = Screen::new(5, 3);
+        // Cached path must agree with direct OKLab computation for several colors.
+        for (r, g, b) in [(0u8, 0, 0), (255, 255, 255), (0, 128, 255), (200, 50, 100)] {
+            let cached = s.cached_ansi16(r, g, b);
+            let direct = rgb_to_ansi16_oklab(r, g, b);
+            assert_eq!(cached, direct, "mismatch for ({r},{g},{b})");
+        }
+    }
+
+    #[test]
+    fn effective_color_cached_truecolor_passthrough() {
+        let mut s = Screen::new(5, 3);
+        let c = s.effective_color_cached(Color::Rgb(42, 100, 200), &ColorMode::TrueColor);
+        assert_eq!(c, Color::Rgb(42, 100, 200));
+    }
+
+    #[test]
+    fn effective_color_cached_rgb_to_256() {
+        let mut s = Screen::new(5, 3);
+        let c = s.effective_color_cached(Color::Rgb(255, 0, 0), &ColorMode::Color256);
+        assert_eq!(c, Color::Color256(196));
+    }
+
+    #[test]
+    fn effective_color_cached_rgb_to_16() {
+        let mut s = Screen::new(5, 3);
+        let c = s.effective_color_cached(Color::Rgb(255, 0, 0), &ColorMode::Color16);
+        if let Color::Ansi(n) = c {
+            assert!(n <= 15, "ANSI index out of range: {n}");
+        } else {
+            panic!("expected Ansi color, got {c:?}");
+        }
     }
 }

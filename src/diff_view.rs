@@ -198,6 +198,9 @@ pub struct DiffView {
     pub hunks: Vec<Hunk>,
     pub current_hunk: usize,
     pub scroll: usize,
+    /// Set to Some(buf_idx) when this diff was opened from disk-change detection.
+    /// Esc/q will restore the FileChangeNotice overlay instead of dismissing entirely.
+    pub from_file_change: Option<usize>,
 }
 
 impl DiffView {
@@ -222,6 +225,28 @@ impl DiffView {
         Some(Self::build(left, right))
     }
 
+    /// Open a diff comparing the current buffer contents against the on-disk file.
+    pub fn open_vs_disk(path: &Path, buffer_lines: Vec<String>) -> Result<Self, String> {
+        let disk_text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let disk_lines: Vec<String> = disk_text.lines().map(|l| l.to_string()).collect();
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let left = DiffBuffer {
+            lines: disk_lines,
+            path: Some(path.to_path_buf()),
+            label: format!("{} (disk)", filename),
+        };
+        let right = DiffBuffer {
+            lines: buffer_lines,
+            path: Some(path.to_path_buf()),
+            label: format!("{} (buffer)", filename),
+        };
+        Ok(Self::build(left, right))
+    }
+
     fn build(left: DiffBuffer, right: DiffBuffer) -> Self {
         let rows = compute_edits(&left.lines, &right.lines);
         let hunks = Self::compute_hunks(&rows);
@@ -232,6 +257,7 @@ impl DiffView {
             hunks,
             current_hunk: 0,
             scroll: 0,
+            from_file_change: None,
         };
         dv.jump_to_first_hunk();
         dv
@@ -419,6 +445,7 @@ mod tests {
             hunks,
             current_hunk: 0,
             scroll: 0,
+            from_file_change: None,
         };
         assert_eq!(dv.hunks.len(), 1);
         dv.next_hunk();

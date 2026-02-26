@@ -64,6 +64,8 @@ pub(super) struct BufferState {
     /// Semantic token spans pre-resolved via theme, covering the whole file.
     /// Populated after LSP responds to semanticTokens/full; empty if no LSP.
     pub(super) semantic_spans: Vec<crate::syntax::highlight::SemanticSpan>,
+    /// Last known on-disk modification time; used for external-change detection.
+    pub(super) disk_mtime: Option<std::time::SystemTime>,
 }
 
 impl BufferState {
@@ -96,6 +98,7 @@ impl BufferState {
             lsp_version: 0,
             lsp_dirty: false,
             semantic_spans: Vec::new(),
+            disk_mtime: None,
         }
     }
 
@@ -118,6 +121,7 @@ impl BufferState {
             })
         });
         let git_info = crate::git::GitInfo::from_file(path);
+        let disk_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         Ok(BufferState {
             buffer,
             cursors: vec![CursorSelection {
@@ -140,7 +144,13 @@ impl BufferState {
             lsp_version: 0,
             lsp_dirty: false,
             semantic_spans: Vec::new(),
+            disk_mtime,
         })
+    }
+
+    /// Refresh the stored disk mtime from the file system.
+    pub(super) fn update_disk_mtime(&mut self, path: &std::path::Path) {
+        self.disk_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     }
 
     // -- Convenience accessors for primary cursor --
