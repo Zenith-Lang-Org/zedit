@@ -41,8 +41,14 @@ unsafe extern "C" {
 
 // ── Constants ─────────────────────────────────────────────────────
 
-/// Granularity of each `mprotect` commit call.  64 KB matches modern OS page
-/// granularity and amortises syscall overhead over many small edits.
+/// Granularity of each `mprotect` commit call.
+///
+/// Linux: 64 KB — matches page granularity and amortises syscall overhead.
+/// macOS: 2 MB — `mprotect` on macOS has higher per-call overhead so larger
+///        chunks reduce the syscall rate at the cost of slightly more eager commit.
+#[cfg(target_os = "macos")]
+pub const COMMIT_CHUNK: usize = 2 * 1024 * 1024;
+#[cfg(not(target_os = "macos"))]
 pub const COMMIT_CHUNK: usize = 64 * 1024;
 
 /// Files at or above this size use `VirtualRegion` instead of `Vec<u8>`.

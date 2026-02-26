@@ -20,7 +20,7 @@ complexity. Each phase is self-contained and can be merged independently.
 | 3 | 33 | Color hash cache in renderer | Low | Medium — render hot path | Low | `DONE` |
 | 4 | 34 | SIMD newline scan | Medium | High — large file perf | Low | `DONE` |
 | 5 | 35 | Sparse line cache checkpoints | Medium | High — memory at scale | Medium | `DONE` |
-| 6 | 36 | Virtual memory gap buffer | High | Very high — no size limit | High | `TODO` |
+| 6 | 36 | Virtual memory gap buffer | High | Very high — no size limit | High | `DONE` |
 
 ### Status Legend
 
