@@ -4,6 +4,27 @@ use crate::undo::{GroupContext, Operation};
 
 use super::*;
 
+// Ask the OS allocator to reclaim unused heap pages after a large buffer drop.
+// Without this, glibc keeps freed small/medium allocations (Vec<String> in
+// head_lines, line_states, undo history, etc.) in its arena and never returns
+// them to the OS until process exit, giving the appearance of a memory leak.
+// malloc_trim(0) is a POSIX extension available on Linux and macOS.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+unsafe extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[inline]
+fn trim_heap() {
+    // SAFETY: malloc_trim is a safe C function with no preconditions.
+    unsafe { malloc_trim(0); }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[inline]
+fn trim_heap() {}
+
 impl Editor {
     // -----------------------------------------------------------------------
     // Basic text operations
@@ -395,6 +416,8 @@ impl Editor {
                 self.set_message("Saved!", MessageType::Info);
                 // Notify LSP about save
                 self.lsp_notify_save(buf_idx);
+                // Refresh file tree so the saved file appears immediately
+                self.filetree_refresh_if_open();
             }
             Err(e) => {
                 self.set_message(&format!("Save failed: {}", e), MessageType::Error);
@@ -422,13 +445,37 @@ impl Editor {
     // Multi-buffer commands
     // -----------------------------------------------------------------------
 
-    pub(super) fn new_buffer(&mut self) {
+    /// Return the smallest untitled ID (≥ 1) not currently held by any active
+    /// buffer. `exclude_idx` optionally ignores one slot (the buffer being
+    /// replaced) so that closing the last buffer correctly recycles back to 01.
+    fn next_free_untitled_id(&self, exclude_idx: Option<usize>) -> usize {
+        let used: Vec<usize> = self
+            .buffers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != exclude_idx)
+            .filter_map(|(_, bs)| bs.untitled_id)
+            .collect();
+        let mut id = 1;
+        while used.contains(&id) {
+            id += 1;
+        }
+        id
+    }
+
+    /// Allocate a new empty untitled buffer, append it to `self.buffers`, and
+    /// return its index.  Does NOT touch the active pane or `self.active_buffer`.
+    pub(super) fn alloc_empty_buffer(&mut self) -> usize {
         let mut bs = BufferState::new_empty(self.config.line_numbers);
-        let id = self.next_untitled_id;
-        self.next_untitled_id += 1;
+        let id = self.next_free_untitled_id(None);
         bs.untitled_id = Some(id);
         self.buffers.push(bs);
-        let new_idx = self.buffers.len() - 1;
+        self.buffers.len() - 1
+    }
+
+    pub(super) fn new_buffer(&mut self) {
+        let new_idx = self.alloc_empty_buffer();
+        let id = self.buffers[new_idx].untitled_id.unwrap_or(1);
         self.layout.set_pane_buffer(self.active_pane, new_idx);
         self.active_buffer = new_idx;
         self.set_message(&format!("NewBuffer{:02}", id), MessageType::Info);
@@ -453,24 +500,33 @@ impl Editor {
         self.cleanup_swap(buf_idx);
 
         if self.buffers.len() == 1 {
-            // Last buffer — just reset to empty with a new untitled ID
+            // Last buffer — reset to empty. Exclude slot 0 (the one being
+            // replaced) so the new buffer always starts at NewBuffer01.
             let mut bs = BufferState::new_empty(self.config.line_numbers);
-            let id = self.next_untitled_id;
-            self.next_untitled_id += 1;
+            let id = self.next_free_untitled_id(Some(0));
             bs.untitled_id = Some(id);
+            // Explicit assignment drops the old BufferState (VirtualRegion, head_lines,
+            // line_states, undo history, etc.) before trim_heap() releases the pages.
             self.buffers[0] = bs;
             self.active_buffer = 0;
             self.layout.set_pane_buffer(self.active_pane, 0);
             self.set_message("Buffer closed", MessageType::Info);
+            trim_heap();
             return;
         }
 
         let removed = buf_idx;
+        // Vec::remove drops the BufferState immediately, freeing all owned data.
         self.buffers.remove(removed);
+        // Return the freed heap pages to the OS right away instead of waiting
+        // for the glibc arena to be reclaimed at process exit.
+        trim_heap();
         self.layout.adjust_buffer_indices_after_remove(removed);
         self.resolve_layout();
         self.active_buffer = self.active_buffer_index();
         self.set_message("Buffer closed", MessageType::Info);
+        // The newly focused buffer may have been changed on disk while in the background.
+        self.check_active_buffer_disk_change();
     }
 
     pub(super) fn next_buffer(&mut self) {
@@ -481,6 +537,7 @@ impl Editor {
             self.active_buffer = next;
             let name = self.buffer_display_name(next);
             self.set_message(&format!("Buffer: {}", name), MessageType::Info);
+            self.check_active_buffer_disk_change();
         }
     }
 
@@ -496,6 +553,7 @@ impl Editor {
             self.active_buffer = prev;
             let name = self.buffer_display_name(prev);
             self.set_message(&format!("Buffer: {}", name), MessageType::Info);
+            self.check_active_buffer_disk_change();
         }
     }
 
@@ -527,6 +585,7 @@ impl Editor {
                         self.ensure_editor_pane();
                         self.layout.set_pane_buffer(self.active_pane, buf_idx);
                         self.active_buffer = buf_idx;
+                        self.check_active_buffer_disk_change();
                         return;
                     }
                 }
@@ -767,6 +826,7 @@ impl Editor {
                         if pane_id != self.active_pane {
                             self.active_pane = pane_id;
                             self.active_buffer = self.active_buffer_index();
+                            self.check_active_buffer_disk_change();
                         }
 
                         // Alt+Click adds a cursor instead of replacing

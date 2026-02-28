@@ -261,6 +261,11 @@ fn main() {
                         working_dir: cwd,
                         buffers: buf_sessions,
                         active_buffer: 0,
+                        filetree_open: false,
+                        filetree_expanded_dirs: Vec::new(),
+                        minimap_visible: false,
+                        bottom_panel_open: false,
+                        bottom_tab: "terminal".to_string(),
                     };
                     editor::Editor::restore_session(sess, config).unwrap_or_else(|e| {
                         eprintln!("Error: {}", e);

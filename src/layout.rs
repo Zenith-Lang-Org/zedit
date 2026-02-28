@@ -194,6 +194,29 @@ impl LayoutState {
         }
     }
 
+    /// Wrap the entire layout tree in a new `Split(Vertical)`, placing the
+    /// current content as the top child and a new leaf with `content` at the
+    /// bottom.  Initial ratio is 50/50; the caller may resize afterwards.
+    /// Returns the id of the new bottom leaf.
+    pub fn wrap_root_bottom(&mut self, content: PaneContent) -> PaneId {
+        let new_id = PaneId(self.next_id);
+        self.next_id += 1;
+        // Swap old root out with a temporary placeholder, then build the new tree.
+        let old_root = std::mem::replace(
+            &mut self.root,
+            LayoutNode::Leaf {
+                id: PaneId(u32::MAX),
+                content: PaneContent::Buffer(0),
+            },
+        );
+        self.root = LayoutNode::Split {
+            dir: SplitDir::Vertical,
+            children: vec![old_root, LayoutNode::Leaf { id: new_id, content }],
+            ratios: vec![0.5, 0.5],
+        };
+        new_id
+    }
+
     /// Close a pane. Returns true if closed. If it's the last pane, returns false.
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
         if self.leaf_count(&self.root) <= 1 {
@@ -241,8 +264,11 @@ impl LayoutState {
     /// Resize the split that contains `pane_id` by shifting ratios.
     /// `delta` is in screen units (cols or rows depending on split direction).
     /// Positive = grow the pane, negative = shrink.
-    pub fn resize_split(&mut self, pane_id: PaneId, delta: i16, total: Rect) {
-        resize_in_node(&mut self.root, pane_id, delta, total);
+    /// `axis` restricts which splits are adjusted:
+    /// - `Horizontal` → Left/Right keys move vertical boundaries between side-by-side panes.
+    /// - `Vertical`   → Up/Down keys move horizontal boundaries between stacked panes.
+    pub fn resize_split(&mut self, pane_id: PaneId, delta: i16, axis: SplitDir, total: Rect) {
+        resize_in_node(&mut self.root, pane_id, delta, axis, total);
     }
 
     /// Check if a pane id exists.
@@ -496,7 +522,7 @@ fn adjust_indices(node: &mut LayoutNode, removed: usize) {
     }
 }
 
-fn resize_in_node(node: &mut LayoutNode, target: PaneId, delta: i16, total: Rect) {
+fn resize_in_node(node: &mut LayoutNode, target: PaneId, delta: i16, axis: SplitDir, total: Rect) {
     match node {
         LayoutNode::Leaf { .. } => {}
         LayoutNode::Split {
@@ -507,8 +533,9 @@ fn resize_in_node(node: &mut LayoutNode, target: PaneId, delta: i16, total: Rect
             // Find which child contains the target
             let idx = children.iter().position(|c| find_leaf(c, target));
             if let Some(idx) = idx {
-                // Check if this is the split directly containing the pane
-                if children.len() >= 2 {
+                // Only adjust this split when its axis matches the key direction.
+                // Horizontal splits (side-by-side) → Left/Right; Vertical (stacked) → Up/Down.
+                if children.len() >= 2 && *dir == axis {
                     let total_size = match dir {
                         SplitDir::Horizontal => total.width as f64,
                         SplitDir::Vertical => total.height as f64,
@@ -524,7 +551,7 @@ fn resize_in_node(node: &mut LayoutNode, target: PaneId, delta: i16, total: Rect
                         if other != idx {
                             ratios[idx] = (ratios[idx] + ratio_delta).clamp(0.1, 0.9);
                             ratios[other] = (ratios[other] - ratio_delta).clamp(0.1, 0.9);
-                            // Normalize
+                            // Normalize so ratios always sum to 1.0
                             let sum: f64 = ratios.iter().sum();
                             for r in ratios.iter_mut() {
                                 *r /= sum;
@@ -532,8 +559,8 @@ fn resize_in_node(node: &mut LayoutNode, target: PaneId, delta: i16, total: Rect
                         }
                     }
                 }
-                // Recurse into the child that contains the target
-                resize_in_node(&mut children[idx], target, delta, total);
+                // Always recurse so nested splits of the correct axis are reachable.
+                resize_in_node(&mut children[idx], target, delta, axis, total);
             }
         }
     }

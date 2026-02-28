@@ -1,8 +1,18 @@
 /// Stateful line-by-line tokenizer for TextMate grammars.
 /// Produces `ScopeToken` spans by matching grammar patterns against each line,
 /// carrying `LineState` across lines for multi-line constructs (strings, comments).
+use std::cell::RefCell;
+use std::collections::HashMap;
 use super::grammar::{Grammar, IncludeTarget, Pattern};
 use super::regex::{Captures, Regex};
+
+// Thread-local cache of compiled end-pattern regexes.
+// End patterns are short strings (e.g. `"`, `-->`, heredoc delimiters).
+// Caching avoids recompiling the same pattern on every line / every pos.
+thread_local! {
+    static END_REGEX_CACHE: RefCell<HashMap<String, Regex>> =
+        RefCell::new(HashMap::new());
+}
 
 // ── Public types ──────────────────────────────────────────────
 
@@ -539,7 +549,18 @@ fn try_compile_and_match(
     pos: usize,
     g_anchor: usize,
 ) -> Option<(super::regex::Match, Option<Captures>)> {
-    let re = Regex::new(pattern).ok()?;
+    // Look up the compiled regex in the thread-local cache before compiling.
+    // End patterns repeat across many lines (e.g. `"` for every JSON string),
+    // so caching cuts Regex::new() calls from O(lines) to O(unique patterns).
+    let re = END_REGEX_CACHE.with(|cache| -> Option<Regex> {
+        let mut c = cache.borrow_mut();
+        if let Some(existing) = c.get(pattern) {
+            return Some(existing.clone());
+        }
+        let compiled = Regex::new(pattern).ok()?;
+        c.insert(pattern.to_string(), compiled.clone());
+        Some(compiled)
+    })?;
     let m = re.find_with_anchor(line, pos, g_anchor)?;
     if m.start < pos {
         return None; // only accept matches at or after pos

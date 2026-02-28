@@ -75,6 +75,12 @@ struct Group {
 
 const GROUP_TIMEOUT_MS: u128 = 500;
 
+/// Maximum number of undo groups retained per buffer.
+/// Older groups beyond this cap are dropped to bound memory usage.
+/// At 100 groups, a fast typist keeping all history uses < 500 KB
+/// even for large files.
+const MAX_UNDO_GROUPS: usize = 100;
+
 pub struct UndoStack {
     undo: Vec<Group>,
     redo: Vec<Group>,
@@ -118,6 +124,11 @@ impl UndoStack {
                 cursor_before: group_cursor_before,
                 cursor_after: cursor_before,
             });
+            // Evict the oldest group when the cap is exceeded so that long editing
+            // sessions don't accumulate unbounded String copies in memory.
+            if self.undo.len() > MAX_UNDO_GROUPS {
+                self.undo.remove(0);
+            }
         }
 
         if self.pending.is_empty() {
@@ -143,6 +154,9 @@ impl UndoStack {
             cursor_before,
             cursor_after,
         });
+        if self.undo.len() > MAX_UNDO_GROUPS {
+            self.undo.remove(0);
+        }
         self.pending_cursor = None;
     }
 

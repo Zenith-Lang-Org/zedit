@@ -24,6 +24,16 @@ pub struct Session {
     pub working_dir: PathBuf,
     pub buffers: Vec<BufferSession>,
     pub active_buffer: usize,
+    /// Whether the file tree sidebar was open when the session was saved.
+    pub filetree_open: bool,
+    /// Absolute paths of directories that were expanded in the file tree.
+    pub filetree_expanded_dirs: Vec<String>,
+    /// Whether the minimap (Alt+M) was visible.
+    pub minimap_visible: bool,
+    /// Whether the bottom panel (F5 / Problems / Diagnostics) was open.
+    pub bottom_panel_open: bool,
+    /// Which bottom tab was active: "terminal", "problems", or "diagnostics".
+    pub bottom_tab: String,
 }
 
 /// Get the session file path for a working directory.
@@ -88,6 +98,14 @@ fn session_to_json(session: &Session) -> String {
         buffers.push(JsonValue::Object(pairs));
     }
 
+    let expanded_dirs = JsonValue::Array(
+        session
+            .filetree_expanded_dirs
+            .iter()
+            .map(|s| JsonValue::String(s.clone()))
+            .collect(),
+    );
+
     let root = JsonValue::Object(vec![
         ("version".into(), JsonValue::Number(session.version as f64)),
         (
@@ -98,6 +116,20 @@ fn session_to_json(session: &Session) -> String {
         (
             "active_buffer".into(),
             JsonValue::Number(session.active_buffer as f64),
+        ),
+        ("filetree_open".into(), JsonValue::Bool(session.filetree_open)),
+        ("filetree_expanded_dirs".into(), expanded_dirs),
+        (
+            "minimap_visible".into(),
+            JsonValue::Bool(session.minimap_visible),
+        ),
+        (
+            "bottom_panel_open".into(),
+            JsonValue::Bool(session.bottom_panel_open),
+        ),
+        (
+            "bottom_tab".into(),
+            JsonValue::String(session.bottom_tab.clone()),
         ),
     ]);
 
@@ -143,11 +175,43 @@ fn parse_session(val: &JsonValue, working_dir: &Path) -> Option<Session> {
         });
     }
 
+    let filetree_open = val
+        .get("filetree_open")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let filetree_expanded_dirs = val
+        .get("filetree_expanded_dirs")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let minimap_visible = val
+        .get("minimap_visible")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let bottom_panel_open = val
+        .get("bottom_panel_open")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let bottom_tab = val
+        .get("bottom_tab")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "terminal".to_string());
+
     Some(Session {
         version,
         working_dir: working_dir.to_path_buf(),
         buffers,
         active_buffer,
+        filetree_open,
+        filetree_expanded_dirs,
+        minimap_visible,
+        bottom_panel_open,
+        bottom_tab,
     })
 }
 
@@ -215,6 +279,11 @@ mod tests {
                 },
             ],
             active_buffer: 0,
+            filetree_open: true,
+            filetree_expanded_dirs: vec!["/tmp/src".to_string(), "/tmp/src/lib".to_string()],
+            minimap_visible: true,
+            bottom_panel_open: true,
+            bottom_tab: "problems".to_string(),
         };
 
         save_session(&session).unwrap();
@@ -231,6 +300,11 @@ mod tests {
         assert!(loaded.buffers[1].file_path.is_none());
         assert_eq!(loaded.buffers[1].untitled_index, Some(0));
         assert_eq!(loaded.active_buffer, 0);
+        assert!(loaded.filetree_open);
+        assert_eq!(loaded.filetree_expanded_dirs, ["/tmp/src", "/tmp/src/lib"]);
+        assert!(loaded.minimap_visible);
+        assert!(loaded.bottom_panel_open);
+        assert_eq!(loaded.bottom_tab, "problems");
 
         // Cleanup
         delete_session(&dir);

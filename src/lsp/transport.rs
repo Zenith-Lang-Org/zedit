@@ -46,7 +46,12 @@ pub struct LspTransport {
     stdin_fd: i32,  // parent writes to server's stdin
     stdout_fd: i32, // parent reads from server's stdout
     read_buf: Vec<u8>,
+    /// Buffered outgoing bytes that could not be written yet because the pipe
+    /// was full.  Flushed at the start of every frame via `flush_pending_writes`.
+    write_buf: Vec<u8>,
     dead: bool,
+    /// Exit code of the child process, set when reap() detects it has exited.
+    last_exit_code: Option<i32>,
 }
 
 impl LspTransport {
@@ -139,9 +144,13 @@ impl LspTransport {
         let stdin_fd = stdin_pipe[1]; // parent writes to server stdin
         let stdout_fd = stdout_pipe[0]; // parent reads from server stdout
 
-        // Set stdout_fd to non-blocking
+        // Set both ends to non-blocking.
+        // stdout_fd: prevents try_recv from blocking when no data available.
+        // stdin_fd:  prevents send() from blocking when the 64KB pipe is full
+        //            (which would freeze the main thread during bulk renotify).
         unsafe {
             fcntl(stdout_fd, F_SETFL, O_NONBLOCK);
+            fcntl(stdin_fd, F_SETFL, O_NONBLOCK);
         }
 
         Ok(LspTransport {
@@ -149,20 +158,35 @@ impl LspTransport {
             stdin_fd,
             stdout_fd,
             read_buf: Vec::with_capacity(4096),
+            write_buf: Vec::new(),
             dead: false,
+            last_exit_code: None,
         })
     }
 
     /// Send a JSON-RPC message with Content-Length framing.
+    ///
+    /// Appends the framed message to `write_buf` then flushes what it can
+    /// non-blockingly.  Any bytes that couldn't be written yet (pipe full)
+    /// stay in `write_buf` and are drained by `flush_pending_writes()` on
+    /// the next frame — preventing main-thread blockage.
     pub fn send(&mut self, msg: &JsonValue) -> Result<(), String> {
         if self.dead {
             return Err("transport is dead".into());
         }
         let body = msg.to_json();
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        self.write_all(header.as_bytes())?;
-        self.write_all(body.as_bytes())?;
+        self.write_buf.extend_from_slice(header.as_bytes());
+        self.write_buf.extend_from_slice(body.as_bytes());
+        self.flush_write_buf();
         Ok(())
+    }
+
+    /// Flush as many buffered outgoing bytes as the pipe will accept right now.
+    /// Stops without error when the pipe is full (`EAGAIN`/`EWOULDBLOCK`).
+    /// Marks the transport dead on any real I/O error.
+    pub fn flush_pending_writes(&mut self) {
+        self.flush_write_buf();
     }
 
     /// Try to receive a complete JSON-RPC message (non-blocking).
@@ -201,16 +225,24 @@ impl LspTransport {
         let result = unsafe { waitpid(self.child_pid, &mut status, WNOHANG) };
         if result > 0 {
             self.dead = true;
+            // WEXITSTATUS: exit code = (status >> 8) & 0xff
+            let code = (status >> 8) & 0xff;
+            self.last_exit_code = Some(code);
             crate::dlog!(
-                "[lsp_transport] child pid={} exited with status={} — \
+                "[lsp_transport] child pid={} exited code={} — \
                  check if the LSP server binary is installed correctly",
                 self.child_pid,
-                status
+                code
             );
             true
         } else {
             false
         }
+    }
+
+    /// Return the exit code of the child process, if it has been reaped.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit_code
     }
 
     /// Shut down the transport: send SIGTERM, close fds, wait.
@@ -243,7 +275,9 @@ impl LspTransport {
             stdin_fd: -1,
             stdout_fd: -1,
             read_buf: Vec::new(),
+            write_buf: Vec::new(),
             dead: true,
+            last_exit_code: None,
         }
     }
 
@@ -258,22 +292,55 @@ impl LspTransport {
             stdin_fd: -1,
             stdout_fd: -1,
             read_buf: incoming,
+            write_buf: Vec::new(),
             dead: false,
+            last_exit_code: None,
         }
     }
 
     // -- Internal helpers --
 
-    fn write_all(&self, data: &[u8]) -> Result<(), String> {
-        let mut offset = 0;
-        while offset < data.len() {
-            let n = unsafe { write(self.stdin_fd, data[offset..].as_ptr(), data.len() - offset) };
-            if n <= 0 {
-                return Err("write to LSP stdin failed".into());
-            }
-            offset += n as usize;
+    /// Non-blocking drain of `write_buf` into the LSP server's stdin pipe.
+    ///
+    /// - Returns immediately when the pipe is full (`EAGAIN = 11`).
+    /// - Marks transport dead on any other write error.
+    fn flush_write_buf(&mut self) {
+        if self.write_buf.is_empty() || self.dead || self.stdin_fd < 0 {
+            return;
         }
-        Ok(())
+        let mut offset = 0;
+        while offset < self.write_buf.len() {
+            let n = unsafe {
+                write(
+                    self.stdin_fd,
+                    self.write_buf[offset..].as_ptr(),
+                    self.write_buf.len() - offset,
+                )
+            };
+            if n > 0 {
+                offset += n as usize;
+            } else {
+                // n == -1  →  check errno
+                // n == 0   →  unexpected, treat as error
+                let errno = std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(0);
+                if errno == 11 {
+                    // EAGAIN / EWOULDBLOCK: pipe buffer full, retry next frame
+                    break;
+                }
+                // Real error (EPIPE, EBADF, …): server died
+                crate::dlog!(
+                    "[lsp_transport] write error errno={} — marking transport dead",
+                    errno
+                );
+                self.dead = true;
+                break;
+            }
+        }
+        if offset > 0 {
+            self.write_buf.drain(..offset);
+        }
     }
 
     fn try_parse_message(&mut self) -> Result<Option<JsonValue>, String> {
@@ -397,7 +464,9 @@ mod tests {
             stdin_fd: -1,
             stdout_fd: -1,
             read_buf: Vec::new(),
+            write_buf: Vec::new(),
             dead: true,
+            last_exit_code: None,
         };
         let body = r#"{"jsonrpc":"2.0","method":"test"}"#;
         let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
@@ -418,7 +487,9 @@ mod tests {
             stdin_fd: -1,
             stdout_fd: -1,
             read_buf: b"Content-Length: 100\r\n\r\n{\"partial".to_vec(),
+            write_buf: Vec::new(),
             dead: true,
+            last_exit_code: None,
         };
         let result = transport.try_parse_message().unwrap();
         assert!(result.is_none()); // body not complete

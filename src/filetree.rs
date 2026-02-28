@@ -506,11 +506,27 @@ impl FileTree {
     // -----------------------------------------------------------------------
 
     pub fn refresh(&mut self) {
+        // Collect which dirs were expanded BEFORE replacing children.
+        // (If collected after the scan, all freshly-created nodes are collapsed
+        // and nothing gets re-opened.)
+        let expanded = self.collect_expanded_paths();
         // Re-scan root
         self.root.children = scan_dir(&self.root_path, 1, &self.ignored);
         self.root.children_loaded = true;
-        // Re-expand previously expanded dirs
-        self.re_expand_dirs(&self.collect_expanded_paths());
+        // Restore previously expanded dirs
+        self.re_expand_dirs(&expanded);
+        self.rebuild_visible();
+    }
+
+    /// Return the absolute paths of all currently expanded directories.
+    /// Used by session persistence to save the open-folder state.
+    pub fn expanded_dir_paths(&self) -> Vec<PathBuf> {
+        self.collect_expanded_paths()
+    }
+
+    /// Expand directories by path list — used to restore a saved session.
+    pub fn restore_expanded(&mut self, paths: &[PathBuf]) {
+        self.re_expand_dirs(paths);
         self.rebuild_visible();
     }
 

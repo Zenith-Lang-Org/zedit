@@ -748,6 +748,8 @@ impl Editor {
                         // Remove swap file after successful save
                         self.cleanup_swap(buf_idx);
                         self.set_message(&format!("Saved: {}", display_name), MessageType::Info);
+                        // Refresh file tree so the new file appears immediately
+                        self.filetree_refresh_if_open();
                     }
                     Err(e) => {
                         self.prompt = Some(prompt);

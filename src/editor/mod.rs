@@ -171,6 +171,9 @@ pub struct Editor {
     // File tree sidebar
     filetree: Option<crate::filetree::FileTree>,
     filetree_focused: bool,
+    /// Expanded directory paths saved when the tree is closed, so they can be
+    /// restored immediately when the tree is reopened (F2 / Ctrl+B).
+    filetree_expanded_cache: Vec<PathBuf>,
 
     // Integrated terminal
     pub(super) vterms: Vec<VTerm>,
@@ -204,8 +207,8 @@ pub struct Editor {
     disk_check_timer: std::time::Instant,
     file_change_notice: Option<FileChangeNotice>,
 
-    // Stable counter for untitled buffer IDs (NewBuffer01, NewBuffer02, ...)
-    next_untitled_id: usize,
+    // File tree auto-refresh timer (periodic re-scan every 5 s)
+    filetree_refresh_timer: std::time::Instant,
 
     // Tab bar
     tab_bar_height: usize,
@@ -300,6 +303,7 @@ impl Editor {
             palette: None,
             filetree: None,
             filetree_focused: false,
+            filetree_expanded_cache: Vec::new(),
             vterms: Vec::new(),
             ptys: Vec::new(),
             terminal_panel_pane: None,
@@ -316,7 +320,7 @@ impl Editor {
             swap_interval_ms: 2000,
             disk_check_timer: std::time::Instant::now(),
             file_change_notice: None,
-            next_untitled_id: 2,
+            filetree_refresh_timer: std::time::Instant::now(),
             tab_bar_height: 1,
             tab_regions: Vec::new(),
             tab_scroll_offset: 0,
@@ -365,6 +369,7 @@ impl Editor {
             palette: None,
             filetree: None,
             filetree_focused: false,
+            filetree_expanded_cache: Vec::new(),
             vterms: Vec::new(),
             ptys: Vec::new(),
             terminal_panel_pane: None,
@@ -381,7 +386,7 @@ impl Editor {
             swap_interval_ms: 2000,
             disk_check_timer: std::time::Instant::now(),
             file_change_notice: None,
-            next_untitled_id: 1,
+            filetree_refresh_timer: std::time::Instant::now(),
             tab_bar_height: 1,
             tab_regions: Vec::new(),
             tab_scroll_offset: 0,
@@ -515,12 +520,6 @@ impl Editor {
         }
 
         // Compute next untitled ID from restored buffers
-        let max_untitled = buffers
-            .iter()
-            .filter_map(|bs| bs.untitled_id)
-            .max()
-            .unwrap_or(0);
-
         let active = sess.active_buffer.min(buffers.len().saturating_sub(1));
         let layout = LayoutState::new(active);
         let active_pane = layout.first_pane();
@@ -533,7 +532,14 @@ impl Editor {
 
         let lsp_manager = Self::build_lsp_manager(&config);
 
-        Ok(Editor {
+        // Extract UI state from session before it is consumed by the struct literal.
+        let sess_filetree_open = sess.filetree_open;
+        let sess_filetree_dirs = sess.filetree_expanded_dirs.clone();
+        let sess_minimap_visible = sess.minimap_visible;
+        let sess_bottom_panel_open = sess.bottom_panel_open;
+        let sess_bottom_tab = sess.bottom_tab.clone();
+
+        let mut editor = Editor {
             buffers,
             active_buffer: active,
             screen: Screen::new(w as usize, h as usize),
@@ -555,6 +561,7 @@ impl Editor {
             palette: None,
             filetree: None,
             filetree_focused: false,
+            filetree_expanded_cache: Vec::new(),
             vterms: Vec::new(),
             ptys: Vec::new(),
             terminal_panel_pane: None,
@@ -571,7 +578,7 @@ impl Editor {
             swap_interval_ms: 2000,
             disk_check_timer: std::time::Instant::now(),
             file_change_notice: None,
-            next_untitled_id: max_untitled + 1,
+            filetree_refresh_timer: std::time::Instant::now(),
             tab_bar_height: 1,
             tab_regions: Vec::new(),
             tab_scroll_offset: 0,
@@ -583,7 +590,41 @@ impl Editor {
             diag_panel_selected: 0,
             diag_panel_scroll: 0,
             last_title: String::new(),
-        })
+        };
+
+        // Restore file tree sidebar state from the saved session.
+        if sess_filetree_open {
+            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let width = editor.config.filetree_width;
+            let extra_ignored = editor.config.filetree_ignored.clone();
+            let mut ft =
+                crate::filetree::FileTree::new(root, width, &extra_ignored);
+            let expanded: Vec<PathBuf> = sess_filetree_dirs
+                .iter()
+                .map(PathBuf::from)
+                .collect();
+            ft.restore_expanded(&expanded);
+            editor.filetree = Some(ft);
+            // Prime the cache too so a close/reopen immediately after startup
+            // also restores the correct expanded state.
+            editor.filetree_expanded_cache = expanded;
+        }
+
+        // Restore minimap visibility.
+        if sess_minimap_visible {
+            editor.minimap.visible = true;
+        }
+
+        // Restore bottom panel (terminal / problems / diagnostics).
+        if sess_bottom_panel_open {
+            match sess_bottom_tab.as_str() {
+                "problems" => editor.toggle_problem_panel(),
+                "diagnostics" => editor.toggle_diagnostics_panel(),
+                _ => editor.toggle_terminal_panel(),
+            }
+        }
+
+        Ok(editor)
     }
 
     /// Check for orphaned swap when opening a single file from CLI.
@@ -613,41 +654,95 @@ impl Editor {
     // Disk-change detection
     // -----------------------------------------------------------------------
 
-    /// Check all open file-backed buffers for on-disk mtime changes.
-    /// Called once per main loop iteration; throttled to every 2 seconds.
+    // -----------------------------------------------------------------------
+    // File tree auto-refresh
+    // -----------------------------------------------------------------------
+
+    /// Refresh the file tree immediately if it is currently open.
+    /// Called after any save so newly-created files appear right away.
+    pub(super) fn filetree_refresh_if_open(&mut self) {
+        if let Some(ft) = &mut self.filetree {
+            ft.refresh();
+        }
+    }
+
+    /// Periodic file tree refresh — re-scans every 5 seconds so that files
+    /// created by external applications appear without requiring a manual `R`.
+    fn check_filetree_refresh(&mut self) {
+        if self.filetree.is_none() {
+            return;
+        }
+        if self.filetree_refresh_timer.elapsed().as_secs() < 5 {
+            return;
+        }
+        self.filetree_refresh_timer = std::time::Instant::now();
+        if let Some(ft) = &mut self.filetree {
+            ft.refresh();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Disk-change detection
+    // -----------------------------------------------------------------------
+
+    /// Periodic disk-change check: only inspects the active buffer.
+    /// Background buffers are checked on focus (see check_active_buffer_disk_change).
+    /// Throttled to every 2 seconds.
     fn check_disk_changes(&mut self) {
         if self.disk_check_timer.elapsed().as_millis() < 2000 {
             return;
         }
         self.disk_check_timer = std::time::Instant::now();
+        self.check_active_buffer_disk_change();
+    }
 
-        // Don't raise a new notice while one is already being shown.
+    /// Check whether the currently focused buffer's file has been modified on
+    /// disk since we last read/wrote it, then react based on edit state:
+    ///
+    /// - Buffer **not modified** → auto-reload silently (no data loss possible).
+    /// - Buffer **modified**     → surface the D/R/I conflict notice.
+    ///
+    /// Called both by the periodic timer (active buffer) and every time the
+    /// user switches to a different buffer (tab click, Ctrl+Tab, pane click).
+    pub(super) fn check_active_buffer_disk_change(&mut self) {
+        // Never interrupt an already-visible notice.
         if self.file_change_notice.is_some() {
             return;
         }
 
-        for buf_idx in 0..self.buffers.len() {
-            let path = match self.buffers[buf_idx].buffer.file_path() {
-                Some(p) => p.to_path_buf(),
-                None => continue,
-            };
-            let current_mtime = match std::fs::metadata(&path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-            {
-                Some(t) => t,
-                None => continue,
-            };
-            if let Some(stored) = self.buffers[buf_idx].disk_mtime {
-                if current_mtime != stored {
-                    let modified = self.buffers[buf_idx].buffer.is_modified();
-                    self.file_change_notice = Some(FileChangeNotice {
-                        buf_idx,
-                        buffer_modified: modified,
-                    });
-                    break; // one notice at a time
-                }
-            }
+        let buf_idx = self.active_buffer_index();
+
+        // Only file-backed buffers have an on-disk version to compare.
+        let path = match self.buffers[buf_idx].buffer.file_path() {
+            Some(p) => p.to_path_buf(),
+            None => return,
+        };
+
+        let current_mtime = match std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+        {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Nothing changed.
+        if Some(current_mtime) == self.buffers[buf_idx].disk_mtime {
+            return;
+        }
+
+        // Update stored mtime so we don't re-fire on the next check cycle.
+        self.buffers[buf_idx].disk_mtime = Some(current_mtime);
+
+        if self.buffers[buf_idx].buffer.is_modified() {
+            // Conflict: the user has unsaved edits — ask what to do.
+            self.file_change_notice = Some(FileChangeNotice {
+                buf_idx,
+                buffer_modified: true,
+            });
+        } else {
+            // No conflict: silently reload from the new disk version.
+            self.reload_buffer_from_disk(buf_idx);
         }
     }
 
@@ -858,6 +953,9 @@ impl Editor {
             // 2e. Check for on-disk file changes
             self.check_disk_changes();
 
+            // 2f. Periodic file tree re-scan (every 5 s)
+            self.check_filetree_refresh();
+
             // 3. Reap dead children
             for pty in &mut self.ptys {
                 pty.reap();
@@ -1024,7 +1122,11 @@ impl Editor {
         }
 
         let mgr = self.lsp_manager.as_mut().unwrap();
-        mgr.reap_dead_clients();
+        let newly_dead = mgr.reap_dead_clients();
+        // Flush any bytes that were buffered last frame because the pipe was full.
+        // Must run BEFORE drain_all so the server receives queued messages (e.g.
+        // the bulk did_open renotify after session restore) and can respond to them.
+        mgr.flush_all_writes();
         mgr.drain_all();
 
         // Detect clients that just completed initialization (race-condition fix).
@@ -1179,6 +1281,19 @@ impl Editor {
         // were silently dropped because the server hadn't responded to initialize yet.
         for lang in newly_init_langs {
             self.lsp_renotify_after_init(&lang);
+        }
+
+        // Show a visible error message for any LSP server that just died.
+        for (lang, code) in newly_dead {
+            let msg = if code == 127 {
+                format!(
+                    "LSP '{}': binary not found — is the server installed?",
+                    lang
+                )
+            } else {
+                format!("LSP '{}': server exited (code {})", lang, code)
+            };
+            self.set_message(&msg, MessageType::Error);
         }
     }
 
@@ -1348,7 +1463,16 @@ impl Editor {
         let text = self.buffers[buf_idx].buffer.text();
 
         if let Some(ref mut mgr) = self.lsp_manager {
-            if let Some(client) = mgr.ensure_client(&lang) {
+            // ensure_client lazily spawns the server process.  Only do so when
+            // lsp_auto_start is enabled; otherwise use client_mut so we still
+            // talk to a server the user started explicitly, but never auto-launch
+            // a heavy process (rust-analyzer, clangd …) without consent.
+            let client = if self.config.lsp_auto_start {
+                mgr.ensure_client(&lang)
+            } else {
+                mgr.client_mut(&lang)
+            };
+            if let Some(client) = client {
                 client.did_open(&uri, &text);
                 client.request_semantic_tokens(&uri);
             }
@@ -1440,6 +1564,10 @@ impl Editor {
             if let Some(client) = mgr.client_mut(&lang) {
                 client.did_close(&uri);
             }
+            // If that was the last open document for its language, kill the server.
+            // This frees its memory (e.g. rust-analyzer ~850 MB) immediately instead
+            // of keeping it alive until the editor exits.
+            mgr.cull_idle_clients();
         }
     }
 
@@ -2461,31 +2589,29 @@ impl Editor {
             && idx < self.ptys.len()
             && !self.ptys[idx].is_dead()
         {
-            // Reuse existing session — just re-split the pane
-            let split_target = self.active_pane;
+            // Reuse existing session — wrap the whole layout so the terminal
+            // spans the full width at the bottom.
+            let buf_pane_for_resize = self.active_pane;
             let content = PaneContent::Terminal(idx);
-            if let Some(new_id) =
-                self.layout
-                    .split_pane_with_content(split_target, SplitDir::Vertical, content)
-            {
-                self.resolve_layout();
-                let (w, h) = self.terminal.size();
-                let sidebar_w = self.sidebar_width();
-                let pane_area_height =
-                    (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
-                let total = Rect {
-                    x: sidebar_w,
-                    y: self.tab_bar_height as u16,
-                    width: w.saturating_sub(sidebar_w),
-                    height: pane_area_height,
-                };
-                let delta = (pane_area_height as i16) * 20 / 100;
-                self.layout.resize_split(split_target, delta, total);
-                self.terminal_panel_pane = Some(new_id);
-                self.active_pane = new_id;
-                self.resolve_layout();
-                self.sync_pty_sizes();
-            }
+            let new_id = self.layout.wrap_root_bottom(content);
+            self.resolve_layout();
+            let (w, h) = self.terminal.size();
+            let sidebar_w = self.sidebar_width();
+            let pane_area_height =
+                (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
+            let total = Rect {
+                x: sidebar_w,
+                y: self.tab_bar_height as u16,
+                width: w.saturating_sub(sidebar_w),
+                height: pane_area_height,
+            };
+            // Resize: grow the top (buffers) portion from 50% → 70%.
+            let delta = (pane_area_height as i16) * 20 / 100;
+            self.layout.resize_split(buf_pane_for_resize, delta, crate::layout::SplitDir::Vertical, total);
+            self.terminal_panel_pane = Some(new_id);
+            self.active_pane = new_id;
+            self.resolve_layout();
+            self.sync_pty_sizes();
             return;
         }
         // No living session — spawn new
@@ -2517,36 +2643,29 @@ impl Editor {
         self.ptys.push(pty);
         self.terminal_idx = Some(term_idx);
 
-        // Split the active pane vertically (top|bottom) with 70/30 ratio
+        // Wrap the entire layout so the terminal spans the full width at the
+        // bottom, while all buffer splits remain in the upper portion.
+        let buf_pane_for_resize = split_target; // active buffer pane, now inside the top half
         let content = PaneContent::Terminal(term_idx);
-        if let Some(new_id) =
-            self.layout
-                .split_pane_with_content(split_target, SplitDir::Vertical, content)
-        {
-            // Adjust ratios: we want the original pane to be 70%, terminal 30%
-            // The split creates 50/50 by default, so resize
-            self.resolve_layout();
-
-            // Resize to get ~70/30 split
-            let (w, h) = self.terminal.size();
-            let sidebar_w = self.sidebar_width();
-            let pane_area_height =
-                (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
-            let total = Rect {
-                x: sidebar_w,
-                y: self.tab_bar_height as u16,
-                width: w.saturating_sub(sidebar_w),
-                height: pane_area_height,
-            };
-            // Grow the original pane by 20% (from 50% to 70%)
-            let delta = (pane_area_height as i16) * 20 / 100;
-            self.layout.resize_split(split_target, delta, total);
-
-            self.terminal_panel_pane = Some(new_id);
-            self.active_pane = new_id;
-            self.resolve_layout();
-            self.sync_pty_sizes();
-        }
+        let new_id = self.layout.wrap_root_bottom(content);
+        // Adjust ratios: grow the top (buffers) from 50% → 70%.
+        self.resolve_layout();
+        let (w, h) = self.terminal.size();
+        let sidebar_w = self.sidebar_width();
+        let pane_area_height =
+            (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
+        let total = Rect {
+            x: sidebar_w,
+            y: self.tab_bar_height as u16,
+            width: w.saturating_sub(sidebar_w),
+            height: pane_area_height,
+        };
+        let delta = (pane_area_height as i16) * 20 / 100;
+        self.layout.resize_split(buf_pane_for_resize, delta, crate::layout::SplitDir::Vertical, total);
+        self.terminal_panel_pane = Some(new_id);
+        self.active_pane = new_id;
+        self.resolve_layout();
+        self.sync_pty_sizes();
     }
 
     /// Handle a click on the bottom panel tab bar.
@@ -2656,9 +2775,11 @@ impl Editor {
             return;
         }
 
-        // When file tree is focused, route keys there first
+        // When file tree is focused, route keys there — but never when a prompt
+        // is active (save-as, open, etc.) because the prompt must take priority.
         if self.filetree_focused
             && self.filetree.is_some()
+            && self.prompt.is_none()
             && let Event::Key(ref ke) = event
         {
             let ke_copy = ke.clone();
@@ -3497,11 +3618,37 @@ impl Editor {
             });
         }
 
+        let (filetree_open, filetree_expanded_dirs) = if let Some(ft) = &self.filetree {
+            let dirs = ft
+                .expanded_dir_paths()
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            (true, dirs)
+        } else {
+            (false, Vec::new())
+        };
+
+        let bottom_panel_open = self
+            .terminal_panel_pane
+            .map_or(false, |id| self.layout.pane_exists(id));
+        let bottom_tab = match self.bottom_tab {
+            BottomTab::Terminal => "terminal",
+            BottomTab::Problems => "problems",
+            BottomTab::Diagnostics => "diagnostics",
+        }
+        .to_string();
+
         let sess = session::Session {
             version: 1,
             working_dir: cwd,
             buffers: buf_sessions,
             active_buffer: self.active_buffer_index(),
+            filetree_open,
+            filetree_expanded_dirs,
+            minimap_visible: self.minimap.visible,
+            bottom_panel_open,
+            bottom_tab,
         };
 
         let _ = session::save_session(&sess);
@@ -3521,28 +3668,56 @@ impl Editor {
     // -----------------------------------------------------------------------
 
     fn split_pane_horizontal(&mut self) {
-        let buf_idx = self.active_buffer_index();
+        if matches!(
+            self.layout.pane_content(self.active_pane),
+            Some(PaneContent::Terminal(_))
+        ) {
+            self.set_message(
+                "Cannot split terminal — focus a buffer pane first (Alt+Arrow)",
+                MessageType::Warning,
+            );
+            return;
+        }
+        let new_buf = self.alloc_empty_buffer();
+        let buf_label = self.buffers[new_buf].untitled_id.unwrap_or(1);
         if let Some(new_id) =
             self.layout
-                .split_pane(self.active_pane, SplitDir::Horizontal, buf_idx)
+                .split_pane(self.active_pane, SplitDir::Horizontal, new_buf)
         {
             self.resolve_layout();
             self.active_pane = new_id;
-            self.active_buffer = self.active_buffer_index();
-            self.set_message("Split horizontal", MessageType::Info);
+            self.active_buffer = new_buf;
+            self.set_message(
+                &format!("Split horizontal — NewBuffer{:02}", buf_label),
+                MessageType::Info,
+            );
         }
     }
 
     fn split_pane_vertical(&mut self) {
-        let buf_idx = self.active_buffer_index();
+        if matches!(
+            self.layout.pane_content(self.active_pane),
+            Some(PaneContent::Terminal(_))
+        ) {
+            self.set_message(
+                "Cannot split terminal — focus a buffer pane first (Alt+Arrow)",
+                MessageType::Warning,
+            );
+            return;
+        }
+        let new_buf = self.alloc_empty_buffer();
+        let buf_label = self.buffers[new_buf].untitled_id.unwrap_or(1);
         if let Some(new_id) = self
             .layout
-            .split_pane(self.active_pane, SplitDir::Vertical, buf_idx)
+            .split_pane(self.active_pane, SplitDir::Vertical, new_buf)
         {
             self.resolve_layout();
             self.active_pane = new_id;
-            self.active_buffer = self.active_buffer_index();
-            self.set_message("Split vertical", MessageType::Info);
+            self.active_buffer = new_buf;
+            self.set_message(
+                &format!("Split vertical — NewBuffer{:02}", buf_label),
+                MessageType::Info,
+            );
         }
     }
 
@@ -3572,6 +3747,7 @@ impl Editor {
         self.active_pane = next;
         if !self.active_pane_is_terminal() {
             self.active_buffer = self.active_buffer_index();
+            self.check_active_buffer_disk_change();
         }
         self.resolve_layout();
         self.set_message("Pane closed", MessageType::Info);
@@ -3591,29 +3767,61 @@ impl Editor {
             self.active_pane = target;
             if !self.active_pane_is_terminal() {
                 self.active_buffer = self.active_buffer_index();
+                self.check_active_buffer_disk_change();
             }
         }
     }
 
+    /// Alt+Shift+Left/Right — move the vertical boundary between side-by-side panes.
+    /// When the file tree has focus, adjusts the sidebar width instead.
     fn resize_active_pane(&mut self, delta: i16) {
-        let (w, h) = self.terminal.size();
-        let sidebar_w = self.sidebar_width();
-        let pane_area_height =
-            (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
-        let total = Rect {
-            x: sidebar_w,
-            y: self.tab_bar_height as u16,
-            width: w.saturating_sub(sidebar_w),
-            height: pane_area_height,
-        };
-        self.layout.resize_split(self.active_pane, delta, total);
+        if self.filetree_focused {
+            self.resize_filetree_width(delta);
+            return;
+        }
+        let total = self.pane_area_rect();
+        self.layout
+            .resize_split(self.active_pane, delta, crate::layout::SplitDir::Horizontal, total);
         self.resolve_layout();
         self.sync_pty_sizes();
     }
 
+    /// Alt+Shift+Up/Down — move the horizontal boundary between stacked panes.
+    /// Ignored when the file tree has focus (sidebar has no vertical boundary).
     fn resize_active_pane_vertical(&mut self, delta: i16) {
-        // Vertical resize uses the same mechanism
-        self.resize_active_pane(delta);
+        if self.filetree_focused {
+            return;
+        }
+        let total = self.pane_area_rect();
+        self.layout
+            .resize_split(self.active_pane, delta, crate::layout::SplitDir::Vertical, total);
+        self.resolve_layout();
+        self.sync_pty_sizes();
+    }
+
+    /// Adjust the file tree sidebar width by `delta` columns (clamped 15–60).
+    fn resize_filetree_width(&mut self, delta: i16) {
+        if let Some(ft) = &mut self.filetree {
+            let new_w = (ft.width as i16 + delta).clamp(15, 60) as u16;
+            ft.width = new_w;
+            self.config.filetree_width = new_w;
+        }
+        self.resolve_layout();
+        self.recompute_all_wrap_maps();
+    }
+
+    /// The Rect covering the entire pane area (excludes sidebar and status bars).
+    fn pane_area_rect(&mut self) -> Rect {
+        let (w, h) = self.terminal.size();
+        let sidebar_w = self.sidebar_width();
+        let pane_area_height =
+            (h as usize).saturating_sub(self.status_height + self.tab_bar_height) as u16;
+        Rect {
+            x: sidebar_w,
+            y: self.tab_bar_height as u16,
+            width: w.saturating_sub(sidebar_w),
+            height: pane_area_height,
+        }
     }
 
     // -----------------------------------------------------------------------

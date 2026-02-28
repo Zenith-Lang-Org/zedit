@@ -749,13 +749,24 @@ impl Editor {
             return;
         }
 
-        // Refresh git info if stale
+        // Refresh git info if stale.
+        // Build all lines with a single O(file_bytes) linear scan via
+        // line_at_byte instead of N individual get_line(i) calls which
+        // are each O(CHECKPOINT_STRIDE) bytes → O(n²) total.
         {
             let bs = &mut self.buffers[buffer_idx];
-            let line_count = bs.buffer.line_count();
             if let Some(gi) = &mut bs.git_info {
-                let buf_ref = &bs.buffer;
-                gi.refresh_if_stale(line_count, |i| buf_ref.get_line(i).unwrap_or_default());
+                if gi.is_stale() {
+                    let buf_ref = &bs.buffer;
+                    let line_count = buf_ref.line_count();
+                    let mut all_lines: Vec<String> = Vec::with_capacity(line_count);
+                    let mut byte = 0usize;
+                    while let Some((text, next)) = buf_ref.line_at_byte(byte) {
+                        all_lines.push(text);
+                        byte = next;
+                    }
+                    gi.refresh_if_stale(&all_lines);
+                }
             }
         }
 
@@ -2221,7 +2232,7 @@ impl Editor {
                 self.screen
                     .put_char(pane_y, pane_x + c, ' ', hdr_fg, hdr_bg, false);
             }
-            let lsp_running = self.lsp_manager.is_some();
+            let lsp_running = self.lsp_manager.as_ref().map_or(false, |m| m.has_alive_client());
             let hdr = if lsp_running {
                 format!(" rust-analyzer — {}", active_file)
             } else {
@@ -2299,14 +2310,15 @@ impl Editor {
                 self.screen
                     .put_char(pane_y + 1, pane_x + c, ' ', item_fg, item_bg, false);
             }
-            let msg = if self.lsp_manager.is_some() {
-                " No diagnostics for this file"
+            let lsp_alive = self.lsp_manager.as_ref().map_or(false, |m| m.has_alive_client());
+            let (msg, msg_fg) = if lsp_alive {
+                (" No problems found", Color::Ansi(10)) // bright green — explicit all-clear
             } else {
-                " rust-analyzer not running"
+                (" rust-analyzer not running", dim_fg)
             };
             let msg_t = truncate_str(msg, pane_w);
             self.screen
-                .put_str(pane_y + 1, pane_x, msg_t, dim_fg, item_bg, false);
+                .put_str(pane_y + 1, pane_x, msg_t, msg_fg, item_bg, false);
         }
 
         // ── Footer ───────────────────────────────────────────
@@ -2534,6 +2546,15 @@ impl Editor {
                     }
                 }
             }
+        }
+
+        // Show empty-state message when no cargo check problems exist.
+        if row_count == 0 && list_rows > 0 {
+            let ok_fg = Color::Ansi(10); // bright green — explicit all-clear
+            let msg = " No problems detected";
+            let msg_t = truncate_str(msg, pane_w);
+            self.screen
+                .put_str(pane_y, pane_x, msg_t, ok_fg, item_bg, false);
         }
 
         // ── Footer ───────────────────────────────────────────

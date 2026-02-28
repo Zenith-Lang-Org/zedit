@@ -145,6 +145,11 @@ pub struct Config {
     pub lsp_servers: Vec<(String, crate::lsp::LspServerConfig)>,
     /// Installed native extensions (loaded at startup from ~/.config/zedit/extensions/).
     pub extensions: Vec<crate::extension::Extension>,
+    /// Whether LSP servers are spawned automatically when a matching file is opened.
+    /// Set to `false` in config.json to prevent servers like rust-analyzer (850 MB)
+    /// from starting unless explicitly requested.
+    /// Default: true (preserve existing behaviour for users who rely on LSP).
+    pub lsp_auto_start: bool,
 }
 
 impl Default for Config {
@@ -164,6 +169,7 @@ impl Default for Config {
             keybindings: crate::keybindings::KeyMap::defaults(),
             lsp_servers: Vec::new(),
             extensions: Vec::new(),
+            lsp_auto_start: true,
         }
     }
 }
@@ -248,6 +254,11 @@ impl Config {
         // Keybinding overrides
         let keybindings_val = val.get("keybindings");
         config.keybindings = crate::keybindings::KeyMap::new(keybindings_val);
+
+        // LSP auto-start control
+        if let Some(b) = val.get("lsp_auto_start").and_then(|v| v.as_bool()) {
+            config.lsp_auto_start = b;
+        }
 
         // LSP server configuration
         if let Some(lsp_obj) = val.get("lsp").and_then(|v| v.as_object()) {

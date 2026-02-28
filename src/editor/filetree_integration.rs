@@ -8,8 +8,9 @@ use super::*;
 impl Editor {
     /// Toggle the file tree sidebar on/off.
     pub(super) fn toggle_filetree(&mut self) {
-        if self.filetree.is_some() {
-            self.filetree = None;
+        if let Some(ft) = self.filetree.take() {
+            // Save expanded dirs so they survive the close/reopen cycle.
+            self.filetree_expanded_cache = ft.expanded_dir_paths();
             self.filetree_focused = false;
             self.resolve_layout();
             self.recompute_all_wrap_maps();
@@ -17,7 +18,10 @@ impl Editor {
         } else {
             let root = self.detect_project_root();
             let width = self.config.filetree_width;
-            let ft = FileTree::new(root, width, &self.config.filetree_ignored);
+            let extra_ignored = self.config.filetree_ignored.clone();
+            let mut ft = FileTree::new(root, width, &extra_ignored);
+            // Restore the folder state from before the tree was closed.
+            ft.restore_expanded(&self.filetree_expanded_cache);
             self.filetree = Some(ft);
             self.filetree_focused = true;
             self.resolve_layout();

@@ -657,18 +657,22 @@ impl GitInfo {
         self.stale = true;
     }
 
-    /// Refresh the diff if stale. `get_line` returns the line text for index i.
-    pub fn refresh_if_stale<F>(&mut self, line_count: usize, get_line: F)
-    where
-        F: Fn(usize) -> String,
-    {
+    pub fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    /// Refresh the diff if stale.  `current_lines` must cover the full buffer.
+    /// Callers should build this slice with a single O(file_bytes) linear scan
+    /// (e.g. via `Buffer::line_at_byte`) rather than N individual `get_line`
+    /// calls, which would be O(n² / CHECKPOINT_STRIDE) with the sparse cache.
+    pub fn refresh_if_stale(&mut self, current_lines: &[String]) {
         if !self.stale {
             return;
         }
         self.stale = false;
 
-        let current: Vec<String> = (0..line_count).map(&get_line).collect();
-        let new_refs: Vec<&str> = current.iter().map(|s| s.as_str()).collect();
+        let line_count = current_lines.len();
+        let new_refs: Vec<&str> = current_lines.iter().map(|s| s.as_str()).collect();
 
         match &self.head_lines {
             None => {
@@ -788,7 +792,8 @@ mod tests {
     #[test]
     fn test_git_info_new_file() {
         let mut info = GitInfo::new_file();
-        info.refresh_if_stale(3, |_| "line".to_string());
+        let lines: Vec<String> = (0..3).map(|_| "line".to_string()).collect();
+        info.refresh_if_stale(&lines);
         assert_eq!(info.line_status(0), LineStatus::Added);
         assert_eq!(info.line_status(1), LineStatus::Added);
         assert_eq!(info.line_status(2), LineStatus::Added);

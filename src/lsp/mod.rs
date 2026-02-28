@@ -122,6 +122,11 @@ impl LspManager {
         result
     }
 
+    /// Returns true if at least one LSP client process is currently alive.
+    pub fn has_alive_client(&self) -> bool {
+        self.clients.iter().any(|(_, c)| c.is_alive())
+    }
+
     /// Collect all stdout fds from alive clients for poll integration.
     pub fn stdout_fds(&self) -> Vec<i32> {
         self.clients
@@ -132,13 +137,33 @@ impl LspManager {
     }
 
     /// Reap any dead child processes (non-blocking).
-    pub fn reap_dead_clients(&mut self) {
+    /// Returns `(language_id, exit_code)` for each client that just died.
+    pub fn reap_dead_clients(&mut self) -> Vec<(String, i32)> {
+        let mut newly_dead = Vec::new();
         for (lang, client) in &mut self.clients {
             if client.is_alive() {
                 let died = client.reap_transport();
                 if died {
-                    crate::dlog!("[lsp_mgr] client for lang='{}' process died", lang);
+                    let code = client.last_exit_code().unwrap_or(-1);
+                    crate::dlog!(
+                        "[lsp_mgr] client for lang='{}' exited code={}",
+                        lang,
+                        code
+                    );
+                    newly_dead.push((lang.clone(), code));
                 }
+            }
+        }
+        newly_dead
+    }
+
+    /// Flush buffered outgoing bytes for all alive clients.
+    /// Called once per frame before (or after) `drain_all` to ensure that
+    /// messages queued while the pipe was full are eventually delivered.
+    pub fn flush_all_writes(&mut self) {
+        for (_, client) in &mut self.clients {
+            if client.is_alive() {
+                client.flush_pending_writes();
             }
         }
     }
@@ -158,6 +183,22 @@ impl LspManager {
             client.shutdown();
         }
         self.clients.clear();
+    }
+
+    /// Shutdown and remove any client that has zero open documents.
+    /// Called after every didClose so that a server like rust-analyzer is
+    /// killed as soon as the user closes the last file of that language,
+    /// freeing its memory (850 MB for rust-analyzer) immediately.
+    pub fn cull_idle_clients(&mut self) {
+        let mut i = 0;
+        while i < self.clients.len() {
+            if self.clients[i].1.open_document_count() == 0 {
+                self.clients[i].1.shutdown();
+                self.clients.remove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Send a completion request for the given language.

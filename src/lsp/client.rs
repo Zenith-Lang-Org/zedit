@@ -143,13 +143,16 @@ impl LspClient {
 
     /// Notify the server that a document was closed.
     pub fn did_close(&mut self, uri: &str) {
+        // Always clean up local tracking regardless of initialization state so
+        // that closing a buffer before LSP finishes init doesn't leak entries.
+        self.doc_versions.retain(|(u, _)| u != uri);
+        self.diagnostics.retain(|(u, _)| u != uri);
+
         if !self.initialized {
             return;
         }
         let msg = protocol::did_close_notification(uri);
         let _ = self.transport.send(&msg);
-        // Remove version tracking
-        self.doc_versions.retain(|(u, _)| u != uri);
     }
 
     /// Request completion at the given document position.
@@ -224,6 +227,11 @@ impl LspClient {
         ));
     }
 
+    /// Flush any buffered outgoing bytes that couldn't be written last frame.
+    pub fn flush_pending_writes(&mut self) {
+        self.transport.flush_pending_writes();
+    }
+
     /// Drain all pending messages from the server.
     pub fn drain_messages(&mut self) {
         let mut count = 0usize;
@@ -267,6 +275,11 @@ impl LspClient {
         self.transport.shutdown();
     }
 
+    /// Number of documents currently open in this client (tracked via didOpen/didClose).
+    pub fn open_document_count(&self) -> usize {
+        self.doc_versions.len()
+    }
+
     /// Check if the transport is alive.
     pub fn is_alive(&self) -> bool {
         !self.transport.is_dead()
@@ -275,6 +288,11 @@ impl LspClient {
     /// Reap the child process (non-blocking). Returns true if it died.
     pub fn reap_transport(&mut self) -> bool {
         self.transport.reap()
+    }
+
+    /// Return the exit code of the child process, if it has been reaped.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.transport.last_exit_code()
     }
 
     /// Get the stdout fd for poll integration.
@@ -1074,7 +1092,7 @@ mod tests {
 
         // ── 2. Spawn transport + client ───────────────────────────────────
         let root_uri = format!("file://{}", PROJECT_ROOT);
-        let main_uri = format!("file://{}", MAIN_RS);
+        let _main_uri = format!("file://{}", MAIN_RS);
 
         let transport =
             LspTransport::spawn("rust-analyzer", &[]).expect("failed to spawn rust-analyzer");

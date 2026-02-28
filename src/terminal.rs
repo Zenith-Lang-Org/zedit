@@ -10,6 +10,8 @@ const STDOUT_FILENO: i32 = 1;
 const TCSAFLUSH: i32 = 2;
 const TIOCGWINSZ: u64 = 0x5413;
 const SIGWINCH: i32 = 28;
+const SIGPIPE: i32 = 13;
+const SIG_IGN: usize = 1; // (void(*)(int))1 — POSIX convention
 const NCCS: usize = 32;
 
 // Termios flag constants
@@ -149,6 +151,19 @@ impl Terminal {
 
         // Query initial size
         let (width, height) = query_terminal_size()?;
+
+        // Ignore SIGPIPE so that writes to a broken LSP stdin pipe return
+        // EPIPE (errno=32) instead of killing the process with a signal.
+        // SAFETY: SIG_IGN is the canonical value 1 cast to a fn pointer.
+        let sa_ign = SigAction {
+            sa_handler: unsafe {
+                std::mem::transmute::<usize, extern "C" fn(i32)>(SIG_IGN)
+            },
+            sa_flags: 0,
+            sa_restorer: 0,
+            sa_mask: [0u64; 16],
+        };
+        unsafe { sigaction(SIGPIPE, &sa_ign, std::ptr::null_mut()) };
 
         // Register SIGWINCH handler
         let sa = SigAction {
