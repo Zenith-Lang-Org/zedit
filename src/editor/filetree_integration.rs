@@ -32,6 +32,10 @@ impl Editor {
 
     /// Detect the project root by walking up from the first open file's directory
     /// (or cwd) looking for VCS/build markers.
+    ///
+    /// The walk never goes above `self.launch_dir` — the directory from which
+    /// zedit was started — so that opening zedit inside `project/docs/` always
+    /// keeps the file tree inside `docs/`, even when `project/.git` exists.
     fn detect_project_root(&self) -> PathBuf {
         // Start from the first buffer's file path, or cwd.
         // Always resolve to an absolute path before walking so that relative
@@ -53,7 +57,7 @@ impl Editor {
             })
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+            .unwrap_or_else(|| self.launch_dir.clone());
 
         let markers = [
             ".git",
@@ -71,14 +75,18 @@ impl Editor {
                     return dir.to_path_buf();
                 }
             }
+            // Never walk above the directory from which zedit was launched.
+            if dir == self.launch_dir.as_path() {
+                break;
+            }
             match dir.parent() {
                 Some(parent) if parent != dir => dir = parent,
                 _ => break,
             }
         }
 
-        // Fallback: cwd or start dir
-        std::env::current_dir().unwrap_or(start)
+        // Fallback: always root the tree at the launch directory.
+        self.launch_dir.clone()
     }
 
     /// Handle a key event when the file tree sidebar is focused.
@@ -359,14 +367,18 @@ impl Editor {
                     && self.buffers[buf_idx].buffer.file_path().is_none();
                 if current_empty {
                     self.buffers[buf_idx] = bs;
+                    self.apply_wrap_state_if_active(buf_idx);
                 } else {
                     self.buffers.push(bs);
                     let new_idx = self.buffers.len() - 1;
                     self.layout.set_pane_buffer(self.active_pane, new_idx);
                     self.active_buffer = new_idx;
+                    self.apply_wrap_state_if_active(new_idx);
                 }
                 self.filetree_focused = false;
                 self.set_message(&format!("Opened: {}", display), MessageType::Info);
+                // Hint when a recognized extension has no installed grammar.
+                self.maybe_show_grammar_hint(path);
                 // Notify LSP about newly opened file
                 let notify_idx = self.active_buffer_index();
                 self.lsp_notify_open(notify_idx);

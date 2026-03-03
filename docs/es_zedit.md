@@ -114,6 +114,16 @@ zedit --version   # imprime: zedit 0.1.0
 zedit --help      # muestra la ayuda con atajos basicos
 ```
 
+### Configuracion inicial de gramaticas de sintaxis
+
+Tras copiar el binario, ejecuta una vez el siguiente comando para instalar las gramaticas de sintaxis incluidas en el directorio de configuracion del usuario:
+
+```sh
+zedit --install-grammars
+```
+
+Esto copia los archivos `.tmLanguage.json` a `~/.config/zedit/grammars/`, lo que permite el resaltado de sintaxis para todos los lenguajes incluidos. Si omites este paso, zedit mostrara un aviso en la barra de estado la primera vez que abras un archivo de un lenguaje reconocido sin gramatica disponible.
+
 ### Rendimiento esperado
 
 | Metrica | Objetivo |
@@ -149,9 +159,11 @@ zedit src/main.rs      # rutas relativas o absolutas
 
 6. **Deshacer / Rehacer**: `Ctrl+Z` / `Ctrl+Y`. Los caracteres escritos de forma consecutiva se agrupan automaticamente; una pausa de 500 ms inicia un nuevo grupo.
 
-7. **Salir**: `Ctrl+Q`. Si hay cambios sin guardar, zedit lo advertira y pedira confirmacion; pulsa `Ctrl+Q` una segunda vez para salir sin guardar.
+7. **Ajuste visual de lineas largas**: `Alt+Z` activa/desactiva el ajuste suave de linea (*word wrap*). Las lineas que excedan el ancho de la ventana continuan visualmente en la siguiente fila sin insertar saltos de linea reales. Tambien puedes activarlo de forma permanente con `"word_wrap": true` en `config.json`.
 
-8. **Ayuda rapida**: `F1` activa/desactiva el overlay de ayuda con los atajos principales.
+8. **Salir**: `Ctrl+Q`. Si hay cambios sin guardar, zedit lo advertira y pedira confirmacion; pulsa `Ctrl+Q` una segunda vez para salir sin guardar.
+
+9. **Ayuda rapida**: `F1` activa/desactiva el overlay de ayuda con los atajos principales.
 
 ---
 
@@ -299,9 +311,9 @@ El panel lateral izquierdo (activado con `Ctrl+B`) muestra el arbol de archivos 
 | Atajo | Accion |
 |-------|--------|
 | `F1` | Alternar overlay de ayuda con atajos |
-| `Alt+Z` | Alternar ajuste de linea suave (word wrap) |
+| `Alt+Z` | Alternar ajuste de linea suave (*word wrap*) — las lineas largas fluyen visualmente a la siguiente fila sin insertar saltos de linea reales. |
 | `Ctrl+B` | Alternar visibilidad del arbol de archivos lateral |
-| `Ctrl+P` | Abrir paleta de comandos (busqueda difusa de todos los comandos) |
+| `Ctrl+P` | Abrir paleta de comandos (busqueda difusa de todos los comandos, incluye "Importar extension de VS Code…"). |
 | `Ctrl+T` | Alternar panel de terminal integrado |
 | `Ctrl+Shift+T` | Abrir nueva pestana de terminal |
 | `Alt+M` | Alternar minimapa |
@@ -957,6 +969,7 @@ Teclas reconocidas: letras y numeros (`A`–`Z`, `0`–`9`), `Enter`, `Tab`, `Ba
 | `task_stop` | Detener tarea en ejecucion |
 | `toggle_problem_panel` | Alternar panel de problemas |
 | `send_to_repl` | Enviar seleccion/linea al REPL |
+| `import_extension` | Abrir el prompt de importacion de extension (sin atajo por defecto; tambien disponible en la paleta de comandos con `Ctrl+P`) |
 
 ---
 
@@ -1003,11 +1016,21 @@ Puedes agregar tus propias gramaticas copiando el archivo `.tmLanguage.json` a:
 
 zedit busca las gramaticas en el siguiente orden de prioridad:
 
-1. `~/.config/zedit/grammars/` — gramaticas del usuario (maxima prioridad).
-2. `/usr/share/zedit/grammars/` y `/usr/local/share/zedit/grammars/` — gramaticas del sistema.
-3. `grammars/` en el directorio de trabajo actual — modo desarrollo / arbol de fuentes.
+1. `~/.config/zedit/extensions/*/` — gramaticas de extensiones instaladas (maxima prioridad).
+2. `~/.config/zedit/grammars/` — gramaticas suministradas por el usuario.
+3. `<directorio del ejecutable zedit>/grammars/` — gramaticas incluidas junto al binario (distribuciones portables).
+4. `/usr/share/zedit/grammars/` y `/usr/local/share/zedit/grammars/` — gramaticas del sistema.
+5. `grammars/` en el directorio de trabajo actual — modo desarrollo / arbol de fuentes.
 
 Tambien puedes registrar gramaticas de usuario a traves de la clave `languages` en la configuracion.
+
+Si abres un archivo con una extension reconocida pero no se encuentra la gramatica correspondiente en ninguna ruta, zedit muestra una sola vez el siguiente aviso en la barra de estado:
+
+```
+No syntax grammar found — run 'zedit --install-grammars' or 'zedit --import publisher.name'
+```
+
+Ejecuta `zedit --install-grammars` para instalar las gramaticas incluidas, o usa la paleta de comandos (`Ctrl+P` → "Import VS Code Extension…") para obtener gramaticas adicionales.
 
 ### Temas de color
 
@@ -1228,13 +1251,26 @@ zedit --ext info    <nombre>  # mostrar metadatos de una extension
 
 Las extensiones se almacenan en `~/.config/zedit/extensions/`. Cada extension es un subdirectorio que contiene al menos un `manifest.json`, y opcionalmente archivos de gramatica y tema.
 
-### Importar extensiones de VS Code
+### Importar extensiones de VS Code desde la linea de comandos
 
 ```sh
-zedit --import mi-extension.vsix
+zedit --import publisher.nombre      # descargar desde Open VSX por ID
+zedit --import mi-extension.vsix     # instalar desde un archivo .vsix local
+zedit --import https://ejemplo.com/ext.vsix  # instalar desde una URL
 ```
 
 zedit extrae los archivos de gramatica (`.tmLanguage.json`) y tema (`.json`) del paquete `.vsix` y los instala en el directorio de configuracion del usuario. El codigo JavaScript se ignora; solo se importan archivos de datos.
+
+### Importar extensiones de VS Code desde el editor
+
+Tambien puedes importar extensiones sin salir del editor mediante la paleta de comandos:
+
+1. Pulsa `Ctrl+P` para abrir la paleta de comandos.
+2. Escribe **Import** y selecciona **Extensions: Import VS Code Extension…**.
+3. Introduce el identificador de la extension (p.ej., `haskell.haskell`), una ruta local a un `.vsix`, o una URL.
+4. zedit descarga e instala los archivos de gramatica/tema. Reinicia el editor para activar la nueva gramatica.
+
+Como alternativa, puedes asignar la accion `import_extension` a un atajo personalizado (ver Seccion 17).
 
 ### Estructura del directorio de extensiones
 
@@ -1338,11 +1374,29 @@ La sesion REPL persiste durante toda la sesion del editor: las pulsaciones poste
 
 ## 24. Solucion de problemas
 
-### El resaltado de sintaxis no funciona
+### El resaltado de sintaxis no funciona / no se encuentra la gramatica
 
+Si la barra de estado muestra el mensaje:
+
+```
+No syntax grammar found — run 'zedit --install-grammars' or 'zedit --import publisher.name'
+```
+
+zedit reconocio el lenguaje por la extension del archivo pero no encontro el archivo `.tmLanguage.json` correspondiente en ninguna ruta de busqueda. Las gramaticas **no** estan embebidas en el binario; deben instalarse por separado.
+
+**Solucion rapida:**
+```sh
+zedit --install-grammars   # copia las gramaticas incluidas a ~/.config/zedit/grammars/
+```
+
+**Alternativa — importar una gramatica desde el editor:**
+1. Pulsa `Ctrl+P` → escribe **Import** → selecciona **Extensions: Import VS Code Extension…**
+2. Introduce el identificador de la extension, p.ej., `rust-lang.rust-analyzer`.
+
+**Si el resaltado funciona en algunos archivos pero no en otros:**
 - Verifica que la extension del archivo este registrada para el lenguaje. Consulta la tabla de lenguajes en la seccion 18.
 - Si usas una gramatica de usuario, asegurate de que el archivo `.tmLanguage.json` es un JSON valido y esta en `~/.config/zedit/grammars/`.
-- Comprueba que la clave `grammar` en la definicion del lenguaje apunta al nombre de archivo correcto (incluyendo la extension).
+- Comprueba que la clave `grammar` en la definicion del lenguaje apunta al nombre de archivo correcto (incluyendo la extension `.tmLanguage.json`).
 
 ### El servidor LSP no responde
 

@@ -1,9 +1,12 @@
+#Zenith-Lang
+
 // This is a simple "Hello, World!" program in ZL (Zenith Language).
 .:EN:.
 DISPLAY 'Hello, World!', NEWLINE
-
+DISPLAY 'TEST NEWLINE VS NL', NL, NL
 
 // Este programa muestra el mensaje "¡Hola, Mundo!" en la consola.
 .:ES:.
 MOSTRAR '¡Hola, Mundo!', NUEVA-LINEA
 
+//Nueva linea 1

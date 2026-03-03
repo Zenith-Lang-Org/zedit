@@ -1,6 +1,7 @@
 /// Bridges grammar, tokenizer, and theme into a per-buffer highlighter.
 /// Owns cached line states for incremental re-tokenization.
 use std::path::Path;
+use std::time::Instant;
 
 use crate::config::LanguageDef;
 use crate::render::Color;
@@ -11,6 +12,7 @@ use crate::syntax::tokenizer::{LineState, Tokenizer};
 
 // ── Types ────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct StyledSpan {
     pub start: usize, // byte offset in line
     pub end: usize,
@@ -37,6 +39,9 @@ pub struct Highlighter {
     lang: Option<String>,
     line_states: Vec<LineState>, // cached state *after* each line
     valid_until: usize,          // lines valid up to (exclusive)
+    /// Cached styled spans per line. `Some(spans)` when the line has been tokenized
+    /// and not invalidated; `None` when the cache slot exists but is stale.
+    span_cache: Vec<Option<Vec<StyledSpan>>>,
 }
 
 // ── Highlighter ──────────────────────────────────────────────
@@ -49,6 +54,7 @@ impl Highlighter {
             lang: None,
             line_states: Vec::new(),
             valid_until: 0,
+            span_cache: Vec::new(),
         }
     }
 
@@ -72,17 +78,37 @@ impl Highlighter {
             self.valid_until = line;
         }
         self.line_states.truncate(line);
+        // Invalidate the span cache from this line forward.
+        for slot in self.span_cache.iter_mut().skip(line) {
+            *slot = None;
+        }
     }
 
     /// Tokenize and style a single line. Builds up cached line states
     /// incrementally if needed by requesting line text via the callback.
+    /// Returns cached spans when the line has not been invalidated since last
+    /// tokenization — avoids re-running the regex NFA on unchanged lines.
     pub fn style_line<F>(&mut self, line: usize, text: &str, mut get_line: F) -> Vec<StyledSpan>
     where
         F: FnMut(usize) -> Option<String>,
     {
+        let t0 = if crate::debug_log::syntax_log_enabled() { Some(Instant::now()) } else { None };
+
+        // Fast path: return cached spans if this line is already valid.
+        if line < self.span_cache.len() {
+            if let Some(cached) = &self.span_cache[line] {
+                let spans = cached.clone();
+                if let Some(t) = t0 {
+                    crate::debug_log::syntax_write(line, true, 0, t.elapsed().as_micros(), spans.len());
+                }
+                return spans;
+            }
+        }
+
         // Ensure all lines up to `line` are tokenized
         let tokenizer = Tokenizer::new(&self.grammar);
 
+        let mut warmup = 0usize;
         while self.valid_until < line {
             let state = if self.valid_until == 0 {
                 LineState::initial()
@@ -106,6 +132,7 @@ impl Highlighter {
                 }
             }
             self.valid_until += 1;
+            warmup += 1;
         }
 
         // Get the state for the start of this line
@@ -135,7 +162,7 @@ impl Highlighter {
         }
 
         // Map tokens to styled spans via theme
-        tokens
+        let spans: Vec<StyledSpan> = tokens
             .iter()
             .map(|tok| {
                 let style = self.theme.resolve(&tok.scopes);
@@ -151,7 +178,19 @@ impl Highlighter {
                     is_string_or_comment,
                 }
             })
-            .collect()
+            .collect();
+
+        if let Some(t) = t0 {
+            crate::debug_log::syntax_write(line, false, warmup, t.elapsed().as_micros(), spans.len());
+        }
+
+        // Cache the computed spans for this line.
+        if line >= self.span_cache.len() {
+            self.span_cache.resize_with(line + 1, || None);
+        }
+        self.span_cache[line] = Some(spans.clone());
+
+        spans
     }
 }
 
@@ -187,8 +226,8 @@ pub fn load_grammar(lang: &str, languages: &[LanguageDef]) -> Option<Grammar> {
 }
 
 /// Ordered directories to search for .tmLanguage.json grammar files.
-/// Priority: extensions → user config → system-wide → dev mode (CWD/grammars).
-fn grammar_search_dirs() -> Vec<std::path::PathBuf> {
+/// Priority: extensions → user config → exe-sibling → system-wide → dev mode (CWD/grammars).
+pub(crate) fn grammar_search_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
         // 1. Installed extension directories (highest priority).
@@ -207,6 +246,13 @@ fn grammar_search_dirs() -> Vec<std::path::PathBuf> {
             "{}/.config/zedit/grammars",
             home
         )));
+    }
+    // 3. Sibling of the running executable — works for portable distributions:
+    //    ./zedit + ./grammars/ in the same directory.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            dirs.push(exe_dir.join("grammars"));
+        }
     }
     dirs.push(std::path::PathBuf::from("/usr/share/zedit/grammars"));
     dirs.push(std::path::PathBuf::from("/usr/local/share/zedit/grammars"));

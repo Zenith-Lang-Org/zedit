@@ -232,6 +232,22 @@ pub struct Editor {
 
     // Terminal window title — cached to avoid emitting OSC on every frame.
     last_title: String,
+
+    // Suppress repeated "no grammar" hint — shown at most once per session.
+    grammar_hint_shown: bool,
+
+    /// Set to true whenever state changes that require a screen update.
+    /// The render loop skips `render()` when this is false, eliminating idle CPU spin.
+    needs_redraw: bool,
+
+    /// Global word-wrap state (toggled by Alt+Z, persisted in session).
+    word_wrap_active: bool,
+
+    /// The directory from which zedit was launched (`$PWD` at startup).
+    /// The file tree is never rooted above this directory, so opening zedit
+    /// inside `project/docs/` keeps the tree inside `docs/` even if `.git`
+    /// exists at `project/`.
+    launch_dir: PathBuf,
 }
 
 impl Editor {
@@ -276,11 +292,15 @@ impl Editor {
         let (w, h) = terminal.size();
 
         let line_numbers = config.line_numbers;
+        let word_wrap_active = config.word_wrap;
         let lsp_manager = Self::build_lsp_manager(&config);
         let mut initial_buf = BufferState::new_empty(line_numbers);
         initial_buf.untitled_id = Some(1);
         let layout = LayoutState::new(0);
         let active_pane = layout.first_pane();
+        let launch_dir = std::env::var("PWD")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         Ok(Editor {
             buffers: vec![initial_buf],
             active_buffer: 0,
@@ -332,6 +352,10 @@ impl Editor {
             diag_panel_selected: 0,
             diag_panel_scroll: 0,
             last_title: String::new(),
+            grammar_hint_shown: false,
+            needs_redraw: true,
+            word_wrap_active,
+            launch_dir,
         })
     }
 
@@ -344,10 +368,14 @@ impl Editor {
         let bs =
             BufferState::from_file(path, config.line_numbers, &config.theme, &config.languages)?;
 
+        let word_wrap_active = config.word_wrap;
         let lsp_manager = Self::build_lsp_manager(&config);
         let layout = LayoutState::new(0);
         let active_pane = layout.first_pane();
-        Ok(Editor {
+        let launch_dir = std::env::var("PWD")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let mut editor = Editor {
             buffers: vec![bs],
             active_buffer: 0,
             screen: Screen::new(w as usize, h as usize),
@@ -398,7 +426,13 @@ impl Editor {
             diag_panel_selected: 0,
             diag_panel_scroll: 0,
             last_title: String::new(),
-        })
+            grammar_hint_shown: false,
+            needs_redraw: true,
+            word_wrap_active,
+            launch_dir,
+        };
+        editor.maybe_show_grammar_hint(path);
+        Ok(editor)
     }
 
     /// Restore editor from a saved session.
@@ -411,7 +445,13 @@ impl Editor {
         let mut buffers = Vec::new();
         let mut recovery_msgs = Vec::new();
 
-        for bs in &sess.buffers {
+        // Scroll position is only restored for the active buffer.  Non-active buffers
+        // start at line 0 so that the first switch to them only warms up the visible
+        // window (≤ pane height lines) instead of every line from 0..saved_scroll_row,
+        // which could block the render loop for several seconds on large files.
+        let active_session_idx = sess.active_buffer.min(sess.buffers.len().saturating_sub(1));
+
+        for (session_idx, bs) in sess.buffers.iter().enumerate() {
             if let Some(ref file_path) = bs.file_path {
                 let path = Path::new(file_path);
                 if path.exists() {
@@ -440,7 +480,7 @@ impl Editor {
                                 bs.cursor_col,
                                 &buf_state.buffer,
                             );
-                            buf_state.scroll_row = bs.scroll_row;
+                            buf_state.scroll_row = if session_idx == active_session_idx { bs.scroll_row } else { 0 };
                             recovery_msgs.push(format!("Recovered: {}", file_path));
                             swap::remove_swap(path);
                             buffers.push(buf_state);
@@ -460,7 +500,7 @@ impl Editor {
                                 bs.cursor_col,
                                 &buf_state.buffer,
                             );
-                            buf_state.scroll_row = bs.scroll_row;
+                            buf_state.scroll_row = if session_idx == active_session_idx { bs.scroll_row } else { 0 };
                             // Clean up any swap that belongs to us
                             if swap_status == swap::SwapStatus::OwnedByUs {
                                 swap::remove_swap(path);
@@ -487,7 +527,7 @@ impl Editor {
                             bs.cursor_col,
                             &buf_state.buffer,
                         );
-                        buf_state.scroll_row = bs.scroll_row;
+                        buf_state.scroll_row = if session_idx == active_session_idx { bs.scroll_row } else { 0 };
                         recovery_msgs.push(format!("Recovered NewBuffer{:02}", idx));
                         swap::remove_swap_untitled(idx);
                         buffers.push(buf_state);
@@ -538,6 +578,11 @@ impl Editor {
         let sess_minimap_visible = sess.minimap_visible;
         let sess_bottom_panel_open = sess.bottom_panel_open;
         let sess_bottom_tab = sess.bottom_tab.clone();
+        let sess_word_wrap = sess.word_wrap;
+
+        let launch_dir = std::env::var("PWD")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         let mut editor = Editor {
             buffers,
@@ -590,11 +635,17 @@ impl Editor {
             diag_panel_selected: 0,
             diag_panel_scroll: 0,
             last_title: String::new(),
+            grammar_hint_shown: false,
+            needs_redraw: true,
+            word_wrap_active: sess_word_wrap,
+            launch_dir,
         };
 
         // Restore file tree sidebar state from the saved session.
         if sess_filetree_open {
-            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let root = std::env::var("PWD")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             let width = editor.config.filetree_width;
             let extra_ignored = editor.config.filetree_ignored.clone();
             let mut ft =
@@ -678,6 +729,7 @@ impl Editor {
         self.filetree_refresh_timer = std::time::Instant::now();
         if let Some(ft) = &mut self.filetree {
             ft.refresh();
+            self.needs_redraw = true;
         }
     }
 
@@ -740,9 +792,11 @@ impl Editor {
                 buf_idx,
                 buffer_modified: true,
             });
+            self.needs_redraw = true;
         } else {
             // No conflict: silently reload from the new disk version.
             self.reload_buffer_from_disk(buf_idx);
+            self.needs_redraw = true;
         }
     }
 
@@ -813,7 +867,8 @@ impl Editor {
         let idx = self
             .layout
             .pane_buffer(self.active_pane)
-            .unwrap_or(self.active_buffer);
+            .unwrap_or(self.active_buffer)
+            .min(self.buffers.len().saturating_sub(1));
         &self.buffers[idx]
     }
 
@@ -821,7 +876,8 @@ impl Editor {
         let idx = self
             .layout
             .pane_buffer(self.active_pane)
-            .unwrap_or(self.active_buffer);
+            .unwrap_or(self.active_buffer)
+            .min(self.buffers.len().saturating_sub(1));
         &mut self.buffers[idx]
     }
 
@@ -830,6 +886,7 @@ impl Editor {
         self.layout
             .pane_buffer(self.active_pane)
             .unwrap_or(self.active_buffer)
+            .min(self.buffers.len().saturating_sub(1))
     }
 
     pub(super) fn config(&self) -> &Config {
@@ -919,6 +976,9 @@ impl Editor {
     /// Run the main editor loop.
     pub fn run(&mut self) -> Result<(), String> {
         self.resolve_layout();
+        if self.word_wrap_active {
+            self.apply_wrap_to_all_buffers();
+        }
         // Notify LSP for all initially opened buffers
         if self.lsp_manager.is_some() {
             for i in 0..self.buffers.len() {
@@ -936,6 +996,7 @@ impl Editor {
                 if !self.active_pane_is_terminal() {
                     self.adjust_viewport();
                 }
+                self.needs_redraw = true;
             }
 
             // 2. Drain PTY output
@@ -961,8 +1022,12 @@ impl Editor {
                 pty.reap();
             }
 
-            // 4. Render
-            self.render();
+            // 4. Render only when state has changed since the last frame.
+            if self.needs_redraw {
+                self.render();
+                crate::debug_log::key_render_done(true);
+                self.needs_redraw = false;
+            }
 
             // 5. Poll stdin + PTY fds
             let (stdin_ready, pty_ready) = self.poll_fds(50);
@@ -971,12 +1036,18 @@ impl Editor {
             for idx in &pty_ready {
                 self.drain_pty(*idx);
             }
+            if !pty_ready.is_empty() {
+                self.needs_redraw = true;
+            }
 
             // 7. Handle stdin if ready
             if stdin_ready {
                 let event = input::read_event(&self.terminal);
                 if event != Event::None {
+                    crate::debug_log::key_event_start(&event_label(&event));
                     self.handle_event(event);
+                    crate::debug_log::key_handle_done();
+                    self.needs_redraw = true;
                 }
             }
 
@@ -1093,6 +1164,7 @@ impl Editor {
             if n == 0 {
                 break;
             }
+            self.needs_redraw = true;
 
             // Feed to problem panel if this is the task terminal and a task is tracked.
             if self.terminal_idx == Some(idx) && self.problem_panel.source_cmd.is_some() {
@@ -1159,6 +1231,7 @@ impl Editor {
             let current_gen = mgr.diagnostics_generation();
             if current_gen != self.lsp_diag_gen {
                 self.lsp_diag_gen = current_gen;
+                self.needs_redraw = true;
 
                 let workspace_diags = mgr.all_diagnostics_owned();
                 crate::dlog!(
@@ -1230,15 +1303,18 @@ impl Editor {
             crate::dlog!("[lsp] completion result arrived: {} items", items.len());
             let (row, col) = self.cursor_screen_pos_for_lsp();
             self.completion_menu = Some(completion::CompletionMenu::new(items, row, col));
+            self.needs_redraw = true;
         }
         if let Some(text) = new_hover {
             let (row, col) = self.cursor_screen_pos_for_lsp();
             self.hover_popup = Some(hover::HoverPopup::new(&text, row, col, 60));
+            self.needs_redraw = true;
         }
         if let Some(locs) = new_definition
             && let Some(loc) = locs.into_iter().next()
         {
             self.lsp_navigate_to(loc);
+            self.needs_redraw = true;
         }
         // Apply all accumulated semantic token results — one per buffer URI.
         use crate::syntax::highlight;
@@ -1270,6 +1346,7 @@ impl Editor {
                                 }
                             })
                             .collect();
+                        self.needs_redraw = true;
                         break;
                     }
                 }
@@ -1294,6 +1371,7 @@ impl Editor {
                 format!("LSP '{}': server exited (code {})", lang, code)
             };
             self.set_message(&msg, MessageType::Error);
+            self.needs_redraw = true;
         }
     }
 
@@ -1343,6 +1421,9 @@ impl Editor {
         // Collect requests (releases borrow on plugin_manager)
         let requests = self.plugin_manager.as_mut().unwrap().drain_and_collect();
 
+        if !requests.is_empty() {
+            self.needs_redraw = true;
+        }
         for req in requests {
             match req {
                 plugin::PluginRequest::RegisterCommand { .. } => {
@@ -1793,6 +1874,7 @@ impl Editor {
                 let new_idx = self.buffers.len() - 1;
                 self.layout.set_pane_buffer(self.active_pane, new_idx);
                 self.active_buffer = new_idx;
+                self.apply_wrap_state_if_active(new_idx);
                 self.lsp_notify_open(new_idx);
             }
         }
@@ -1833,6 +1915,24 @@ impl Editor {
     // -----------------------------------------------------------------------
     // Task runner
     // -----------------------------------------------------------------------
+
+    /// Show a one-time hint when a file has a recognized extension but no grammar was found.
+    fn maybe_show_grammar_hint(&mut self, path: &Path) {
+        if self.grammar_hint_shown {
+            return;
+        }
+        let buf_idx = self.active_buffer_index();
+        if self.buffers[buf_idx].highlighter.is_some() {
+            return; // grammar loaded fine, no hint needed
+        }
+        if crate::syntax::highlight::detect_language(path, &self.config.languages).is_some() {
+            self.grammar_hint_shown = true;
+            self.set_message(
+                "No syntax grammar found — run 'zedit --install-grammars' or 'zedit --import publisher.name'",
+                MessageType::Info,
+            );
+        }
+    }
 
     /// Detect the language name for a file path using the config language table.
     fn detect_language_by_ext(&self, file_path: &str) -> Option<String> {
@@ -2298,6 +2398,7 @@ impl Editor {
                 let new_idx = self.buffers.len() - 1;
                 self.layout.set_pane_buffer(self.active_pane, new_idx);
                 self.active_buffer = new_idx;
+                self.apply_wrap_state_if_active(new_idx);
                 self.lsp_notify_open(new_idx);
             }
         }
@@ -2401,6 +2502,7 @@ impl Editor {
 
         self.bg_cargo_rx = None;
         self.problem_panel.feed_raw(&output);
+        self.needs_redraw = true;
         crate::dlog!(
             "[problems] background cargo check done, {} bytes parsed",
             output.len()
@@ -2525,6 +2627,7 @@ impl Editor {
                 let new_idx = self.buffers.len() - 1;
                 self.layout.set_pane_buffer(self.active_pane, new_idx);
                 self.active_buffer = new_idx;
+                self.apply_wrap_state_if_active(new_idx);
                 self.lsp_notify_open(new_idx);
             }
         }
@@ -3331,6 +3434,12 @@ impl Editor {
             EditorAction::CopyFilePath => self.copy_file_path(),
             EditorAction::CopyFilePathRelative => self.copy_file_path_relative(),
             EditorAction::FormatDocument => self.format_document(),
+            EditorAction::ImportExtension => {
+                self.start_prompt(
+                    "Extension (ID like 'haskell.haskell', URL, or .vsix path): ",
+                    PromptAction::ImportExtension,
+                );
+            }
         }
     }
 
@@ -3587,7 +3696,11 @@ impl Editor {
 
     /// Save the current session to disk.
     fn save_session(&self) {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Use $PWD (shell logical path) so symlinked entry points get their own
+        // session file, consistent with how load_session resolves the path.
+        let cwd = std::env::var("PWD")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         let mut buf_sessions = Vec::new();
         for bs in &self.buffers {
@@ -3649,6 +3762,7 @@ impl Editor {
             minimap_visible: self.minimap.visible,
             bottom_panel_open,
             bottom_tab,
+            word_wrap: self.word_wrap_active,
         };
 
         let _ = session::save_session(&sess);
@@ -3829,20 +3943,37 @@ impl Editor {
     // -----------------------------------------------------------------------
 
     fn toggle_word_wrap(&mut self) {
-        let buf_idx = self.active_buffer_index();
-        if self.buffers[buf_idx].wrap_map.is_some() {
-            // Disable wrap
-            self.buffers[buf_idx].wrap_map = None;
-            self.buffers[buf_idx].scroll_visual_offset = 0;
-            self.set_message("Word wrap off", MessageType::Info);
+        self.word_wrap_active = !self.word_wrap_active;
+        if self.word_wrap_active {
+            self.apply_wrap_to_all_buffers();
         } else {
-            // Enable wrap
-            let wrap_col = self.wrap_col_for_buffer(buf_idx);
-            let wm = wrap::WrapMap::new(&self.buffers[buf_idx].buffer, wrap_col);
-            self.buffers[buf_idx].wrap_map = Some(wm);
-            self.buffers[buf_idx].scroll_col = 0;
-            self.buffers[buf_idx].scroll_visual_offset = 0;
-            self.set_message("Word wrap on", MessageType::Info);
+            for i in 0..self.buffers.len() {
+                self.buffers[i].wrap_map = None;
+                self.buffers[i].scroll_visual_offset = 0;
+            }
+        }
+        let msg = if self.word_wrap_active { "Word wrap on" } else { "Word wrap off" };
+        self.set_message(msg, MessageType::Info);
+    }
+
+    /// Apply wrap to a single buffer if the global wrap state is active.
+    fn apply_wrap_state_if_active(&mut self, buf_idx: usize) {
+        if !self.word_wrap_active { return; }
+        let wrap_col = self.wrap_col_for_buffer(buf_idx);
+        let wm = wrap::WrapMap::new(&self.buffers[buf_idx].buffer, wrap_col);
+        self.buffers[buf_idx].wrap_map = Some(wm);
+        self.buffers[buf_idx].scroll_col = 0;
+        self.buffers[buf_idx].scroll_visual_offset = 0;
+    }
+
+    /// Create and enable wrap on ALL buffers (startup init / global toggle).
+    fn apply_wrap_to_all_buffers(&mut self) {
+        for i in 0..self.buffers.len() {
+            let wrap_col = self.wrap_col_for_buffer(i);
+            let wm = wrap::WrapMap::new(&self.buffers[i].buffer, wrap_col);
+            self.buffers[i].wrap_map = Some(wm);
+            self.buffers[i].scroll_col = 0;
+            self.buffers[i].scroll_visual_offset = 0;
         }
     }
 
@@ -4012,6 +4143,26 @@ impl Editor {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic helper — converts an Event to a short human-readable label.
+// Used by --log-key instrumentation in run().
+// ---------------------------------------------------------------------------
+
+fn event_label(e: &Event) -> String {
+    match e {
+        Event::Key(ke) => {
+            let mut s = format!("{:?}", ke.key);
+            if ke.ctrl  { s.push_str("+Ctrl");  }
+            if ke.alt   { s.push_str("+Alt");   }
+            if ke.shift { s.push_str("+Shift"); }
+            s
+        }
+        Event::Mouse(_) => "Mouse".into(),
+        Event::Paste(_) => "Paste".into(),
+        Event::None     => "None".into(),
     }
 }
 

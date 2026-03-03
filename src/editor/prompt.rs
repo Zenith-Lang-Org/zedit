@@ -16,6 +16,7 @@ pub(super) enum PromptAction {
     ReplaceWith(String),
     GoToLine,
     SaveAs,
+    ImportExtension,
 }
 
 pub(super) struct Prompt {
@@ -659,13 +660,17 @@ impl Editor {
                             && self.buffers[buf_idx].buffer.file_path().is_none();
                         if current_empty {
                             self.buffers[buf_idx] = bs;
+                            self.apply_wrap_state_if_active(buf_idx);
                         } else {
                             self.buffers.push(bs);
                             let new_idx = self.buffers.len() - 1;
                             self.layout.set_pane_buffer(self.active_pane, new_idx);
                             self.active_buffer = new_idx;
+                            self.apply_wrap_state_if_active(new_idx);
                         }
                         self.set_message(&format!("Opened: {}", display_name), MessageType::Info);
+                        // Hint when a recognized extension has no installed grammar.
+                        self.maybe_show_grammar_hint(path);
                         // Notify LSP about newly opened file
                         let notify_idx = self.active_buffer_index();
                         self.lsp_notify_open(notify_idx);
@@ -725,6 +730,22 @@ impl Editor {
                     self.set_message("Invalid line number", MessageType::Error);
                 }
             },
+            PromptAction::ImportExtension => {
+                let input = prompt.input.trim().to_string();
+                if input.is_empty() {
+                    return;
+                }
+                match crate::vsix_import::import_from_arg(&input) {
+                    Ok(id) => self.set_message(
+                        &format!("Extension '{}' installed — restart to activate", id),
+                        MessageType::Info,
+                    ),
+                    Err(e) => self.set_message(
+                        &format!("Import failed: {}", e),
+                        MessageType::Error,
+                    ),
+                }
+            }
             PromptAction::SaveAs => {
                 let path = Path::new(&prompt.input);
                 let buf_idx = self.active_buffer_index();

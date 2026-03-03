@@ -5,6 +5,13 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Zedit - modern console text editor with zero dependencies"
 
+[profile.release]
+opt-level = "z"          # optimize for size instead of speed
+lto = true               # link-time optimization (cross-crate dead-code removal)
+codegen-units = 1        # single codegen unit maximizes LTO effectiveness
+panic = "abort"          # drop unwinder (~100 KB saving)
+strip = "symbols"        # strip symbols automatically (replaces manual `strip`)
+
 [dependencies]
 # EXCEPTION TO ZERO-DEPS RULE (approved by project owner):
 # arboard provides native X11 (pure-Rust x11rb) and Wayland (smithay-clipboard)

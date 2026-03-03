@@ -58,6 +58,8 @@ pub(super) enum PaletteAction {
     // Terminal
     ToggleTerminal,
     NewTerminal,
+    // Import a VS Code extension
+    ImportExtension,
     // Plugin commands (command_id stored inline)
     PluginCommand(String),
 }
@@ -277,6 +279,12 @@ impl Palette {
                 "Terminal: New Terminal",
                 PaletteAction::NewTerminal,
                 Some(EditorAction::NewTerminal),
+            ),
+            // Extensions
+            (
+                "Extensions: Import VS Code Extension...",
+                PaletteAction::ImportExtension,
+                Some(EditorAction::ImportExtension),
             ),
         ];
 
@@ -643,6 +651,12 @@ impl Editor {
             }
             ToggleTerminal => self.toggle_terminal_panel(),
             NewTerminal => self.new_terminal(),
+            ImportExtension => {
+                self.start_prompt(
+                    "Extension (ID like 'haskell.haskell', URL, or .vsix path): ",
+                    PromptAction::ImportExtension,
+                );
+            }
             PluginCommand(cmd_id) => {
                 if let Some(ref mut mgr) = self.plugin_manager {
                     mgr.invoke_command(&cmd_id);

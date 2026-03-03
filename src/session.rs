@@ -34,15 +34,18 @@ pub struct Session {
     pub bottom_panel_open: bool,
     /// Which bottom tab was active: "terminal", "problems", or "diagnostics".
     pub bottom_tab: String,
+    /// Whether soft word wrap (Alt+Z) was active when the session was saved.
+    pub word_wrap: bool,
 }
 
 /// Get the session file path for a working directory.
-/// Uses FNV-1a hash of canonical path as filename.
+/// Uses FNV-1a hash of the logical path (NOT canonicalized) so that symlinked
+/// directories keep their own independent session.  Callers should pass the
+/// shell's `$PWD` value (logical path) rather than `getcwd()` (physical path)
+/// so that a symlinked entry point like `~/proj/docs/symlink` is treated as a
+/// distinct location from the symlink target.
 pub fn session_path(working_dir: &Path) -> PathBuf {
-    let canonical = working_dir
-        .canonicalize()
-        .unwrap_or_else(|_| working_dir.to_path_buf());
-    let hash = fnv1a(canonical.to_string_lossy().as_bytes());
+    let hash = fnv1a(working_dir.to_string_lossy().as_bytes());
     state_dir()
         .join("sessions")
         .join(format!("{:016x}.json", hash))
@@ -131,6 +134,7 @@ fn session_to_json(session: &Session) -> String {
             "bottom_tab".into(),
             JsonValue::String(session.bottom_tab.clone()),
         ),
+        ("word_wrap".into(), JsonValue::Bool(session.word_wrap)),
     ]);
 
     root.to_json_pretty(2)
@@ -140,6 +144,14 @@ fn parse_session(val: &JsonValue, working_dir: &Path) -> Option<Session> {
     let version = val.get("version")?.as_f64()? as u32;
     if version != 1 {
         return None;
+    }
+
+    // Validate that the saved working directory matches the requested one.
+    // This prevents stale or hash-colliding sessions from being silently loaded.
+    if let Some(saved_wd) = val.get("working_dir").and_then(|v| v.as_str()) {
+        if std::path::Path::new(saved_wd) != working_dir {
+            return None;
+        }
     }
 
     let active_buffer = val.get("active_buffer")?.as_f64()? as usize;
@@ -201,6 +213,10 @@ fn parse_session(val: &JsonValue, working_dir: &Path) -> Option<Session> {
         .get("bottom_tab")
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| "terminal".to_string());
+    let word_wrap = val
+        .get("word_wrap")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     Some(Session {
         version,
@@ -212,6 +228,7 @@ fn parse_session(val: &JsonValue, working_dir: &Path) -> Option<Session> {
         minimap_visible,
         bottom_panel_open,
         bottom_tab,
+        word_wrap,
     })
 }
 
@@ -284,6 +301,7 @@ mod tests {
             minimap_visible: true,
             bottom_panel_open: true,
             bottom_tab: "problems".to_string(),
+            word_wrap: true,
         };
 
         save_session(&session).unwrap();
@@ -305,6 +323,7 @@ mod tests {
         assert!(loaded.minimap_visible);
         assert!(loaded.bottom_panel_open);
         assert_eq!(loaded.bottom_tab, "problems");
+        assert!(loaded.word_wrap);
 
         // Cleanup
         delete_session(&dir);

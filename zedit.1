@@ -18,6 +18,9 @@ zedit \- modern console text editor
 .B zedit
 .B \-\-import
 .I file.vsix
+.br
+.B zedit
+.B \-\-install\-grammars
 .SH DESCRIPTION
 .B Zedit
 is a modern console text editor written in pure Rust
@@ -54,10 +57,22 @@ uninstalls it.
 .I <name>
 shows its metadata.
 .TP
-.BR \-\-import " " \fIfile.vsix\fR
-Import a VS Code extension package (.vsix) and install its grammar and theme
-assets into the user configuration directory. Only grammar and theme files are
-extracted; JavaScript code is ignored.
+.BR \-\-import " " \fIarg\fR
+Import a VS Code extension. The argument may be a publisher/name identifier
+(downloaded from Open VSX), a local
+.I .vsix
+file path, or a URL. Only grammar
+.RB ( .tmLanguage.json )
+and theme
+.RB ( .json )
+assets are extracted; JavaScript code is ignored.
+.TP
+.B \-\-install\-grammars
+Copy the bundled TextMate grammar files to
+.I ~/.config/zedit/grammars/
+so that syntax highlighting is available when the editor is run from any
+directory. Run this once after first installation. Existing user-modified
+grammars are not overwritten (modification time is checked).
 .SH KEYBINDINGS
 .SS File
 .TP
@@ -205,7 +220,8 @@ Toggle the file tree sidebar.
 .TP
 .B Ctrl+P
 Open the command palette (fuzzy\-searchable list of all editor actions and
-plugin commands).
+plugin commands, including
+.BR "Extensions: Import VS Code Extension\&..." ).
 .TP
 .B Alt+M
 Toggle the minimap (braille code overview on the right edge of the pane).
@@ -446,11 +462,30 @@ JSON, TOML, YAML, Markdown, Shell/Bash, HTML, CSS, XML, Zenith, Zymbol, Minilux.
 .PP
 Grammar files are loaded from disk at runtime in the following search order:
 .IP 1. 4
-.IR ~/.config/zedit/grammars/ " (user\-provided, highest priority)"
+.IR ~/.config/zedit/extensions/*/ " (installed extensions, highest priority)"
 .IP 2. 4
-.IR /usr/share/zedit/grammars/ " and " /usr/local/share/zedit/grammars/ " (system\-wide)"
+.IR ~/.config/zedit/grammars/ " (user\-provided grammars)"
 .IP 3. 4
+Directory containing the
+.B zedit
+executable (portable distributions with a
+.I grammars/
+sibling directory).
+.IP 4. 4
+.IR /usr/share/zedit/grammars/ " and " /usr/local/share/zedit/grammars/ " (system\-wide)"
+.IP 5. 4
 .IR grammars/ " in the current working directory (development / source tree)"
+.PP
+Run
+.B zedit \-\-install\-grammars
+once after installation to copy the bundled grammars to
+.IR ~/.config/zedit/grammars/ .
+If a file with a recognised extension is opened but no grammar file is found,
+a one\-time hint appears in the status bar:
+.PP
+.RS
+.I "No syntax grammar found \(em run \(aqzedit \-\-install\-grammars\(aq or \(aqzedit \-\-import publisher.name\(aq"
+.RE
 .PP
 Place any VS Code\-compatible
 .I .tmLanguage.json

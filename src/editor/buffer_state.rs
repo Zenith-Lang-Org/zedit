@@ -108,17 +108,33 @@ impl BufferState {
         theme_name: &str,
         languages: &[LanguageDef],
     ) -> Result<Self, String> {
+        crate::perf!("reading file: {} ({} lines)", path.display(), {
+            // quick line estimate without allocating — reported after Buffer::from_file
+            0usize
+        });
         let buffer = Buffer::from_file(path)?;
+        let line_count = buffer.line_count();
         let gutter_width = if line_numbers {
-            compute_gutter_width(buffer.line_count())
+            compute_gutter_width(line_count)
         } else {
             0
         };
+        crate::perf!(
+            "file loaded: {} ({} lines, {} bytes)",
+            path.display(),
+            line_count,
+            buffer.len()
+        );
         let highlighter = highlight::detect_language(path, languages).and_then(|lang| {
-            highlight::load_grammar(&lang, languages).map(|grammar| {
+            crate::perf!("loading grammar: {} for {}", lang, path.display());
+            let hl = highlight::load_grammar(&lang, languages).map(|grammar| {
                 let theme = highlight::load_theme(theme_name);
                 Highlighter::new(grammar, theme).with_lang(&lang)
-            })
+            });
+            if hl.is_some() {
+                crate::perf!("grammar ready: {} for {}", lang, path.display());
+            }
+            hl
         });
         let git_info = crate::git::GitInfo::from_file(path);
         let disk_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());

@@ -93,6 +93,18 @@ Copy the binary to any directory on your `$PATH`:
 cp target/release/zedit ~/.local/bin/zedit
 ```
 
+### First-time grammar setup
+
+After copying the binary, run once to install the bundled syntax grammars to your user configuration directory:
+
+```sh
+zedit --install-grammars
+```
+
+This copies all `.tmLanguage.json` files to `~/.config/zedit/grammars/`. You only need to run it once; on re-runs it skips grammars whose user copy is newer than the source.
+
+If zedit is running from the source tree (`cargo run`), grammars are loaded from `grammars/` automatically — no extra step needed.
+
 ### Other build commands
 
 ```sh
@@ -133,6 +145,7 @@ zedit --version        # Print version and exit
 4. Press `Ctrl+Z` to undo and `Ctrl+Y` to redo.
 5. Press `Ctrl+F` to open the find bar, type your search term, and use `F3`/`Shift+F3` to jump between matches.
 6. Press `Ctrl+Q` to quit. If there are unsaved changes, press `Ctrl+Q` a second time to confirm.
+7. **Long lines**: press `Alt+Z` to toggle soft word wrap so lines that exceed the window width flow visually onto the next row without inserting actual newlines. The setting can also be made permanent in `config.json` with `"word_wrap": true`.
 
 ### Working with multiple files
 
@@ -317,9 +330,9 @@ All default keybindings are listed below. Every binding can be remapped in the c
 | Key | Action |
 |-----|--------|
 | `F1` | Toggle the help overlay. |
-| `Alt+Z` | Toggle soft word wrap. |
+| `Alt+Z` | Toggle soft word wrap — long lines flow visually onto the next row without inserting newlines. |
 | `Ctrl+B` | Toggle the file tree sidebar. |
-| `Ctrl+P` | Open the command palette (fuzzy search for all commands). |
+| `Ctrl+P` | Open the command palette (fuzzy search for all commands, including "Import VS Code Extension…"). |
 | `Ctrl+T` | Toggle the integrated terminal panel. |
 | `Ctrl+Shift+T` | Open a new terminal tab in the terminal panel. |
 | `Alt+M` | Toggle the minimap. |
@@ -893,6 +906,7 @@ Key strings follow the format `[Ctrl+][Alt+][Shift+]<key>`. The modifiers are ca
 | `task_stop` | `Alt+F5` | Stop running task |
 | `toggle_problem_panel` | `F6` | Toggle problem panel |
 | `send_to_repl` | `Alt+Enter` | Send selection/line to REPL |
+| `import_extension` | *(none)* | Open the import-extension prompt (also in the command palette) |
 
 ---
 
@@ -960,11 +974,19 @@ To explicitly associate a grammar with specific extensions (or to override a bui
 
 ### Grammar search priority
 
-Grammars are loaded from disk at runtime in the following order:
+Grammars are loaded from disk at runtime in the following order (first match wins):
 
-1. `~/.config/zedit/grammars/` — user-installed grammars (highest priority).
-2. `/usr/share/zedit/grammars/` and `/usr/local/share/zedit/grammars/` — system-wide grammars.
-3. `grammars/` in the current working directory — development / source tree.
+1. `~/.config/zedit/extensions/*/` — grammars bundled inside installed extensions.
+2. `~/.config/zedit/grammars/` — user-installed grammars.
+3. `<directory containing the zedit binary>/grammars/` — portable distribution bundle (place a `grammars/` folder next to the `zedit` binary).
+4. `/usr/share/zedit/grammars/` and `/usr/local/share/zedit/grammars/` — system-wide grammars.
+5. `grammars/` in the current working directory — development / source tree.
+
+Run `zedit --install-grammars` once after installation to copy the bundled grammars to `~/.config/zedit/grammars/`. If zedit opens a file whose extension is recognised but no grammar file is found in any of the above paths, a one-time hint appears in the status bar:
+
+```
+No syntax grammar found — run 'zedit --install-grammars' or 'zedit --import publisher.name'
+```
 
 ### Themes
 
@@ -1144,13 +1166,42 @@ zedit --ext info    <name>    # show extension metadata
 
 Extensions are stored in `~/.config/zedit/extensions/`. Each extension is a subdirectory containing at least a `manifest.json`, and optionally grammar files and theme files.
 
-### Importing VS Code extensions
+### Importing VS Code extensions from the command line
 
 ```sh
-zedit --import my-extension.vsix
+zedit --import publisher.name          # download from Open VSX by ID
+zedit --import my-extension.vsix       # install from a local .vsix file
+zedit --import https://example.com/ext.vsix  # install from a URL
 ```
 
 zedit extracts the grammar (`.tmLanguage.json`) and theme (`.json`) assets from the `.vsix` archive and installs them into the user configuration directory. JavaScript code is ignored; only data files are imported.
+
+### Importing VS Code extensions from inside the editor
+
+You can import extensions without leaving the editor using the command palette:
+
+1. Press `Ctrl+P` to open the command palette.
+2. Type **Import** and select **Extensions: Import VS Code Extension…**.
+3. Enter the extension identifier (e.g., `haskell.haskell`), a local `.vsix` path, or a URL.
+4. zedit downloads and installs the grammar/theme assets. Restart to activate the new grammar.
+
+Alternatively, bind the action `import_extension` to a custom keybinding (see Section 17).
+
+### Grammar search and installation
+
+Grammar files (`.tmLanguage.json`) are loaded from disk at runtime in this priority order:
+
+1. `~/.config/zedit/extensions/*/` — grammars from installed extensions (highest priority).
+2. `~/.config/zedit/grammars/` — user-supplied grammars.
+3. `<directory of the zedit executable>/grammars/` — grammars bundled alongside the binary (portable distributions).
+4. `/usr/share/zedit/grammars/` and `/usr/local/share/zedit/grammars/` — system-wide grammars.
+5. `./grammars/` — development / source-tree (lowest priority).
+
+If you installed the binary without running `zedit --install-grammars` (see Section 2), the status bar will show a one-time hint when you open a file with a recognized extension but no matching grammar is found:
+
+```
+No syntax grammar found — run 'zedit --install-grammars' or 'zedit --import publisher.name'
+```
 
 ### Extension directory structure
 
@@ -1257,6 +1308,32 @@ The REPL session persists for the lifetime of the editor session — subsequent 
 ---
 
 ## 24. Troubleshooting
+
+### Syntax highlighting is not working / no grammar found
+
+If the status bar shows the message:
+
+```
+No syntax grammar found — run 'zedit --install-grammars' or 'zedit --import publisher.name'
+```
+
+This means zedit recognized the file's language by its extension but could not find the corresponding `.tmLanguage.json` grammar file on disk. Grammars are **not** embedded in the binary; they must be installed separately.
+
+**Quick fix:**
+```sh
+zedit --install-grammars   # copies bundled grammars to ~/.config/zedit/grammars/
+```
+
+**Alternative — install a grammar from Open VSX without leaving the editor:**
+1. Press `Ctrl+P` → type **Import** → select **Extensions: Import VS Code Extension…**
+2. Enter the publisher and extension name, e.g., `rust-lang.rust-analyzer`.
+
+**If syntax highlighting is working for some files but not others:**
+- Confirm the extension is listed in the language table in Section 18.
+- If you added a custom grammar, verify the `.tmLanguage.json` file is valid JSON and is placed in `~/.config/zedit/grammars/`.
+- Check that the `grammar` key in the language definition points to the correct filename (including the `.tmLanguage.json` extension).
+
+---
 
 ### zedit displays garbled characters or boxes
 

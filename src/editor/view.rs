@@ -135,8 +135,10 @@ impl Editor {
     }
 
     pub(super) fn render(&mut self) {
+        crate::debug_log::render_frame_start();
+
         // Update gutter width for active buffer
-        let buf_idx = self.active_buffer_index();
+        let buf_idx = self.active_buffer_index().min(self.buffers.len().saturating_sub(1));
         let has_git = self.buffers[buf_idx].git_info.is_some();
         self.buffers[buf_idx].gutter_width = if self.config.line_numbers {
             let base = compute_gutter_width(self.buffers[buf_idx].buffer.line_count());
@@ -149,6 +151,7 @@ impl Editor {
         if !self.scroll_only_mode {
             self.adjust_viewport();
         }
+        crate::render_cp!("viewport");
 
         let screen_width = self.screen.width();
         let screen_height = self.screen.height();
@@ -183,9 +186,11 @@ impl Editor {
                 &open_paths,
             );
         }
+        crate::render_cp!("sidebar");
 
         // Render tab bar starting after the sidebar (row 0, cols sidebar_w..screen_width)
         self.render_tab_bar(sidebar_w, screen_width);
+        crate::render_cp!("tabbar");
 
         // Render each pane
         let panes: Vec<_> = self.layout.panes().to_vec();
@@ -205,6 +210,7 @@ impl Editor {
                         };
                     }
                     self.render_editor_pane(pane_info.rect, bi, pane_info.id);
+                    crate::render_cp!(&format!("pane[{}]", bi));
                 }
                 crate::layout::PaneContent::Terminal(ti) => {
                     if self.terminal_panel_pane == Some(pane_info.id) {
@@ -230,6 +236,7 @@ impl Editor {
                     } else {
                         self.render_terminal_pane(pane_info.rect, ti, pane_info.id);
                     }
+                    crate::render_cp!("terminal");
                 }
             }
         }
@@ -472,8 +479,13 @@ impl Editor {
             self.last_title = new_title;
         }
 
+        crate::render_cp!("status");
+
         // Flush the screen
         self.screen.flush(&self.color_mode);
+        crate::render_cp!("flush");
+
+        crate::debug_log::render_frame_done(0);
 
         // Position the hardware cursor
         if let Some(ref palette) = self.palette {
@@ -926,7 +938,6 @@ impl Editor {
                         })
                     })
                 };
-
                 let semantic_spans = &self.buffers[buffer_idx].semantic_spans;
                 let mut char_col: u32 = 0;
 
@@ -960,8 +971,25 @@ impl Editor {
                     }
                 }
 
+                // Pre-filter diagnostics overlapping this line once, avoiding O(all_diags)
+                // scan per character. Collect as owned u32 tuples to sidestep borrow conflicts.
+                let line_diags: Vec<(u32, u32, u32, u32, crate::lsp::protocol::DiagnosticSeverity)> =
+                    self.buffers[buffer_idx]
+                        .diagnostics
+                        .iter()
+                        .filter(|(r, _, _)| {
+                            r.start.line as usize <= file_line
+                                && r.end.line as usize >= file_line
+                        })
+                        .map(|(r, sev, _)| {
+                            (r.start.line, r.start.character, r.end.line, r.end.character, *sev)
+                        })
+                        .collect();
+
                 let mut display_col: usize = 0;
                 let mut byte_offset_in_line: usize = 0;
+                // Monotonic cursor into sorted spans — avoids O(spans) scan per character.
+                let mut span_cursor: usize = 0;
                 for ch in line_text.chars() {
                     let cw = if ch == '\t' {
                         let tw = crate::unicode::TAB_WIDTH;
@@ -979,14 +1007,35 @@ impl Editor {
                             .iter()
                             .any(|(s, e)| char_byte >= *s && char_byte < *e);
                         let is_secondary_cursor = secondary_cursor_offsets.contains(&char_byte);
+
+                        // Advance span cursor past spans that ended before this byte offset.
+                        if let Some(s) = &spans {
+                            while span_cursor < s.len()
+                                && s[span_cursor].end <= byte_offset_in_line
+                            {
+                                span_cursor += 1;
+                            }
+                        }
+                        // Current span: the first span that could contain byte_offset_in_line.
+                        let cur_span = spans.as_ref().and_then(|s| {
+                            s.get(span_cursor)
+                                .filter(|sp| byte_offset_in_line >= sp.start)
+                        });
+
                         // String/comment regions: TextMate context is authoritative.
                         // Semantic tokens from the LSP must not override string/comment
                         // coloring because the LSP may emit tokens for identifiers inside
                         // string literals (e.g., 'HELLO' → LSP says HELLO is a variable).
-                        let is_str_or_comment = spans
-                            .as_ref()
-                            .map(|s| highlight::is_in_string_or_comment(s, byte_offset_in_line))
-                            .unwrap_or(false);
+                        let is_str_or_comment =
+                            cur_span.map(|sp| sp.is_string_or_comment).unwrap_or(false);
+
+                        // Inline span color lookup using cursor (O(1) amortised per char).
+                        let span_color = || {
+                            cur_span
+                                .filter(|sp| sp.fg != Color::Default)
+                                .map(|sp| (sp.fg, Color::Default, sp.bold))
+                                .unwrap_or((Color::Default, Color::Default, false))
+                        };
 
                         let (fg, bg, bold) = if is_selected {
                             (Color::Ansi(0), Color::Ansi(7), true)
@@ -1009,16 +1058,10 @@ impl Editor {
                                 ) {
                                     (sem_fg, Color::Default, sem_bold)
                                 } else {
-                                    match &spans {
-                                        Some(s) => highlight::lookup_style(s, byte_offset_in_line),
-                                        None => (Color::Default, Color::Default, false),
-                                    }
+                                    span_color()
                                 }
                             } else {
-                                match &spans {
-                                    Some(s) => highlight::lookup_style(s, byte_offset_in_line),
-                                    None => (Color::Default, Color::Default, false),
-                                }
+                                span_color()
                             }
                         } else if !is_str_or_comment {
                             // Semantic tokens override TextMate for Zenith multi-language accuracy
@@ -1029,32 +1072,22 @@ impl Editor {
                             ) {
                                 (sem_fg, Color::Default, sem_bold)
                             } else {
-                                match &spans {
-                                    Some(s) => highlight::lookup_style(s, byte_offset_in_line),
-                                    None => (Color::Default, Color::Default, false),
-                                }
+                                span_color()
                             }
                         } else {
-                            match &spans {
-                                Some(s) => highlight::lookup_style(s, byte_offset_in_line),
-                                None => (Color::Default, Color::Default, false),
-                            }
+                            span_color()
                         };
 
-                        // Check if this character is within a diagnostic range
-                        let diag_underline = self.buffers[buffer_idx]
-                            .diagnostics
-                            .iter()
-                            .find(|(r, _, _)| {
-                                let in_start = file_line > r.start.line as usize
-                                    || (file_line == r.start.line as usize
-                                        && byte_offset_in_line >= r.start.character as usize);
-                                let in_end = file_line < r.end.line as usize
-                                    || (file_line == r.end.line as usize
-                                        && byte_offset_in_line < r.end.character as usize);
-                                in_start && in_end
-                            })
-                            .map(|(_, sev, _)| *sev);
+                        // Per-char diagnostic underline using pre-filtered line_diags.
+                        let diag_underline = line_diags.iter().find(|(sl, sc, el, ec, _)| {
+                            let in_start = file_line > *sl as usize
+                                || (file_line == *sl as usize
+                                    && byte_offset_in_line >= *sc as usize);
+                            let in_end = file_line < *el as usize
+                                || (file_line == *el as usize
+                                    && byte_offset_in_line < *ec as usize);
+                            in_start && in_end
+                        }).map(|(_, _, _, _, sev)| *sev);
 
                         if ch == '\t' {
                             for i in 0..cw {
@@ -1363,7 +1396,6 @@ impl Editor {
                     })
                 })
             };
-
             let semantic_spans = &self.buffers[buffer_idx].semantic_spans;
             let mut char_col: u32 = 0;
 

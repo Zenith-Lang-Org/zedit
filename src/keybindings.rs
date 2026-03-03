@@ -79,6 +79,8 @@ pub enum EditorAction {
     CopyFilePathRelative,
     // Format the active document using an external formatter
     FormatDocument,
+    // Import a VS Code extension from the command palette
+    ImportExtension,
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +403,7 @@ fn action_name_to_action(name: &str) -> Option<EditorAction> {
         "copy_file_path" => Some(EditorAction::CopyFilePath),
         "copy_file_path_relative" => Some(EditorAction::CopyFilePathRelative),
         "format_document" => Some(EditorAction::FormatDocument),
+        "import_extension" => Some(EditorAction::ImportExtension),
         _ => None,
     }
 }

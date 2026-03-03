@@ -470,7 +470,9 @@ impl Editor {
         let id = self.next_free_untitled_id(None);
         bs.untitled_id = Some(id);
         self.buffers.push(bs);
-        self.buffers.len() - 1
+        let new_idx = self.buffers.len() - 1;
+        self.apply_wrap_state_if_active(new_idx);
+        new_idx
     }
 
     pub(super) fn new_buffer(&mut self) {
@@ -508,6 +510,7 @@ impl Editor {
             // Explicit assignment drops the old BufferState (VirtualRegion, head_lines,
             // line_states, undo history, etc.) before trim_heap() releases the pages.
             self.buffers[0] = bs;
+            self.apply_wrap_state_if_active(0);
             self.active_buffer = 0;
             self.layout.set_pane_buffer(self.active_pane, 0);
             self.set_message("Buffer closed", MessageType::Info);
@@ -524,6 +527,12 @@ impl Editor {
         self.layout.adjust_buffer_indices_after_remove(removed);
         self.resolve_layout();
         self.active_buffer = self.active_buffer_index();
+        // When the active pane is a terminal, active_buffer_index() falls back to
+        // self.active_buffer which may still point to the just-removed buffer index.
+        // Clamp to ensure it is always a valid index after the removal.
+        if self.active_buffer >= self.buffers.len() {
+            self.active_buffer = self.buffers.len().saturating_sub(1);
+        }
         self.set_message("Buffer closed", MessageType::Info);
         // The newly focused buffer may have been changed on disk while in the background.
         self.check_active_buffer_disk_change();
